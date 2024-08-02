@@ -1,0 +1,26 @@
+# Input directories
+input_dir_1/*
+input_dir_2/*
+
+# Rust build artifacts
+/target/
+
+# Cargo lock file (uncomment if you want to ignore it)
+# Cargo.lock
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*~
+*.bak
+
+# Log files
+*.log
