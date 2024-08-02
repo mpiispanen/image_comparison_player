@@ -1,6 +1,6 @@
 # Input directories
-input_1/*
-input_2/*
+/input1/
+/input2/
 
 # Rust build artifacts
 /target/
