@@ -24,6 +24,10 @@ impl Player {
 
     pub fn toggle_play_pause(&mut self) {
         self.is_playing = !self.is_playing;
+        debug!(
+            "Player is now {}",
+            if self.is_playing { "playing" } else { "paused" }
+        );
     }
 
     pub fn next_frame(&mut self) {
@@ -39,6 +43,11 @@ impl Player {
                     .unwrap_or(0)
             });
         self.current_time = next_time;
+        let total_duration = self.total_duration();
+        debug!(
+            "Current time: {} / {} ms",
+            self.current_time, total_duration
+        );
     }
 
     pub fn previous_frame(&mut self) {
@@ -50,6 +59,11 @@ impl Player {
             .map(|(_, duration)| *duration)
             .unwrap_or(0);
         self.current_time = prev_time;
+        let total_duration = self.total_duration();
+        debug!(
+            "Current time: {} / {} ms",
+            self.current_time, total_duration
+        );
     }
 
     pub fn advance_frame(&mut self, delta_time: u64) {
