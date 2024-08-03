@@ -1,4 +1,5 @@
 use ggez::graphics::Image;
+use log::debug;
 
 pub struct Player {
     images1: Vec<(Image, u64)>,
@@ -59,19 +60,22 @@ impl Player {
     }
 
     pub fn current_images(&self) -> (&Image, &Image) {
-        fn get_image<'a>(images: &'a [(Image, u64)], current_time: u64) -> &'a Image {
+        fn get_image<'a>(images: &'a [(Image, u64)], current_time: u64) -> (&'a Image, usize) {
             images
                 .iter()
+                .enumerate()
                 .rev()
-                .find(|(_, duration)| *duration <= current_time)
-                .map(|(image, _)| image)
-                .unwrap_or_else(|| &images[0].0)
+                .find(|(_, (_, duration))| *duration <= current_time)
+                .map(|(index, (image, _))| (image, index))
+                .unwrap_or_else(|| (&images[0].0, 0))
         }
 
-        (
-            get_image(&self.images1, self.current_time),
-            get_image(&self.images2, self.current_time),
-        )
+        let (image1, frame1) = get_image(&self.images1, self.current_time);
+        let (image2, frame2) = get_image(&self.images2, self.current_time);
+
+        debug!("Selected frames: image1 = {}, image2 = {}", frame1, frame2);
+
+        (image1, image2)
     }
 
     fn total_duration(&self) -> u64 {
