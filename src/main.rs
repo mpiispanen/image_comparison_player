@@ -45,6 +45,7 @@ fn main() -> GameResult {
     let (mut ctx, event_loop) = ContextBuilder::new("image_comparison_player", "Matias Piispanen")
         .add_resource_path(PathBuf::from("./resources"))
         .window_mode(ggez::conf::WindowMode::default().dimensions(1920.0, 1080.0))
+        .window_setup(ggez::conf::WindowSetup::default().title("Image Comparison Player"))
         .build()?;
     let app_state = app::AppState::new(&mut ctx, dir1.clone(), dir2.clone())?;
     event::run(ctx, event_loop, app_state)
