@@ -75,18 +75,15 @@ impl EventHandler for AppState {
         let x_offset = (window_width - scaled_width) / 2.0;
         let y_offset = (window_height - scaled_height) / 2.0;
 
-        let scaled_cursor_x = (self.cursor_x - x_offset) / scale;
+        let scaled_cursor_x =
+            ((self.cursor_x - x_offset) / scale).clamp(0.0, left_image.width() as f32);
+        let cursor_ratio = scaled_cursor_x / left_image.width() as f32;
 
         // Draw left image
         canvas.draw(
             left_image,
             DrawParam::default()
-                .src(graphics::Rect::new(
-                    0.0,
-                    0.0,
-                    scaled_cursor_x / left_image.width() as f32,
-                    1.0,
-                ))
+                .src(graphics::Rect::new(0.0, 0.0, cursor_ratio, 1.0))
                 .dest([x_offset, y_offset])
                 .scale([scale, scale]),
         );
@@ -96,36 +93,27 @@ impl EventHandler for AppState {
             right_image,
             DrawParam::default()
                 .src(graphics::Rect::new(
-                    scaled_cursor_x / right_image.width() as f32,
+                    cursor_ratio,
                     0.0,
-                    1.0 - scaled_cursor_x / right_image.width() as f32,
+                    1.0 - cursor_ratio,
                     1.0,
                 ))
                 .dest([x_offset + scaled_cursor_x * scale, y_offset])
                 .scale([scale, scale]),
         );
-
         canvas.finish(ctx)?;
         Ok(())
     }
 
     fn mouse_motion_event(
         &mut self,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         x: f32,
         _y: f32,
         _dx: f32,
         _dy: f32,
     ) -> GameResult {
-        let (window_width, window_height) = ctx.gfx.drawable_size();
-        let (left_image, _) = self.player.current_images();
-        let scale_x = window_width / left_image.width() as f32;
-        let scale_y = window_height / left_image.height() as f32;
-        let scale = scale_x.min(scale_y);
-        let scaled_width = left_image.width() as f32 * scale;
-        let x_offset = (window_width - scaled_width) / 2.0;
-
-        self.cursor_x = x.clamp(x_offset, x_offset + scaled_width);
+        self.cursor_x = x;
         Ok(())
     }
 
