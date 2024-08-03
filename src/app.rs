@@ -2,6 +2,7 @@ use crate::image_loader;
 use crate::player::Player;
 use ggez::event::EventHandler;
 use ggez::graphics::{self, DrawParam};
+use ggez::input::keyboard::{KeyCode, KeyMods};
 use ggez::input::mouse::MouseButton;
 use ggez::{Context, GameResult};
 use log::{debug, error, info};
@@ -31,6 +32,27 @@ impl AppState {
             cursor_x: ctx.gfx.drawable_size().0 / 2.0,
             last_update: Instant::now(),
         })
+    }
+
+    pub fn handle_input(&mut self, keycode: KeyCode) {
+        match keycode {
+            KeyCode::Space => {
+                self.player.toggle_play_pause();
+                debug!(
+                    "Toggled play/pause. Is playing: {}",
+                    self.player.is_playing()
+                );
+            }
+            KeyCode::Right => {
+                self.player.next_frame();
+                debug!("Moved to next frame");
+            }
+            KeyCode::Left => {
+                self.player.previous_frame();
+                debug!("Moved to previous frame");
+            }
+            _ => {}
+        }
     }
 }
 
@@ -129,6 +151,18 @@ impl EventHandler for AppState {
             MouseButton::Right => self.player.next_frame(),
             MouseButton::Middle => self.player.previous_frame(),
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn key_down_event(
+        &mut self,
+        _ctx: &mut Context,
+        input: ggez::input::keyboard::KeyInput,
+        _repeated: bool,
+    ) -> GameResult {
+        if let Some(keycode) = input.keycode {
+            self.handle_input(keycode);
         }
         Ok(())
     }
