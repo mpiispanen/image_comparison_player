@@ -1,6 +1,5 @@
-# Input directories
-/input1/
-/input2/
+# Resources directory
+/resources/
 
 # Rust build artifacts
 /target/

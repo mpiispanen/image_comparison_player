@@ -1,0 +1,18 @@
+[package]
+name = "image_comparison_player"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ggez = "0.9.3"
+clap = { version = "4.3", features = ["derive"] }
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.10.0"
+rayon = "1.7"
+futures = "0.3"
+tokio = { version = "1.28", features = ["full"] }
+
+[[bin]]
+name = "image_comparison_player"
+path = "src/main.rs"
