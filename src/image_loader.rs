@@ -1,74 +1,45 @@
 use anyhow::{Context as _, Result};
-use ggez::graphics::Image;
 use ggez::Context;
 use log::{debug, error, info};
-use std::io::Read;
-use std::path::Path;
+use std::io::{BufRead, BufReader};
 
-pub fn load_images(ctx: &mut Context, dir: &str) -> Result<Vec<(Image, u64)>> {
-    info!("Loading images from directory: {}", dir);
-    let path = Path::new(dir);
-    let ffmpeg_input = path.join("input.txt");
+pub fn load_image_paths(ctx: &mut Context, dir: &str) -> Result<Vec<(String, u64)>> {
+    info!("Loading image paths from directory: {}", dir);
+    let ffmpeg_input = format!("{}/input.txt", dir);
 
-    debug!("Attempting to read file at: {:?}", ffmpeg_input);
+    debug!("Attempting to read file at: {}", ffmpeg_input);
     debug!("Current working directory: {:?}", std::env::current_dir()?);
 
-    let mut f = ctx.fs.open(&ffmpeg_input)?;
-    let mut input_content = String::new();
-    f.read_to_string(&mut input_content)?;
-
-    let lines: Vec<&str> = input_content.lines().collect();
-
+    let file = ctx
+        .fs
+        .open(&ffmpeg_input)
+        .context("Failed to open input file")?;
+    let reader = BufReader::new(file);
     let mut images = Vec::new();
-    for (index, chunk) in lines.chunks(2).enumerate() {
-        if chunk.len() == 2 {
-            let file_path = chunk[0].trim_start_matches("file '").trim_end_matches("'");
-            let duration = chunk[1]
-                .trim_start_matches("duration ")
-                .trim_end_matches("us")
-                .parse::<u64>()
-                .with_context(|| {
-                    error!("Failed to parse duration '{}' at line {}", chunk[1], index * 2 + 2);
-                    format!("Failed to parse duration '{}' at line {}. Ensure the duration is a valid unsigned integer.", chunk[1], index * 2 + 2)
-                })?;
+    let mut lines = reader.lines();
 
-            let relative_to_root = "resources".to_string() + file_path;
-            let relative_to_root_file = Path::new(&relative_to_root);
-            let image = {
-                let mut file = ctx.fs.open(&file_path)?;
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)?;
-                Image::from_bytes(ctx, &bytes)
-                    .with_context(|| {
-                        let metadata = std::fs::metadata(&relative_to_root_file);
-                        let exists = relative_to_root_file.exists();
-                        let permissions = metadata.as_ref().map(|m| m.permissions());
-                        let error_msg = format!(
-                            "Failed to load image at {:?}. File exists: {}, Metadata: {:?}, Permissions: {:?}. Error: {}",
-                            relative_to_root, exists, metadata, permissions,
-                            match Image::from_bytes(ctx, &bytes) {
-                                Ok(_) => "No error (unexpected)".to_string(),
-                                Err(e) => e.to_string(),
-                            }
-                        );
-                        log::error!("{}", error_msg);
-                        error_msg
-                    })?
-            };
+    while let (Some(Ok(file_path)), Some(Ok(duration_str))) = (lines.next(), lines.next()) {
+        let file_path = file_path.trim_start_matches("file '").trim_end_matches("'");
+        let duration = duration_str
+            .trim_start_matches("duration ")
+            .trim_end_matches("us")
+            .parse::<u64>()
+            .with_context(|| format!("Failed to parse duration '{}'", duration_str))?;
 
-            debug!("Loaded image: {:?} with duration: {}", file_path, duration);
-            images.push((image, duration));
-        } else {
-            error!("Invalid input format at line {}", index * 2 + 1);
-            return Err(anyhow::anyhow!("Invalid input format at line {}. Expected file path and duration, but found incomplete data.", index * 2 + 1));
-        }
+        debug!(
+            "Loaded image path: {:?} with duration: {}",
+            file_path, duration
+        );
+        images.push((file_path.to_string(), duration));
     }
 
     if images.is_empty() {
-        error!("No valid images were loaded from the input file");
-        return Err(anyhow::anyhow!("No valid images were loaded from the input file. Ensure the input file is not empty and contains valid data."));
+        error!("No valid image paths were loaded from the input file");
+        return Err(anyhow::anyhow!(
+            "No valid image paths were loaded from the input file"
+        ));
     }
 
-    info!("Successfully loaded {} images", images.len());
+    info!("Successfully loaded {} image paths", images.len());
     Ok(images)
 }

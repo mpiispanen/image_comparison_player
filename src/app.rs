@@ -2,7 +2,7 @@ use crate::image_loader;
 use crate::player::Player;
 use ggez::event::EventHandler;
 use ggez::graphics::{self, DrawParam};
-use ggez::input::keyboard::{KeyCode, KeyMods};
+use ggez::input::keyboard::KeyCode;
 use ggez::input::mouse::MouseButton;
 use ggez::{Context, GameResult};
 use log::{debug, error, info};
@@ -17,11 +17,11 @@ pub struct AppState {
 impl AppState {
     pub fn new(ctx: &mut Context, dir1: String, dir2: String) -> GameResult<Self> {
         info!("Initializing AppState");
-        let images1 = image_loader::load_images(ctx, &dir1).map_err(|e| {
+        let images1 = image_loader::load_image_paths(ctx, &dir1).map_err(|e| {
             error!("Error loading images from dir1: {}", e);
             AppError(e)
         })?;
-        let images2 = image_loader::load_images(ctx, &dir2).map_err(|e| {
+        let images2 = image_loader::load_image_paths(ctx, &dir2).map_err(|e| {
             error!("Error loading images from dir2: {}", e);
             AppError(e)
         })?;
@@ -85,7 +85,7 @@ impl EventHandler for AppState {
 
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
         let mut canvas = graphics::Canvas::from_frame(ctx, None);
-        let (left_image, right_image) = self.player.current_images();
+        let (left_image, right_image) = self.player.current_images(ctx);
 
         let (window_width, window_height) = ctx.gfx.drawable_size();
         let scale_x = window_width / left_image.width() as f32;
