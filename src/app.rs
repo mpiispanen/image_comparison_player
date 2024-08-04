@@ -77,7 +77,7 @@ impl From<AppError> for ggez::GameError {
 }
 
 impl EventHandler for AppState {
-    fn update(&mut self, _ctx: &mut Context) -> GameResult {
+    fn update(&mut self, ctx: &mut Context) -> GameResult {
         let now = Instant::now();
         let delta = now.duration_since(self.last_update);
         self.last_update = now;
@@ -86,6 +86,8 @@ impl EventHandler for AppState {
             self.player.advance_frame(delta.as_micros() as u64);
             debug!("Advanced frame, delta: {:?}", delta);
         }
+
+        self.player.update(ctx);
         Ok(())
     }
 

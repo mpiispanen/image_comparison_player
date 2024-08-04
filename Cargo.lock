@@ -1297,6 +1297,7 @@ dependencies = [
  "ggez",
  "image",
  "log",
+ "parking_lot",
  "rayon",
  "tokio",
 ]
