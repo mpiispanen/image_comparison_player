@@ -3,7 +3,7 @@ use ggez::Context;
 use log::{debug, error, info};
 use std::io::{BufRead, BufReader};
 
-pub fn load_image_paths(ctx: &mut Context, dir: &str) -> Result<Vec<(String, u64)>> {
+pub fn load_image_paths(ctx: &mut Context, dir: &str) -> Result<(Vec<(String, u64)>, usize)> {
     info!("Loading image paths from directory: {}", dir);
     let ffmpeg_input = format!("{}/input.txt", dir);
 
@@ -33,13 +33,15 @@ pub fn load_image_paths(ctx: &mut Context, dir: &str) -> Result<Vec<(String, u64
         images.push((file_path.to_string(), duration));
     }
 
-    if images.is_empty() {
+    let frame_count = images.len();
+
+    if frame_count == 0 {
         error!("No valid image paths were loaded from the input file");
         return Err(anyhow::anyhow!(
             "No valid image paths were loaded from the input file"
         ));
     }
 
-    info!("Successfully loaded {} image paths", images.len());
-    Ok(images)
+    info!("Successfully loaded {} image paths", frame_count);
+    Ok((images, frame_count))
 }
