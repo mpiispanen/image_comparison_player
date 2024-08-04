@@ -1,7 +1,7 @@
 use ggez::graphics::Image;
 use image;
 use log::{debug, warn};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -17,7 +17,12 @@ pub struct Player {
     current_time: u64,
     is_playing: bool,
     last_update: Instant,
-    preload_sender: std::sync::mpsc::Sender<(String, usize, Arc<Mutex<VecDeque<(usize, Image)>>>)>,
+    preload_sender: std::sync::mpsc::Sender<(
+        String,
+        usize,
+        Arc<Mutex<VecDeque<(usize, Image)>>>,
+        Arc<Mutex<HashSet<usize>>>,
+    )>,
     preload_receiver: std::sync::mpsc::Receiver<(
         usize,
         Vec<u8>,
@@ -25,6 +30,8 @@ pub struct Player {
         u32,
         Arc<Mutex<VecDeque<(usize, Image)>>>,
     )>,
+    ongoing_preloads1: Arc<Mutex<HashSet<usize>>>,
+    ongoing_preloads2: Arc<Mutex<HashSet<usize>>>,
 }
 
 impl Player {
@@ -47,6 +54,8 @@ impl Player {
             last_update: Instant::now(),
             preload_sender: sender,
             preload_receiver: load_receiver,
+            ongoing_preloads1: Arc::new(Mutex::new(HashSet::new())),
+            ongoing_preloads2: Arc::new(Mutex::new(HashSet::new())),
         };
 
         player.start_preload_thread(receiver, load_sender);
@@ -55,7 +64,12 @@ impl Player {
 
     fn start_preload_thread(
         &self,
-        receiver: std::sync::mpsc::Receiver<(String, usize, Arc<Mutex<VecDeque<(usize, Image)>>>)>,
+        receiver: std::sync::mpsc::Receiver<(
+            String,
+            usize,
+            Arc<Mutex<VecDeque<(usize, Image)>>>,
+            Arc<Mutex<HashSet<usize>>>,
+        )>,
         sender: std::sync::mpsc::Sender<(
             usize,
             Vec<u8>,
@@ -65,16 +79,17 @@ impl Player {
         )>,
     ) {
         thread::spawn(move || {
-            while let Ok((path, index, cache)) = receiver.recv() {
+            while let Ok((path, index, cache, ongoing)) = receiver.recv() {
                 if let Ok(img) = image::open(&path) {
                     let rgba = img.to_rgba8();
                     let width = rgba.width();
                     let height = rgba.height();
                     let rgba_vec = rgba.into_raw();
                     sender
-                        .send((index, rgba_vec, width, height, cache))
+                        .send((index, rgba_vec, width, height, cache.clone()))
                         .unwrap();
                 }
+                ongoing.lock().unwrap().remove(&index);
             }
         });
     }
@@ -141,27 +156,44 @@ impl Player {
     }
 
     fn trigger_preload(&self, index1: usize, index2: usize) {
+        let mut cache1 = self.image_cache1.lock().unwrap();
+        let mut cache2 = self.image_cache2.lock().unwrap();
+        let mut ongoing1 = self.ongoing_preloads1.lock().unwrap();
+        let mut ongoing2 = self.ongoing_preloads2.lock().unwrap();
+
         for i in 1..=PRELOAD_AHEAD {
             let preload_index1 = (index1 + i) % self.image_data1.len();
             let preload_index2 = (index2 + i) % self.image_data2.len();
 
-            let (path1, _, _) = &self.image_data1[preload_index1];
-            let (path2, _, _) = &self.image_data2[preload_index2];
+            if !cache1.iter().any(|(i, _)| *i == preload_index1)
+                && !ongoing1.contains(&preload_index1)
+            {
+                let (path1, _, _) = &self.image_data1[preload_index1];
+                self.preload_sender
+                    .send((
+                        path1.clone(),
+                        preload_index1,
+                        Arc::clone(&self.image_cache1),
+                        Arc::clone(&self.ongoing_preloads1),
+                    ))
+                    .unwrap();
+                ongoing1.insert(preload_index1);
+            }
 
-            self.preload_sender
-                .send((
-                    path1.clone(),
-                    preload_index1,
-                    Arc::clone(&self.image_cache1),
-                ))
-                .unwrap();
-            self.preload_sender
-                .send((
-                    path2.clone(),
-                    preload_index2,
-                    Arc::clone(&self.image_cache2),
-                ))
-                .unwrap();
+            if !cache2.iter().any(|(i, _)| *i == preload_index2)
+                && !ongoing2.contains(&preload_index2)
+            {
+                let (path2, _, _) = &self.image_data2[preload_index2];
+                self.preload_sender
+                    .send((
+                        path2.clone(),
+                        preload_index2,
+                        Arc::clone(&self.image_cache2),
+                        Arc::clone(&self.ongoing_preloads2),
+                    ))
+                    .unwrap();
+                ongoing2.insert(preload_index2);
+            }
         }
     }
 
