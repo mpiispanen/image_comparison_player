@@ -15,7 +15,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(ctx: &mut Context, dir1: String, dir2: String) -> GameResult<Self> {
+    pub fn new(
+        ctx: &mut Context,
+        dir1: String,
+        dir2: String,
+        cache_size: usize,
+        preload_ahead: usize,
+    ) -> GameResult<Self> {
         info!("Initializing AppState");
         let images1 = image_loader::load_image_paths(ctx, &dir1).map_err(|e| {
             error!("Error loading images from dir1: {}", e);
@@ -25,7 +31,7 @@ impl AppState {
             error!("Error loading images from dir2: {}", e);
             AppError(e)
         })?;
-        let player = Player::new(images1, images2);
+        let player = Player::new(images1, images2, cache_size, preload_ahead);
         info!("AppState initialized successfully");
         Ok(Self {
             player,

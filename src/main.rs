@@ -41,11 +41,37 @@ fn main() -> GameResult {
                 .help("Window size in format WIDTHxHEIGHT (e.g. 1920x1080)")
                 .default_value("1920x1080"),
         )
+        .arg(
+            Arg::new("cache_size")
+                .long("cache-size")
+                .action(ArgAction::Set)
+                .value_name("SIZE")
+                .help("Size of the image cache")
+                .default_value("50"),
+        )
+        .arg(
+            Arg::new("preload_ahead")
+                .long("preload-ahead")
+                .action(ArgAction::Set)
+                .value_name("COUNT")
+                .help("Number of images to preload ahead")
+                .default_value("25"),
+        )
         .get_matches();
 
     let dir1 = matches.get_one::<String>("dir1").unwrap();
     let dir2 = matches.get_one::<String>("dir2").unwrap();
     let window_size = matches.get_one::<String>("window_size").unwrap();
+    let cache_size = matches
+        .get_one::<String>("cache_size")
+        .unwrap()
+        .parse()
+        .unwrap_or(50);
+    let preload_ahead = matches
+        .get_one::<String>("preload_ahead")
+        .unwrap()
+        .parse()
+        .unwrap_or(25);
 
     let (width, height) = parse_window_size(window_size).map_err(|e| {
         error!("Failed to parse window size: {}", e);
@@ -62,7 +88,13 @@ fn main() -> GameResult {
         .window_mode(ggez::conf::WindowMode::default().dimensions(width, height))
         .window_setup(ggez::conf::WindowSetup::default().title("Image Comparison Player"))
         .build()?;
-    let app_state = app::AppState::new(&mut ctx, dir1.clone(), dir2.clone())?;
+    let app_state = app::AppState::new(
+        &mut ctx,
+        dir1.clone(),
+        dir2.clone(),
+        cache_size,
+        preload_ahead,
+    )?;
     event::run(ctx, event_loop, app_state)
 }
 

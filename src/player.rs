@@ -6,9 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-const CACHE_SIZE: usize = 20;
-const PRELOAD_AHEAD: usize = 5;
-
 pub struct Player {
     image_data1: Vec<(String, u64, u64)>,
     image_data2: Vec<(String, u64, u64)>,
@@ -32,10 +29,17 @@ pub struct Player {
     )>,
     ongoing_preloads1: Arc<Mutex<HashSet<usize>>>,
     ongoing_preloads2: Arc<Mutex<HashSet<usize>>>,
+    cache_size: usize,
+    preload_ahead: usize,
 }
 
 impl Player {
-    pub fn new(images1: Vec<(String, u64)>, images2: Vec<(String, u64)>) -> Self {
+    pub fn new(
+        images1: Vec<(String, u64)>,
+        images2: Vec<(String, u64)>,
+        cache_size: usize,
+        preload_ahead: usize,
+    ) -> Self {
         let image_data1 = Self::accumulate_durations(images1);
         let image_data2 = Self::accumulate_durations(images2);
         let image_cache1 = Arc::new(Mutex::new(VecDeque::new()));
@@ -56,6 +60,8 @@ impl Player {
             preload_receiver: load_receiver,
             ongoing_preloads1: Arc::new(Mutex::new(HashSet::new())),
             ongoing_preloads2: Arc::new(Mutex::new(HashSet::new())),
+            cache_size,
+            preload_ahead,
         };
 
         player.start_preload_thread(receiver, load_sender);
@@ -105,7 +111,7 @@ impl Player {
                     width,
                     height,
                 );
-                if cache.len() >= CACHE_SIZE {
+                if cache.len() >= self.cache_size {
                     cache.pop_back();
                 }
                 cache.push_front((index, image));
@@ -117,8 +123,20 @@ impl Player {
         let index1 = self.get_current_index(&self.image_data1);
         let index2 = self.get_current_index(&self.image_data2);
 
-        let image1 = Self::get_or_load_image(ctx, &self.image_data1, index1, &self.image_cache1);
-        let image2 = Self::get_or_load_image(ctx, &self.image_data2, index2, &self.image_cache2);
+        let image1 = Self::get_or_load_image(
+            ctx,
+            &self.image_data1,
+            index1,
+            &self.image_cache1,
+            self.cache_size,
+        );
+        let image2 = Self::get_or_load_image(
+            ctx,
+            &self.image_data2,
+            index2,
+            &self.image_cache2,
+            self.cache_size,
+        );
 
         self.trigger_preload(index1, index2);
 
@@ -130,6 +148,7 @@ impl Player {
         image_data: &[(String, u64, u64)],
         index: usize,
         cache: &Arc<Mutex<VecDeque<(usize, Image)>>>,
+        cache_size: usize,
     ) -> Arc<Image> {
         let mut cache = cache.lock().unwrap();
         if let Some(pos) = cache.iter().position(|(i, _)| *i == index) {
@@ -140,7 +159,7 @@ impl Player {
             let (path, _, _) = &image_data[index];
             match Image::from_path(ctx, path) {
                 Ok(image) => {
-                    if cache.len() >= CACHE_SIZE {
+                    if cache.len() >= cache_size {
                         cache.pop_back();
                     }
                     let arc_image = Arc::new(image.clone());
@@ -161,7 +180,7 @@ impl Player {
         let mut ongoing1 = self.ongoing_preloads1.lock().unwrap();
         let mut ongoing2 = self.ongoing_preloads2.lock().unwrap();
 
-        for i in 1..=PRELOAD_AHEAD {
+        for i in 1..=self.preload_ahead {
             let preload_index1 = (index1 + i) % self.image_data1.len();
             let preload_index2 = (index2 + i) % self.image_data2.len();
 
