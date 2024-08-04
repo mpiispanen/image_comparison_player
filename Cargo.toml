@@ -12,6 +12,7 @@ env_logger = "0.10.0"
 rayon = "1.7"
 futures = "0.3"
 tokio = { version = "1.28", features = ["full"] }
+image = "0.24.7"
 
 [[bin]]
 name = "image_comparison_player"

@@ -103,7 +103,7 @@ impl EventHandler for AppState {
 
         // Draw left image
         canvas.draw(
-            left_image,
+            &*left_image,
             DrawParam::default()
                 .src(graphics::Rect::new(0.0, 0.0, cursor_ratio, 1.0))
                 .dest([x_offset, y_offset])
@@ -112,7 +112,7 @@ impl EventHandler for AppState {
 
         // Draw right image
         canvas.draw(
-            right_image,
+            &*right_image,
             DrawParam::default()
                 .src(graphics::Rect::new(
                     cursor_ratio,
