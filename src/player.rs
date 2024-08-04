@@ -36,6 +36,8 @@ pub struct Player {
     preload_ahead: usize,
     frame_count1: usize,
     frame_count2: usize,
+    last_index1: usize,
+    last_index2: usize,
 }
 
 impl Player {
@@ -82,6 +84,8 @@ impl Player {
             preload_ahead,
             frame_count1,
             frame_count2,
+            last_index1: usize::MAX,
+            last_index2: usize::MAX,
         };
 
         player.start_preload_thread(receiver, load_sender);
@@ -166,20 +170,43 @@ impl Player {
 
         debug!("Current indices: {} {}", index1, index2);
 
-        let image1 = Self::get_or_load_image(
-            ctx,
-            &self.image_data1,
-            index1,
-            &mut self.image_cache1,
-            &mut self.cache_order1,
-        );
-        let image2 = Self::get_or_load_image(
-            ctx,
-            &self.image_data2,
-            index2,
-            &mut self.image_cache2,
-            &mut self.cache_order2,
-        );
+        let image1 = if index1 != self.last_index1 {
+            self.last_index1 = index1;
+            Self::get_or_load_image(
+                ctx,
+                &self.image_data1,
+                index1,
+                &mut self.image_cache1,
+                &mut self.cache_order1,
+            )
+        } else {
+            self.image_cache1
+                .get(&index1)
+                .unwrap()
+                .lock()
+                .as_ref()
+                .unwrap()
+                .clone()
+        };
+
+        let image2 = if index2 != self.last_index2 {
+            self.last_index2 = index2;
+            Self::get_or_load_image(
+                ctx,
+                &self.image_data2,
+                index2,
+                &mut self.image_cache2,
+                &mut self.cache_order2,
+            )
+        } else {
+            self.image_cache2
+                .get(&index2)
+                .unwrap()
+                .lock()
+                .as_ref()
+                .unwrap()
+                .clone()
+        };
 
         self.trigger_preload(index1, index2);
 
