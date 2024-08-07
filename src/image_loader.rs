@@ -1,10 +1,9 @@
 use anyhow::{Context as _, Result};
-use log::{debug, error, info};
+use log::{debug, info};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
 
-pub fn load_image_paths(dir: &str) -> Result<(Vec<(String, u64)>, usize)> {
+pub fn load_image_paths(dir: &str) -> Result<(Vec<(String, u64, u64)>, usize)> {
     info!("Loading image paths from directory: {}", dir);
     let absolute_dir = std::fs::canonicalize(dir)?;
     let ffmpeg_input = absolute_dir.join("input.txt");
@@ -26,7 +25,15 @@ pub fn load_image_paths(dir: &str) -> Result<(Vec<(String, u64)>, usize)> {
             .with_context(|| format!("Failed to parse duration '{}'", duration_str))?;
 
         let full_path = absolute_dir.join(file_path);
-        images.push((full_path.to_string_lossy().into_owned(), duration));
+        let file_size = std::fs::metadata(&full_path)
+            .with_context(|| format!("Failed to get metadata for file '{}'", full_path.display()))?
+            .len();
+
+        images.push((
+            full_path.to_string_lossy().into_owned(),
+            duration,
+            file_size,
+        ));
     }
 
     let frame_count = images.len();

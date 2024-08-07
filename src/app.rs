@@ -1,8 +1,7 @@
 use crate::image_loader;
 use crate::player::Player;
-use bytemuck;
-use log::{debug, error, info};
-use std::sync::Arc;
+use log::{debug, info};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -14,6 +13,9 @@ struct UniformData {
     image1_size: [f32; 2],
     image2_size: [f32; 2],
 }
+
+type TextureLoadRequest = (String, usize);
+type TextureLoadResponse = (usize, Arc<wgpu::Texture>);
 
 pub struct AppState {
     surface: wgpu::Surface,
@@ -29,8 +31,10 @@ pub struct AppState {
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group_layout: wgpu::BindGroupLayout,
     vertex_buffer: wgpu::Buffer,
-    left_texture: Arc<wgpu::Texture>,
-    right_texture: Arc<wgpu::Texture>,
+    left_texture: Arc<RwLock<wgpu::Texture>>,
+    right_texture: Arc<RwLock<wgpu::Texture>>,
+    texture_load_sender: std::sync::mpsc::Sender<TextureLoadRequest>,
+    texture_load_receiver: std::sync::mpsc::Receiver<TextureLoadResponse>,
 }
 
 impl AppState {
@@ -218,25 +222,42 @@ impl AppState {
             multiview: None,
         });
 
-        let (images1, _) = image_loader::load_image_paths(&dir1.to_str().unwrap())?;
-        let (images2, _) = image_loader::load_image_paths(&dir2.to_str().unwrap())?;
+        let (images1, image_len1) = image_loader::load_image_paths(&dir1.to_str().unwrap())?;
+        let (images2, image_len2) = image_loader::load_image_paths(&dir2.to_str().unwrap())?;
         debug!(
             "Loaded {} images from dir1 and {} images from dir2",
-            images1.len(),
-            images2.len()
+            image_len1, image_len2
         );
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let image_len1 = images1.len();
-        let image_len2 = images2.len();
-        let mut player = Player::new(
-            (images1, image_len1),
-            (images2, image_len2),
+        let (texture_load_sender, texture_load_receiver) =
+            std::sync::mpsc::channel::<TextureLoadRequest>();
+        let (texture_ready_sender, texture_ready_receiver) =
+            std::sync::mpsc::channel::<TextureLoadResponse>();
+
+        let device_clone = Arc::clone(&device);
+        let queue_clone = Arc::clone(&queue);
+
+        std::thread::spawn(move || {
+            while let Ok((path, index)) = texture_load_receiver.recv() {
+                let texture =
+                    Self::load_texture_from_path(&path, &device_clone, &queue_clone).unwrap();
+                texture_ready_sender
+                    .send((index, Arc::new(texture)))
+                    .unwrap();
+            }
+        });
+
+        let texture_load_sender_clone = texture_load_sender.clone();
+        let player = Player::new(
+            images1,
+            images2,
             cache_size,
             preload_ahead,
-            Arc::clone(&device),
+            texture_load_sender_clone,
             Arc::clone(&queue),
+            Arc::clone(&device),
         );
         debug!("Player initialized");
 
@@ -269,13 +290,57 @@ impl AppState {
             uniform_buffer,
             uniform_bind_group_layout,
             vertex_buffer,
-            left_texture,
-            right_texture,
+            left_texture: Arc::new(RwLock::new(left_texture)),
+            right_texture: Arc::new(RwLock::new(right_texture)),
+            texture_load_sender,
+            texture_load_receiver: texture_ready_receiver,
         })
     }
 
-    fn get_texture(texture: &Arc<wgpu::Texture>) -> Arc<wgpu::Texture> {
-        Arc::clone(texture)
+    fn load_texture_from_path(
+        path: &str,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<wgpu::Texture, Box<dyn std::error::Error>> {
+        let img = image::open(path)?;
+        let rgba = img.to_rgba8();
+        let dimensions = rgba.dimensions();
+
+        let size = wgpu::Extent3d {
+            width: dimensions.0,
+            height: dimensions.1,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                aspect: wgpu::TextureAspect::All,
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+            },
+            &rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * dimensions.0),
+                rows_per_image: Some(dimensions.1),
+            },
+            size,
+        );
+
+        Ok(texture)
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -298,6 +363,46 @@ impl AppState {
         }
 
         self.player.update();
+
+        while let Ok((index, texture)) = self.texture_load_receiver.try_recv() {
+            let target_texture = if index % 2 == 0 {
+                &mut self.left_texture
+            } else {
+                &mut self.right_texture
+            };
+
+            let mut texture_guard = target_texture.write().unwrap();
+            let size = texture.size();
+
+            // Create a TextureView from the received texture
+            let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Copy the texture data using a command encoder
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Texture Copy Encoder"),
+                });
+
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: texture.as_ref(),
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &texture_guard,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                size,
+            );
+
+            // Submit the command encoder
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -315,7 +420,8 @@ impl AppState {
                 label: Some("Render Encoder"),
             });
 
-        let (left_texture, right_texture) = self.player.current_images();
+        let left_texture = self.left_texture.read().unwrap();
+        let right_texture = self.right_texture.read().unwrap();
 
         let texture_bind_group = self.create_texture_bind_group(&left_texture, &right_texture);
 
