@@ -488,6 +488,10 @@ impl Player {
         let rgba = img.to_rgba8();
         let dimensions = img.dimensions();
 
+        // Add error logging
+        debug!("Loading texture from path: {}", path);
+        debug!("Image dimensions: {}x{}", dimensions.0, dimensions.1);
+
         let size = wgpu::Extent3d {
             width: dimensions.0,
             height: dimensions.1,
@@ -521,5 +525,30 @@ impl Player {
         );
 
         Ok(texture)
+    }
+
+    pub fn load_initial_textures(
+        &mut self,
+    ) -> Result<(Arc<wgpu::Texture>, Arc<wgpu::Texture>), Box<dyn std::error::Error>> {
+        self.update();
+        debug!(
+            "Attempting to load left texture from: {}",
+            &self.image_data1[0].0
+        );
+        let left = Arc::new(Self::load_texture_from_path(
+            &self.image_data1[0].0,
+            &self.device,
+            &self.queue,
+        )?);
+        debug!(
+            "Attempting to load right texture from: {}",
+            &self.image_data2[0].0
+        );
+        let right = Arc::new(Self::load_texture_from_path(
+            &self.image_data2[0].0,
+            &self.device,
+            &self.queue,
+        )?);
+        Ok((left, right))
     }
 }

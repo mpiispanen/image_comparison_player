@@ -1,10 +1,19 @@
 use crate::image_loader;
 use crate::player::Player;
+use bytemuck;
 use log::{debug, error, info};
 use std::sync::Arc;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default, Debug)]
+struct UniformData {
+    cursor_x: f32,
+    image1_size: [f32; 2],
+    image2_size: [f32; 2],
+}
 
 pub struct AppState {
     surface: wgpu::Surface,
@@ -17,6 +26,11 @@ pub struct AppState {
     cursor_x: f32,
     last_update: Instant,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    uniform_buffer: wgpu::Buffer,
+    uniform_bind_group_layout: wgpu::BindGroupLayout,
+    vertex_buffer: wgpu::Buffer,
+    left_texture: Arc<wgpu::Texture>,
+    right_texture: Arc<wgpu::Texture>,
 }
 
 impl AppState {
@@ -87,14 +101,15 @@ impl AppState {
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Texture Bind Group Layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
                         },
                         count: None,
                     },
@@ -104,14 +119,59 @@ impl AppState {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
-                label: Some("texture_bind_group_layout"),
             });
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Uniform Buffer"),
+            size: 24,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let uniform_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Uniform Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(&[
+                -1.0f32, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0,
+            ]),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&texture_bind_group_layout],
+                bind_group_layouts: &[&texture_bind_group_layout, &uniform_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -121,7 +181,15 @@ impl AppState {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[],
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -150,17 +218,40 @@ impl AppState {
             multiview: None,
         });
 
-        let images1 = image_loader::load_image_paths(dir1.to_str().unwrap())?;
-        let images2 = image_loader::load_image_paths(dir2.to_str().unwrap())?;
+        let (images1, _) = image_loader::load_image_paths(&dir1.to_str().unwrap())?;
+        let (images2, _) = image_loader::load_image_paths(&dir2.to_str().unwrap())?;
+        debug!(
+            "Loaded {} images from dir1 and {} images from dir2",
+            images1.len(),
+            images2.len()
+        );
+
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let player = Player::new(
-            images1,
-            images2,
+        let image_len1 = images1.len();
+        let image_len2 = images2.len();
+        let mut player = Player::new(
+            (images1, image_len1),
+            (images2, image_len2),
             cache_size,
             preload_ahead,
             Arc::clone(&device),
             Arc::clone(&queue),
+        );
+        debug!("Player initialized");
+
+        let (left_texture, right_texture) = player.load_initial_textures()?;
+
+        debug!(
+            "Loaded left texture dimensions: {}x{}",
+            left_texture.width(),
+            left_texture.height()
+        );
+
+        debug!(
+            "Loaded right texture dimensions: {}x{}",
+            right_texture.width(),
+            right_texture.height()
         );
 
         info!("AppState initialized successfully");
@@ -175,7 +266,16 @@ impl AppState {
             cursor_x: size.width as f32 / 2.0,
             last_update: Instant::now(),
             texture_bind_group_layout,
+            uniform_buffer,
+            uniform_bind_group_layout,
+            vertex_buffer,
+            left_texture,
+            right_texture,
         })
+    }
+
+    fn get_texture(texture: &Arc<wgpu::Texture>) -> Arc<wgpu::Texture> {
+        Arc::clone(texture)
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -201,10 +301,13 @@ impl AppState {
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        debug!("Starting render function");
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        debug!("Created texture view");
 
         let mut encoder = self
             .device
@@ -214,48 +317,73 @@ impl AppState {
 
         let (left_texture, right_texture) = self.player.current_images();
 
-        // Create bind groups for both textures
-        let left_bind_group = self.create_texture_bind_group(&left_texture);
-        let right_bind_group = self.create_texture_bind_group(&right_texture);
+        let texture_bind_group = self.create_texture_bind_group(&left_texture, &right_texture);
 
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0,
-                        }),
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: None,
-            });
+        let uniforms = UniformData {
+            cursor_x: self.cursor_x / self.size.width as f32,
+            image1_size: [left_texture.width() as f32, left_texture.height() as f32],
+            image2_size: [right_texture.width() as f32, right_texture.height() as f32],
+        };
 
-            render_pass.set_pipeline(&self.render_pipeline);
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
-            // Render left image
-            render_pass.set_bind_group(0, &left_bind_group, &[]);
-            render_pass.draw(0..3, 0..1);
+        let uniform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Uniform Bind Group"),
+            layout: &self.uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self.uniform_buffer.as_entire_binding(),
+            }],
+        });
 
-            // Render right image
-            render_pass.set_bind_group(0, &right_bind_group, &[]);
-            render_pass.draw(0..3, 0..1);
-        }
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Render Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.1,
+                        g: 0.2,
+                        b: 0.3,
+                        a: 1.0,
+                    }),
+                    store: true,
+                },
+            })],
+            depth_stencil_attachment: None,
+        });
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_bind_group(0, &texture_bind_group, &[]);
+        render_pass.set_bind_group(1, &uniform_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.draw(0..6, 0..1);
+
+        debug!("Issued draw calls");
+
+        drop(render_pass);
+
+        debug!("Finishing command encoder");
+        let command_buffer = encoder.finish();
+
+        debug!("Submitting command buffer");
+        self.queue.submit(std::iter::once(command_buffer));
+
+        debug!("Presenting output");
         output.present();
 
         Ok(())
     }
 
-    fn create_texture_bind_group(&self, texture: &wgpu::Texture) -> wgpu::BindGroup {
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    fn create_texture_bind_group(
+        &self,
+        texture1: &wgpu::Texture,
+        texture2: &wgpu::Texture,
+    ) -> wgpu::BindGroup {
+        let texture_view1 = texture1.create_view(&wgpu::TextureViewDescriptor::default());
+        let texture_view2 = texture2.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -267,18 +395,26 @@ impl AppState {
         });
 
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Texture Bind Group"),
             layout: &self.texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                    resource: wgpu::BindingResource::TextureView(&texture_view1),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&texture_view2),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
             ],
-            label: Some("texture_bind_group"),
         })
     }
 
