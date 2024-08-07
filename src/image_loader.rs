@@ -1,19 +1,18 @@
 use anyhow::{Context as _, Result};
-use ggez::Context;
 use log::{debug, error, info};
+use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 
-pub fn load_image_paths(ctx: &mut Context, dir: &str) -> Result<(Vec<(String, u64)>, usize)> {
+pub fn load_image_paths(dir: &str) -> Result<(Vec<(String, u64)>, usize)> {
     info!("Loading image paths from directory: {}", dir);
-    let ffmpeg_input = format!("{}/input.txt", dir);
+    let absolute_dir = std::fs::canonicalize(dir)?;
+    let ffmpeg_input = absolute_dir.join("input.txt");
 
-    debug!("Attempting to read file at: {}", ffmpeg_input);
+    debug!("Attempting to read file at: {:?}", ffmpeg_input);
     debug!("Current working directory: {:?}", std::env::current_dir()?);
 
-    let file = ctx
-        .fs
-        .open(&ffmpeg_input)
-        .context("Failed to open input file")?;
+    let file = File::open(&ffmpeg_input).context("Failed to open input file")?;
     let reader = BufReader::new(file);
     let mut images = Vec::new();
     let mut lines = reader.lines();
@@ -26,22 +25,10 @@ pub fn load_image_paths(ctx: &mut Context, dir: &str) -> Result<(Vec<(String, u6
             .parse::<u64>()
             .with_context(|| format!("Failed to parse duration '{}'", duration_str))?;
 
-        debug!(
-            "Loaded image path: {:?} with duration: {}",
-            file_path, duration
-        );
-        images.push((file_path.to_string(), duration));
+        let full_path = absolute_dir.join(file_path);
+        images.push((full_path.to_string_lossy().into_owned(), duration));
     }
 
     let frame_count = images.len();
-
-    if frame_count == 0 {
-        error!("No valid image paths were loaded from the input file");
-        return Err(anyhow::anyhow!(
-            "No valid image paths were loaded from the input file"
-        ));
-    }
-
-    info!("Successfully loaded {} image paths", frame_count);
     Ok((images, frame_count))
 }

@@ -1,13 +1,15 @@
 use clap::{Arg, ArgAction, Command};
-use ggez::event::{self};
-use ggez::{ContextBuilder, GameResult};
 use log::{error, info};
-use std::path::PathBuf;
+use winit::{
+    event::{ElementState, Event, KeyboardInput, MouseButton, VirtualKeyCode, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+};
 mod app;
 mod image_loader;
 mod player;
 
-fn main() -> GameResult {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let matches = Command::new("image_comparison_player")
@@ -73,29 +75,73 @@ fn main() -> GameResult {
         .parse()
         .unwrap_or(25);
 
-    let (width, height) = parse_window_size(window_size).map_err(|e| {
-        error!("Failed to parse window size: {}", e);
-        ggez::GameError::ConfigError(e)
-    })?;
+    let (width, height) = parse_window_size(window_size)?;
 
     info!(
         "Starting image comparison player with dir1: {}, dir2: {}, window size: {}x{}",
         dir1, dir2, width, height
     );
 
-    let (mut ctx, event_loop) = ContextBuilder::new("image_comparison_player", "Matias Piispanen")
-        .add_resource_path(PathBuf::from("./resources"))
-        .window_mode(ggez::conf::WindowMode::default().dimensions(width, height))
-        .window_setup(ggez::conf::WindowSetup::default().title("Image Comparison Player"))
-        .build()?;
-    let app_state = app::AppState::new(
-        &mut ctx,
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title("Image Comparison Player")
+        .with_inner_size(winit::dpi::LogicalSize::new(width, height))
+        .build(&event_loop)?;
+
+    let mut app_state = pollster::block_on(app::AppState::new(
+        &window,
         dir1.clone(),
         dir2.clone(),
         cache_size,
         preload_ahead,
-    )?;
-    event::run(ctx, event_loop, app_state)
+    ))?;
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Poll;
+
+        match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                WindowEvent::KeyboardInput {
+                    input:
+                        KeyboardInput {
+                            state: ElementState::Pressed,
+                            virtual_keycode: Some(keycode),
+                            ..
+                        },
+                    ..
+                } => match keycode {
+                    VirtualKeyCode::Space => app_state.toggle_play_pause(),
+                    VirtualKeyCode::Right => app_state.next_frame(),
+                    VirtualKeyCode::Left => app_state.previous_frame(),
+                    VirtualKeyCode::Escape => *control_flow = ControlFlow::Exit,
+                    _ => {}
+                },
+                WindowEvent::CursorMoved { position, .. } => {
+                    app_state.update_cursor_position(position.x as f32, position.y as f32);
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    app_state.handle_mouse_click();
+                }
+                _ => {}
+            },
+            Event::MainEventsCleared => {
+                window.request_redraw();
+            }
+            Event::RedrawRequested(_) => {
+                app_state.update();
+                match app_state.render() {
+                    Ok(_) => {}
+                    Err(e) => error!("Render error: {}", e),
+                }
+            }
+            _ => {}
+        }
+    });
 }
 
 fn parse_window_size(size: &str) -> Result<(f32, f32), String> {

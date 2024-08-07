@@ -1,26 +1,31 @@
-use ggez::graphics::Image;
-use image;
+use image::GenericImageView;
 use log::{debug, warn};
-use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
+use wgpu::util::DeviceExt;
 
 type PreloadRequest = (
     String,
     usize,
-    Arc<Mutex<Option<Arc<Image>>>>,
+    Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
     Arc<Mutex<bool>>,
 );
 
-type PreloadResponse = (usize, Vec<u8>, u32, u32, Arc<Mutex<Option<Arc<Image>>>>);
+type PreloadResponse = (
+    usize,
+    Vec<u8>,
+    u32,
+    u32,
+    Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
+);
 
 pub struct Player {
     image_data1: Vec<(String, u64, u64)>,
     image_data2: Vec<(String, u64, u64)>,
-    image_cache1: HashMap<usize, Arc<Mutex<Option<Arc<Image>>>>>,
-    image_cache2: HashMap<usize, Arc<Mutex<Option<Arc<Image>>>>>,
+    image_cache1: HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>,
+    image_cache2: HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>,
     cache_order1: VecDeque<usize>,
     cache_order2: VecDeque<usize>,
     current_time: u64,
@@ -38,6 +43,8 @@ pub struct Player {
     frame_count2: usize,
     last_index1: usize,
     last_index2: usize,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
 }
 
 impl Player {
@@ -46,6 +53,8 @@ impl Player {
         images2: (Vec<(String, u64)>, usize),
         cache_size: usize,
         preload_ahead: usize,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
     ) -> Self {
         let (image_data1, frame_count1) = Self::accumulate_durations(images1.0);
         let (image_data2, frame_count2) = Self::accumulate_durations(images2.0);
@@ -86,6 +95,8 @@ impl Player {
             frame_count2,
             last_index1: usize::MAX,
             last_index2: usize::MAX,
+            device,
+            queue,
         };
 
         player.start_preload_thread(receiver, load_sender);
@@ -110,21 +121,14 @@ impl Player {
                         .unwrap();
                     debug!("Preload thread completed request for index: {}", index);
                 }
-                *ongoing.lock() = false;
+                *ongoing.lock().unwrap() = false;
             }
         });
     }
 
-    pub fn update(&mut self, ctx: &mut ggez::Context) {
+    pub fn update(&mut self) {
         while let Ok((index, rgba, width, height, cache)) = self.preload_receiver.try_recv() {
-            let image = Image::from_pixels(
-                ctx,
-                &rgba,
-                ggez::graphics::ImageFormat::Rgba8UnormSrgb,
-                width,
-                height,
-            );
-            let arc_image = Arc::new(image);
+            let texture = self.load_texture(&rgba, width, height);
 
             let is_cache1 = std::ptr::eq(
                 Arc::as_ptr(&cache),
@@ -154,17 +158,17 @@ impl Player {
                 }
             }
 
-            cache.insert(index, Arc::new(Mutex::new(Some(Arc::clone(&arc_image)))));
+            cache.insert(index, Arc::new(Mutex::new(Some(Arc::new(texture)))));
             if !order.contains(&index) {
                 order.push_back(index);
             }
-            *preloaded_frames[index].lock() = true;
+            *preloaded_frames[index].lock().unwrap() = true;
 
             debug!("Added preloaded image to cache for index: {}", index);
         }
     }
 
-    pub fn current_images(&mut self, ctx: &mut ggez::Context) -> (Arc<Image>, Arc<Image>) {
+    pub fn current_images(&mut self) -> (Arc<wgpu::Texture>, Arc<wgpu::Texture>) {
         let index1 = self.get_current_index(&self.image_data1);
         let index2 = self.get_current_index(&self.image_data2);
 
@@ -173,17 +177,19 @@ impl Player {
         let image1 = if index1 != self.last_index1 {
             self.last_index1 = index1;
             Self::get_or_load_image(
-                ctx,
                 &self.image_data1,
                 index1,
                 &mut self.image_cache1,
                 &mut self.cache_order1,
+                &self.device,
+                &self.queue,
             )
         } else {
             self.image_cache1
                 .get(&index1)
                 .unwrap()
                 .lock()
+                .unwrap()
                 .as_ref()
                 .unwrap()
                 .clone()
@@ -192,17 +198,19 @@ impl Player {
         let image2 = if index2 != self.last_index2 {
             self.last_index2 = index2;
             Self::get_or_load_image(
-                ctx,
                 &self.image_data2,
                 index2,
                 &mut self.image_cache2,
                 &mut self.cache_order2,
+                &self.device,
+                &self.queue,
             )
         } else {
             self.image_cache2
                 .get(&index2)
                 .unwrap()
                 .lock()
+                .unwrap()
                 .as_ref()
                 .unwrap()
                 .clone()
@@ -214,12 +222,13 @@ impl Player {
     }
 
     fn get_or_load_image(
-        ctx: &mut ggez::Context,
         image_data: &[(String, u64, u64)],
         index: usize,
-        cache: &mut HashMap<usize, Arc<Mutex<Option<Arc<Image>>>>>,
+        cache: &mut HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>,
         cache_order: &mut VecDeque<usize>,
-    ) -> Arc<Image> {
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Arc<wgpu::Texture> {
         if cache.is_empty() {
             // Handle empty cache case
             let (path, _, _) = &image_data[index];
@@ -227,11 +236,11 @@ impl Player {
                 "Cache is empty. Loading image from path: {} for index {}",
                 path, index
             );
-            return Self::load_image(ctx, path, index, cache, cache_order);
+            return Self::load_image(path, index, cache, cache_order, device, queue);
         }
 
         if let Some(entry) = cache.get(&index) {
-            if let Some(image) = entry.lock().as_ref() {
+            if let Some(image) = entry.lock().unwrap().as_ref() {
                 debug!("Image found in cache for index {}", index);
                 return Arc::clone(image);
             }
@@ -239,58 +248,47 @@ impl Player {
 
         let (path, _, _) = &image_data[index];
         debug!("Loading image from path: {} for index {}", path, index);
-        match Image::from_path(ctx, path) {
-            Ok(image) => {
-                let arc_image = Arc::new(image);
-                if let Some(entry) = cache.get(&index) {
-                    *entry.lock() = Some(Arc::clone(&arc_image));
-                } else {
-                    cache.insert(index, Arc::new(Mutex::new(Some(Arc::clone(&arc_image)))));
-                    cache_order.push_back(index);
-                }
-                debug!("Successfully loaded image for index {}", index);
-                arc_image
-            }
-            Err(e) => {
-                warn!("Failed to load image at {}: {}", path, e);
-                Arc::new(Image::from_pixels(
-                    ctx,
-                    &[255, 0, 255, 255],
-                    ggez::graphics::ImageFormat::Rgba8UnormSrgb,
-                    1,
-                    1,
-                ))
-            }
-        }
+        let texture = Self::load_image(path, index, cache, cache_order, device, queue);
+        debug!("Successfully loaded image for index {}", index);
+        texture
     }
 
     fn load_image(
-        ctx: &mut ggez::Context,
         path: &str,
         index: usize,
-        cache: &mut HashMap<usize, Arc<Mutex<Option<Arc<Image>>>>>,
+        cache: &mut HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>,
         cache_order: &mut VecDeque<usize>,
-    ) -> Arc<Image> {
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Arc<wgpu::Texture> {
         debug!("Loading image from path: {} for index {}", path, index);
-        match Image::from_path(ctx, path) {
-            Ok(image) => {
-                let arc_image = Arc::new(image);
-                cache.insert(index, Arc::new(Mutex::new(Some(Arc::clone(&arc_image)))));
-                cache_order.push_back(index);
-                debug!("Successfully loaded image for index {}", index);
-                arc_image
-            }
+        let texture = match Self::load_texture_from_path(path, device, queue) {
+            Ok(texture) => texture,
             Err(e) => {
                 warn!("Failed to load image at {}: {}", path, e);
-                Arc::new(Image::from_pixels(
-                    ctx,
-                    &[255, 0, 255, 255],
-                    ggez::graphics::ImageFormat::Rgba8UnormSrgb,
-                    1,
-                    1,
-                ))
+                // Create a placeholder texture
+                let size = wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                };
+                device.create_texture(&wgpu::TextureDescriptor {
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    label: Some("placeholder_texture"),
+                    view_formats: &[],
+                })
             }
-        }
+        };
+        let arc_texture = Arc::new(texture);
+        cache.insert(index, Arc::new(Mutex::new(Some(Arc::clone(&arc_texture)))));
+        cache_order.push_back(index);
+        debug!("Successfully loaded image for index {}", index);
+        arc_texture
     }
 
     fn trigger_preload(&mut self, index1: usize, index2: usize) {
@@ -320,23 +318,23 @@ impl Player {
     fn handle_preload(
         index: usize,
         image_data: &[(String, u64, u64)],
-        cache: &mut HashMap<usize, Arc<Mutex<Option<Arc<Image>>>>>,
+        cache: &mut HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>,
         ongoing_preloads: &mut [Arc<Mutex<bool>>],
         preloaded_frames: &mut [Arc<Mutex<bool>>],
         preload_sender: &std::sync::mpsc::Sender<PreloadRequest>,
     ) {
         let in_cache = cache
             .get(&index)
-            .map_or(false, |entry| entry.lock().is_some());
-        let in_ongoing = *ongoing_preloads[index].lock();
+            .map_or(false, |entry| entry.lock().unwrap().is_some());
+        let in_ongoing = *ongoing_preloads[index].lock().unwrap();
 
         if in_cache {
-            *ongoing_preloads[index].lock() = false;
-            *preloaded_frames[index].lock() = true;
+            *ongoing_preloads[index].lock().unwrap() = false;
+            *preloaded_frames[index].lock().unwrap() = true;
         } else if !in_ongoing {
             let (path, _, _) = &image_data[index];
-            *ongoing_preloads[index].lock() = true;
-            *preloaded_frames[index].lock() = false;
+            *ongoing_preloads[index].lock().unwrap() = true;
+            *preloaded_frames[index].lock().unwrap() = false;
 
             let cache_slot = cache
                 .entry(index)
@@ -443,5 +441,85 @@ impl Player {
 
     fn total_duration(&self) -> u64 {
         self.image_data1.last().map(|(_, _, end)| *end).unwrap_or(0)
+    }
+
+    fn load_texture(&self, rgba: &[u8], width: u32, height: u32) -> wgpu::Texture {
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: Some("image_texture"),
+            view_formats: &[],
+        });
+
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            size,
+        );
+
+        texture
+    }
+
+    fn load_texture_from_path(
+        path: &str,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<wgpu::Texture, Box<dyn std::error::Error>> {
+        let img = image::open(path)?;
+        let rgba = img.to_rgba8();
+        let dimensions = img.dimensions();
+
+        let size = wgpu::Extent3d {
+            width: dimensions.0,
+            height: dimensions.1,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: Some("diffuse_texture"),
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * dimensions.0),
+                rows_per_image: Some(dimensions.1),
+            },
+            size,
+        );
+
+        Ok(texture)
     }
 }

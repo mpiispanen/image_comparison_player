@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ggez = "0.9.3"
+wgpu = "0.17"
+winit = "0.28"
 clap = { version = "4.3", features = ["derive"] }
 anyhow = "1.0"
 log = "0.4"
@@ -14,6 +15,7 @@ futures = "0.3"
 tokio = { version = "1.28", features = ["full"] }
 image = "0.24.7"
 parking_lot = "0.12.1"
+pollster = "0.3"
 
 [[bin]]
 name = "image_comparison_player"
