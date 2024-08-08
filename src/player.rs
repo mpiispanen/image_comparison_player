@@ -35,6 +35,8 @@ pub struct Player {
     texture_load_sender: std::sync::mpsc::Sender<TextureLoadRequest>,
     queue: Arc<wgpu::Queue>,
     device: Arc<wgpu::Device>,
+    current_frame1: usize,
+    current_frame2: usize,
 }
 
 impl Player {
@@ -64,26 +66,13 @@ impl Player {
             texture_load_sender,
             queue,
             device,
+            current_frame1: 0,
+            current_frame2: 0,
         }
     }
 
     pub fn current_images(&mut self) -> (usize, usize) {
-        let index1 = self.get_current_index(&self.image_data1);
-        let index2 = self.get_current_index(&self.image_data2);
-
-        if index1 != self.last_index1 {
-            self.last_index1 = index1;
-            self.request_texture_load(&self.image_data1[index1].0, index1 * 2);
-        }
-
-        if index2 != self.last_index2 {
-            self.last_index2 = index2;
-            self.request_texture_load(&self.image_data2[index2].0, index2 * 2 + 1);
-        }
-
-        self.trigger_preload(index1, index2);
-
-        (index1 * 2, index2 * 2 + 1)
+        (self.current_frame1 * 2, self.current_frame2 * 2 + 1)
     }
 
     fn request_texture_load(&self, path: &str, index: usize) {
@@ -116,54 +105,47 @@ impl Player {
     pub fn toggle_play_pause(&mut self) {
         self.is_playing = !self.is_playing;
         self.last_update = Instant::now();
-        log::info!(
+        debug!(
             "Player is now {}",
             if self.is_playing { "playing" } else { "paused" }
         );
     }
 
     pub fn next_frame(&mut self) {
-        let next_time = self
-            .image_data1
-            .iter()
-            .find(|(_, _, end)| *end > self.current_time)
-            .map(|(_, _, end)| *end)
-            .unwrap_or_else(|| self.image_data1.last().map(|(_, _, end)| *end).unwrap_or(0));
-        self.current_time = next_time;
-        let total_duration = self.total_duration();
-        debug!(
-            "Current time: {} / {} ms",
-            self.current_time, total_duration
-        );
+        self.current_frame1 = (self.current_frame1 + 1) % self.frame_count1;
+        self.current_frame2 = (self.current_frame2 + 1) % self.frame_count2;
+        self.current_time = self.image_data1[self.current_frame1].1;
+        self.update_textures();
     }
 
     pub fn previous_frame(&mut self) {
-        let prev_time = self
-            .image_data1
-            .iter()
-            .rev()
-            .find(|(_, _, start)| *start < self.current_time)
-            .map(|(_, _, start)| *start)
-            .unwrap_or(0);
-        self.current_time = prev_time;
-        let total_duration = self.total_duration();
-        debug!(
-            "Current time: {} / {} ms",
-            self.current_time, total_duration
-        );
+        self.current_frame1 = (self.current_frame1 + self.frame_count1 - 1) % self.frame_count1;
+        self.current_frame2 = (self.current_frame2 + self.frame_count2 - 1) % self.frame_count2;
+        self.current_time = self.image_data1[self.current_frame1].1;
+        self.update_textures();
     }
 
-    pub fn advance_frame(&mut self, delta_time: u64) {
-        let old_time = self.current_time;
-        self.current_time += delta_time;
-        let total_duration = self.total_duration();
-        if self.current_time >= total_duration {
-            self.current_time = self.current_time % total_duration;
+    fn update_textures(&mut self) {
+        let (index1, index2) = self.current_images();
+        self.request_texture_load(&self.image_data1[self.current_frame1].0, index1);
+        self.request_texture_load(&self.image_data2[self.current_frame2].0, index2);
+        self.trigger_preload(self.current_frame1, self.current_frame2);
+    }
+
+    pub fn update(&mut self, delta: std::time::Duration) {
+        if self.is_playing {
+            self.advance_frame(delta.as_micros() as u64);
+            self.update_textures();
         }
-        debug!(
-            "Advanced frame: old_time = {}, delta_time = {}, new_time = {}, total_duration = {}",
-            old_time, delta_time, self.current_time, total_duration
-        );
+    }
+
+    fn advance_frame(&mut self, delta_micros: u64) {
+        self.current_time += delta_micros;
+        if self.current_time >= self.total_duration() {
+            self.current_time = 0;
+        }
+        self.current_frame1 = self.get_current_index(&self.image_data1);
+        self.current_frame2 = self.get_current_index(&self.image_data2);
     }
 
     fn total_duration(&self) -> u64 {
@@ -224,16 +206,6 @@ impl Player {
         );
 
         Ok(texture)
-    }
-
-    pub fn update(&mut self) {
-        if self.is_playing {
-            let now = Instant::now();
-            let delta = now.duration_since(self.last_update);
-            self.last_update = now;
-            self.advance_frame(delta.as_micros() as u64);
-        }
-        self.check_and_load_textures();
     }
 
     fn check_and_load_textures(&mut self) {

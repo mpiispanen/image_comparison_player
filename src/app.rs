@@ -357,51 +357,9 @@ impl AppState {
         let delta = now.duration_since(self.last_update);
         self.last_update = now;
 
+        self.player.update(delta);
         if self.player.is_playing() {
-            self.player.advance_frame(delta.as_micros() as u64);
-            debug!("Advanced frame, delta: {:?}", delta);
-        }
-
-        self.player.update();
-
-        while let Ok((index, texture)) = self.texture_load_receiver.try_recv() {
-            let target_texture = if index % 2 == 0 {
-                &mut self.left_texture
-            } else {
-                &mut self.right_texture
-            };
-
-            let mut texture_guard = target_texture.write().unwrap();
-            let size = texture.size();
-
-            // Create a TextureView from the received texture
-            let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-            // Copy the texture data using a command encoder
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Texture Copy Encoder"),
-                });
-
-            encoder.copy_texture_to_texture(
-                wgpu::ImageCopyTexture {
-                    texture: texture.as_ref(),
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::ImageCopyTexture {
-                    texture: &texture_guard,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                size,
-            );
-
-            // Submit the command encoder
-            self.queue.submit(std::iter::once(encoder.finish()));
+            self.update_textures();
         }
     }
 
@@ -530,10 +488,12 @@ impl AppState {
 
     pub fn next_frame(&mut self) {
         self.player.next_frame();
+        self.update_textures();
     }
 
     pub fn previous_frame(&mut self) {
         self.player.previous_frame();
+        self.update_textures();
     }
 
     pub fn update_cursor_position(&mut self, x: f32, _y: f32) {
@@ -542,5 +502,42 @@ impl AppState {
 
     pub fn handle_mouse_click(&mut self) {
         self.player.toggle_play_pause();
+    }
+
+    fn update_textures(&mut self) {
+        while let Ok((index, texture)) = self.texture_load_receiver.try_recv() {
+            let target_texture = if index % 2 == 0 {
+                &mut self.left_texture
+            } else {
+                &mut self.right_texture
+            };
+
+            let mut texture_guard = target_texture.write().unwrap();
+            let size = texture.size();
+
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Texture Copy Encoder"),
+                });
+
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: texture.as_ref(),
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &texture_guard,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                size,
+            );
+
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
     }
 }
