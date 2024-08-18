@@ -1,4 +1,5 @@
 use log::debug;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -37,6 +38,11 @@ pub struct Player {
     device: Arc<wgpu::Device>,
     current_frame1: usize,
     current_frame2: usize,
+    texture_cache: HashMap<usize, Arc<wgpu::Texture>>,
+    requested_textures: HashSet<usize>,
+    cache_order: Vec<usize>,
+    texture_reuse_pool: Vec<Arc<wgpu::Texture>>,
+    frame_changed: bool,
 }
 
 impl Player {
@@ -68,11 +74,21 @@ impl Player {
             device,
             current_frame1: 0,
             current_frame2: 0,
+            texture_cache: HashMap::with_capacity(cache_size),
+            requested_textures: HashSet::new(),
+            cache_order: Vec::with_capacity(cache_size),
+            texture_reuse_pool: Vec::new(),
+            frame_changed: false,
         }
     }
 
     pub fn current_images(&mut self) -> (usize, usize) {
-        (self.current_frame1 * 2, self.current_frame2 * 2 + 1)
+        (self.current_frame1, self.current_frame2)
+    }
+
+    pub fn get_texture(&self, index: usize, is_left: bool) -> Option<Arc<wgpu::Texture>> {
+        let cache_index = if is_left { index * 2 } else { index * 2 + 1 };
+        self.texture_cache.get(&cache_index).cloned()
     }
 
     fn request_texture_load(&self, path: &str, index: usize) {
@@ -111,41 +127,220 @@ impl Player {
         );
     }
 
-    pub fn next_frame(&mut self) {
+    pub fn next_frame(&mut self) -> bool {
+        let old_frame1 = self.current_frame1;
+        let old_frame2 = self.current_frame2;
         self.current_frame1 = (self.current_frame1 + 1) % self.frame_count1;
         self.current_frame2 = (self.current_frame2 + 1) % self.frame_count2;
-        self.current_time = self.image_data1[self.current_frame1].1;
+        self.current_time = std::cmp::max(
+            self.image_data1[self.current_frame1].1,
+            self.image_data2[self.current_frame2].1,
+        );
+        self.frame_changed = true;
+        debug!(
+            "Next frame: {} -> {}, {} -> {}",
+            old_frame1, self.current_frame1, old_frame2, self.current_frame2
+        );
         self.update_textures();
+        true
     }
 
-    pub fn previous_frame(&mut self) {
+    pub fn previous_frame(&mut self) -> bool {
+        let old_frame1 = self.current_frame1;
+        let old_frame2 = self.current_frame2;
         self.current_frame1 = (self.current_frame1 + self.frame_count1 - 1) % self.frame_count1;
         self.current_frame2 = (self.current_frame2 + self.frame_count2 - 1) % self.frame_count2;
-        self.current_time = self.image_data1[self.current_frame1].1;
+        self.current_time = std::cmp::min(
+            self.image_data1[self.current_frame1].1,
+            self.image_data2[self.current_frame2].1,
+        );
+        self.frame_changed = true;
+        debug!(
+            "Previous frame: {} -> {}, {} -> {}",
+            old_frame1, self.current_frame1, old_frame2, self.current_frame2
+        );
         self.update_textures();
+        true
+    }
+
+    pub fn has_frame_changed(&mut self) -> bool {
+        let changed = self.frame_changed;
+        self.frame_changed = false;
+        changed
     }
 
     fn update_textures(&mut self) {
-        let (index1, index2) = self.current_images();
-        self.request_texture_load(&self.image_data1[self.current_frame1].0, index1);
-        self.request_texture_load(&self.image_data2[self.current_frame2].0, index2);
-        self.trigger_preload(self.current_frame1, self.current_frame2);
+        let index1 = self.current_frame1;
+        let index2 = self.current_frame2;
+        debug!("Updating textures: left={}, right={}", index1, index2);
+        debug!("Texture cache state: {:?}", self.texture_cache.keys());
+        self.ensure_texture_loaded(index1, true);
+        self.ensure_texture_loaded(index2, false);
+        self.preload_textures(index1, index2);
+        debug!(
+            "After update, texture cache state: {:?}",
+            self.texture_cache.keys()
+        );
     }
 
-    pub fn update(&mut self, delta: std::time::Duration) {
+    pub fn ensure_texture_loaded(&mut self, index: usize, is_left: bool) -> bool {
+        let cache_index = if is_left { index * 2 } else { index * 2 + 1 };
+        debug!(
+            "Ensuring texture loaded: index={}, is_left={}",
+            index, is_left
+        );
+        if !self.texture_cache.contains_key(&cache_index)
+            && !self.requested_textures.contains(&cache_index)
+        {
+            let image_data = if is_left {
+                &self.image_data1
+            } else {
+                &self.image_data2
+            };
+            let path = &image_data[index].0;
+            debug!(
+                "Requesting texture load: index={}, path={}, is_left={}",
+                index, path, is_left
+            );
+            self.request_texture_load(path, cache_index);
+            self.requested_textures.insert(cache_index);
+            true
+        } else {
+            debug!(
+                "Texture already loaded or requested: index={}, is_left={}",
+                index, is_left
+            );
+            false
+        }
+    }
+
+    pub fn preload_textures(&mut self, index1: usize, index2: usize) {
+        for i in 1..=self.preload_ahead {
+            let preload_index1 = (index1 + i) % self.frame_count1;
+            let preload_index2 = (index2 + i) % self.frame_count2;
+            self.ensure_texture_loaded(preload_index1, true);
+            self.ensure_texture_loaded(preload_index2, false);
+        }
+    }
+
+    pub fn add_texture_to_cache(&mut self, index: usize, image_data: &[u8], size: wgpu::Extent3d) {
+        debug!("Adding texture to cache: index={}, size={:?}", index, size);
+        if self.texture_cache.len() >= self.cache_size {
+            debug!("Cache full, evicting texture");
+            self.evict_texture();
+        }
+
+        let texture = self.get_or_create_texture(size);
+
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            image_data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * size.width),
+                rows_per_image: Some(size.height),
+            },
+            size,
+        );
+
+        self.texture_cache.insert(index, texture);
+        self.cache_order.push(index);
+        self.requested_textures.remove(&index);
+        debug!(
+            "Texture added to cache. New cache state: {:?}",
+            self.texture_cache.keys()
+        );
+    }
+
+    fn evict_texture(&mut self) {
+        if let Some(index_to_remove) = self.find_texture_to_evict() {
+            // Instead of removing, move the texture to a reuse pool
+            if let Some(texture) = self.texture_cache.remove(&index_to_remove) {
+                self.texture_reuse_pool.push(texture);
+            }
+            self.cache_order.retain(|&x| x != index_to_remove);
+        }
+    }
+
+    fn get_or_create_texture(&mut self, size: wgpu::Extent3d) -> Arc<wgpu::Texture> {
+        if let Some(texture) = self.texture_reuse_pool.pop() {
+            if texture.size() == size {
+                return texture;
+            }
+            // If size doesn't match, let it drop and create a new one
+        }
+
+        Arc::new(self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Reused Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        }))
+    }
+
+    fn find_texture_to_evict(&self) -> Option<usize> {
+        self.cache_order
+            .iter()
+            .min_by_key(|&&index| self.distance_from_current_frame(index))
+            .cloned()
+    }
+
+    fn distance_from_current_frame(&self, index: usize) -> usize {
+        let current_frame = if index % 2 == 0 {
+            self.current_frame1
+        } else {
+            self.current_frame2
+        };
+        let frame_count = if index % 2 == 0 {
+            self.frame_count1
+        } else {
+            self.frame_count2
+        };
+        let frame = index / 2;
+
+        std::cmp::min(
+            (frame + frame_count - current_frame) % frame_count,
+            (current_frame + frame_count - frame) % frame_count,
+        )
+    }
+
+    pub fn update(&mut self, delta: std::time::Duration) -> bool {
         if self.is_playing {
             self.advance_frame(delta.as_micros() as u64);
-            self.update_textures();
+            true
+        } else {
+            false
         }
     }
 
     fn advance_frame(&mut self, delta_micros: u64) {
+        let old_time = self.current_time;
         self.current_time += delta_micros;
         if self.current_time >= self.total_duration() {
-            self.current_time = 0;
+            self.current_time %= self.total_duration();
         }
+
+        let old_frame1 = self.current_frame1;
+        let old_frame2 = self.current_frame2;
+
         self.current_frame1 = self.get_current_index(&self.image_data1);
         self.current_frame2 = self.get_current_index(&self.image_data2);
+
+        if self.current_frame1 != old_frame1 || self.current_frame2 != old_frame2 {
+            self.frame_changed = true;
+            self.update_textures();
+        }
     }
 
     fn total_duration(&self) -> u64 {
@@ -212,11 +407,11 @@ impl Player {
         let (index1, index2) = self.current_images();
 
         for i in 0..=self.preload_ahead {
-            let preload_index1 = (index1 / 2 + i) % self.frame_count1;
-            let preload_index2 = (index2 / 2 + i) % self.frame_count2;
+            let preload_index1 = (index1 + i) % self.frame_count1;
+            let preload_index2 = (index2 + i) % self.frame_count2;
 
-            self.request_texture_load(&self.image_data1[preload_index1].0, preload_index1 * 2);
-            self.request_texture_load(&self.image_data2[preload_index2].0, preload_index2 * 2 + 1);
+            self.ensure_texture_loaded(preload_index1, true);
+            self.ensure_texture_loaded(preload_index2, false);
         }
     }
 }
