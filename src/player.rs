@@ -30,6 +30,7 @@ pub struct Player {
     last_update: Instant,
     cache_size: usize,
     preload_ahead: usize,
+    preload_behind: usize,
     frame_count1: usize,
     frame_count2: usize,
     last_index1: usize,
@@ -55,6 +56,7 @@ impl Player {
         image_data2: Vec<(String, u64, u64)>,
         cache_size: usize,
         preload_ahead: usize,
+        preload_behind: usize,
         texture_load_sender: std::sync::mpsc::Sender<TextureLoadRequest>,
         queue: Arc<wgpu::Queue>,
         device: Arc<wgpu::Device>,
@@ -69,6 +71,7 @@ impl Player {
             last_update: Instant::now(),
             cache_size,
             preload_ahead,
+            preload_behind,
             frame_count1,
             frame_count2,
             last_index1: 0,
@@ -235,9 +238,21 @@ impl Player {
     }
 
     pub fn preload_textures(&mut self, index1: usize, index2: usize) {
+        let frame_count1 = self.frame_count1;
+        let frame_count2 = self.frame_count2;
+
+        // Preload ahead
         for i in 1..=self.preload_ahead {
-            let preload_index1 = (index1 + i) % self.frame_count1;
-            let preload_index2 = (index2 + i) % self.frame_count2;
+            let preload_index1 = (index1 + i) % frame_count1;
+            let preload_index2 = (index2 + i) % frame_count2;
+            self.ensure_texture_loaded(preload_index1, true);
+            self.ensure_texture_loaded(preload_index2, false);
+        }
+
+        // Preload behind
+        for i in 1..=self.preload_behind {
+            let preload_index1 = (index1 + frame_count1 - i) % frame_count1;
+            let preload_index2 = (index2 + frame_count2 - i) % frame_count2;
             self.ensure_texture_loaded(preload_index1, true);
             self.ensure_texture_loaded(preload_index2, false);
         }
@@ -321,9 +336,24 @@ impl Player {
         } else {
             &self.cache_order_right
         };
+        let current_frame = if is_left {
+            self.current_frame1
+        } else {
+            self.current_frame2
+        };
+        let frame_count = if is_left {
+            self.frame_count1
+        } else {
+            self.frame_count2
+        };
+
         cache_order
             .iter()
-            .min_by_key(|&&index| self.distance_from_current_frame(index, is_left))
+            .max_by_key(|&&index| {
+                let forward_distance = (index + frame_count - current_frame) % frame_count;
+                let backward_distance = (current_frame + frame_count - index) % frame_count;
+                std::cmp::min(forward_distance, backward_distance)
+            })
             .copied()
     }
 

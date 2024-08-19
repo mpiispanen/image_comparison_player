@@ -43,6 +43,7 @@ impl AppState {
         dir2: String,
         cache_size: usize,
         preload_ahead: usize,
+        preload_behind: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         info!("Initializing AppState");
         let dir1 = std::fs::canonicalize(dir1)?;
@@ -238,6 +239,7 @@ impl AppState {
             images2,
             cache_size,
             preload_ahead,
+            preload_behind,
             texture_load_sender.clone(),
             Arc::clone(&queue),
             Arc::clone(&device),

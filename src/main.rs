@@ -59,6 +59,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Number of images to preload ahead")
                 .default_value("25"),
         )
+        .arg(
+            Arg::new("preload_behind")
+                .long("preload-behind")
+                .action(ArgAction::Set)
+                .value_name("COUNT")
+                .help("Number of images to preload behind")
+                .default_value("25"),
+        )
         .get_matches();
 
     let dir1 = matches.get_one::<String>("dir1").unwrap();
@@ -71,6 +79,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(50);
     let preload_ahead = matches
         .get_one::<String>("preload_ahead")
+        .unwrap()
+        .parse()
+        .unwrap_or(25);
+    let preload_behind = matches
+        .get_one::<String>("preload_behind")
         .unwrap()
         .parse()
         .unwrap_or(25);
@@ -94,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dir2.clone(),
         cache_size,
         preload_ahead,
+        preload_behind,
     ))?;
 
     event_loop.run(move |event, _, control_flow| {

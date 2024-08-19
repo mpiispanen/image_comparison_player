@@ -1,7 +1,5 @@
 TODO:
-- Cache backwards and forwards in time
 - Make worker thread add images to the cache directly instead of sending to main thread
-- Improve locks so there is one lock per image in cache
 - Multithreaded loading
 - Loop video playback
 - Fix playback
