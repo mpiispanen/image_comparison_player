@@ -1,7 +1,9 @@
 use crate::image_loader;
 use crate::player::Player;
 use log::{debug, info};
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock as PLRwLock;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -15,7 +17,6 @@ struct UniformData {
 }
 
 type TextureLoadRequest = (String, usize, bool);
-type TextureLoadResponse = (usize, bool, Vec<u8>, wgpu::Extent3d);
 
 pub struct AppState {
     surface: wgpu::Surface,
@@ -31,10 +32,8 @@ pub struct AppState {
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group_layout: wgpu::BindGroupLayout,
     vertex_buffer: wgpu::Buffer,
-    left_texture: Arc<RwLock<Arc<wgpu::Texture>>>,
-    right_texture: Arc<RwLock<Arc<wgpu::Texture>>>,
-    texture_load_sender: std::sync::mpsc::Sender<TextureLoadRequest>,
-    texture_load_receiver: std::sync::mpsc::Receiver<TextureLoadResponse>,
+    left_texture: Arc<PLRwLock<Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>,
+    right_texture: Arc<PLRwLock<Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>,
 }
 
 impl AppState {
@@ -233,8 +232,22 @@ impl AppState {
         let queue = Arc::new(queue);
         let (texture_load_sender, texture_load_receiver) =
             std::sync::mpsc::channel::<TextureLoadRequest>();
-        let (texture_ready_sender, texture_ready_receiver) =
-            std::sync::mpsc::channel::<TextureLoadResponse>();
+
+        let player = Player::new(
+            images1,
+            images2,
+            cache_size,
+            preload_ahead,
+            texture_load_sender.clone(),
+            Arc::clone(&queue),
+            Arc::clone(&device),
+        );
+        debug!("Player initialized");
+
+        let texture_cache_left = Arc::clone(&player.texture_cache_left)
+            as Arc<PLRwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
+        let texture_cache_right = Arc::clone(&player.texture_cache_right)
+            as Arc<PLRwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
 
         let device_clone = Arc::clone(&device);
         let queue_clone = Arc::clone(&queue);
@@ -242,23 +255,46 @@ impl AppState {
         std::thread::spawn(move || {
             while let Ok((path, index, is_left)) = texture_load_receiver.recv() {
                 let (image_data, size) = Self::load_image_data_from_path(&path).unwrap();
-                texture_ready_sender
-                    .send((index, is_left, image_data, size))
-                    .unwrap();
+                let texture = device_clone.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Image Texture"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+
+                queue_clone.write_texture(
+                    wgpu::ImageCopyTexture {
+                        aspect: wgpu::TextureAspect::All,
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                    },
+                    &image_data,
+                    wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * size.width),
+                        rows_per_image: Some(size.height),
+                    },
+                    size,
+                );
+
+                let cache = if is_left {
+                    &texture_cache_left
+                } else {
+                    &texture_cache_right
+                };
+
+                let cache_read = cache.read();
+                if let Some(texture_holder) = cache_read.get(&index) {
+                    let mut texture_lock = texture_holder.lock().unwrap();
+                    *texture_lock = Some(Arc::new(texture));
+                }
             }
         });
-
-        let texture_load_sender_clone = texture_load_sender.clone();
-        let player = Player::new(
-            images1,
-            images2,
-            cache_size,
-            preload_ahead,
-            texture_load_sender_clone,
-            Arc::clone(&queue),
-            Arc::clone(&device),
-        );
-        debug!("Player initialized");
 
         let (left_texture, right_texture) = player.load_initial_textures()?;
 
@@ -289,10 +325,12 @@ impl AppState {
             uniform_buffer,
             uniform_bind_group_layout,
             vertex_buffer,
-            left_texture: Arc::new(RwLock::new(Arc::new(left_texture))),
-            right_texture: Arc::new(RwLock::new(Arc::new(right_texture))),
-            texture_load_sender,
-            texture_load_receiver: texture_ready_receiver,
+            left_texture: Arc::new(PLRwLock::new(Arc::new(Mutex::new(Some(Arc::new(
+                left_texture,
+            )))))),
+            right_texture: Arc::new(PLRwLock::new(Arc::new(Mutex::new(Some(Arc::new(
+                right_texture,
+            )))))),
         })
     }
 
@@ -345,19 +383,6 @@ impl AppState {
 
         let mut updated = false;
 
-        while let Ok((loaded_index, is_left, image_data, size)) =
-            self.texture_load_receiver.try_recv()
-        {
-            self.player
-                .add_texture_to_cache(loaded_index, is_left, &image_data, size);
-
-            // Check if the loaded texture is for the current frame
-            if (is_left && loaded_index == left_index) || (!is_left && loaded_index == right_index)
-            {
-                updated = true;
-            }
-        }
-
         // Ensure current textures are loaded
         if self.player.ensure_texture_loaded(left_index, true)
             || self.player.ensure_texture_loaded(right_index, false)
@@ -365,31 +390,11 @@ impl AppState {
             updated = true;
         }
 
-        // Update the displayed textures if they are available or have been updated
-        if updated
-            || (self.player.get_texture(left_index, true).is_some()
-                && self.player.get_texture(right_index, false).is_some())
+        // Update the displayed textures if they are available
+        if self.player.get_texture(left_index, true).is_some()
+            && self.player.get_texture(right_index, false).is_some()
         {
-            *self.left_texture.write().unwrap() = self
-                .player
-                .get_texture(left_index, true)
-                .unwrap_or_else(|| {
-                    debug!(
-                        "Using fallback texture for left image: index={}",
-                        left_index
-                    );
-                    Arc::clone(&self.left_texture.read().unwrap())
-                });
-            *self.right_texture.write().unwrap() = self
-                .player
-                .get_texture(right_index, false)
-                .unwrap_or_else(|| {
-                    debug!(
-                        "Using fallback texture for right image: index={}",
-                        right_index
-                    );
-                    Arc::clone(&self.right_texture.read().unwrap())
-                });
+            updated = true;
         }
 
         // Preload next textures
@@ -439,7 +444,7 @@ impl AppState {
                     "Using fallback texture for left image: index={}",
                     left_index
                 );
-                Arc::clone(&self.left_texture.read().unwrap())
+                Arc::clone(&self.left_texture.read().lock().unwrap().as_ref().unwrap())
             });
         let right_texture = self
             .player
@@ -449,7 +454,7 @@ impl AppState {
                     "Using fallback texture for right image: index={}",
                     right_index
                 );
-                Arc::clone(&self.right_texture.read().unwrap())
+                Arc::clone(&self.right_texture.read().lock().unwrap().as_ref().unwrap())
             });
 
         let texture_bind_group = self.create_texture_bind_group(&left_texture, &right_texture);

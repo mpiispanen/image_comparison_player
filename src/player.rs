@@ -1,4 +1,5 @@
 use log::debug;
+use parking_lot::RwLock as PLRwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -38,8 +39,8 @@ pub struct Player {
     device: Arc<wgpu::Device>,
     current_frame1: usize,
     current_frame2: usize,
-    texture_cache_left: HashMap<usize, Arc<wgpu::Texture>>,
-    texture_cache_right: HashMap<usize, Arc<wgpu::Texture>>,
+    pub texture_cache_left: Arc<PLRwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
+    pub texture_cache_right: Arc<PLRwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
     requested_textures_left: HashSet<usize>,
     requested_textures_right: HashSet<usize>,
     cache_order_left: Vec<usize>,
@@ -77,8 +78,8 @@ impl Player {
             device,
             current_frame1: 0,
             current_frame2: 0,
-            texture_cache_left: HashMap::with_capacity(cache_size / 2),
-            texture_cache_right: HashMap::with_capacity(cache_size / 2),
+            texture_cache_left: Arc::new(PLRwLock::new(HashMap::with_capacity(cache_size / 2))),
+            texture_cache_right: Arc::new(PLRwLock::new(HashMap::with_capacity(cache_size / 2))),
             requested_textures_left: HashSet::new(),
             requested_textures_right: HashSet::new(),
             cache_order_left: Vec::with_capacity(cache_size / 2),
@@ -98,7 +99,11 @@ impl Player {
         } else {
             &self.texture_cache_right
         };
-        cache.get(&index).cloned()
+
+        let cache_read = cache.read();
+        cache_read
+            .get(&index)
+            .and_then(|texture_holder| texture_holder.lock().ok().and_then(|guard| guard.clone()))
     }
 
     fn request_texture_load(&self, path: &str, index: usize, is_left: bool) {
@@ -185,41 +190,45 @@ impl Player {
         debug!("Updating textures: left={}, right={}", index1, index2);
         debug!(
             "Texture cache state: left={:?}, right={:?}",
-            self.texture_cache_left.keys(),
-            self.texture_cache_right.keys()
+            self.texture_cache_left.read().keys(),
+            self.texture_cache_right.read().keys()
         );
         self.ensure_texture_loaded(index1, true);
         self.ensure_texture_loaded(index2, false);
         self.preload_textures(index1, index2);
         debug!(
             "After update, texture cache state: left={:?}, right={:?}",
-            self.texture_cache_left.keys(),
-            self.texture_cache_right.keys()
+            self.texture_cache_left.read().keys(),
+            self.texture_cache_right.read().keys()
         );
     }
 
-    pub fn ensure_texture_loaded(&mut self, index: usize, is_left: bool) -> bool {
-        let (cache, requested, image_data) = if is_left {
-            (
-                &mut self.texture_cache_left,
-                &mut self.requested_textures_left,
-                &self.image_data1,
-            )
+    pub fn ensure_texture_loaded(&self, index: usize, is_left: bool) -> bool {
+        let cache = if is_left {
+            &self.texture_cache_left
         } else {
-            (
-                &mut self.texture_cache_right,
-                &mut self.requested_textures_right,
-                &self.image_data2,
-            )
+            &self.texture_cache_right
         };
 
-        if !cache.contains_key(&index) && !requested.contains(&index) {
-            let path = &image_data[index].0;
-            self.texture_load_sender
-                .send((path.to_string(), index, is_left))
-                .unwrap();
-            requested.insert(index);
-            true
+        let cache_read = cache.read();
+        if !cache_read.contains_key(&index) {
+            drop(cache_read);
+            let mut cache_write = cache.write();
+            if !cache_write.contains_key(&index) {
+                let texture_holder = Arc::new(Mutex::new(None));
+                cache_write.insert(index, Arc::clone(&texture_holder));
+                let path = if is_left {
+                    &self.image_data1[index].0
+                } else {
+                    &self.image_data2[index].0
+                };
+                self.texture_load_sender
+                    .send((path.to_string(), index, is_left))
+                    .unwrap();
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -263,11 +272,13 @@ impl Player {
             &mut self.cache_order_right
         };
 
-        if cache.len() >= self.cache_size / 2 {
+        if cache.read().len() >= self.cache_size / 2 {
             debug!("Cache full, evicting texture");
             if let Some(index) = index_to_evict {
-                let texture = cache.remove(&index).unwrap();
-                self.texture_reuse_pool.push(texture);
+                let texture = cache.write().remove(&index).unwrap();
+                if let Some(inner_texture) = texture.lock().unwrap().take() {
+                    self.texture_reuse_pool.push(inner_texture);
+                }
                 cache_order.retain(|&x| x != index);
             }
         }
@@ -289,12 +300,14 @@ impl Player {
             size,
         );
 
-        cache.insert(index, texture);
+        cache
+            .write()
+            .insert(index, Arc::new(Mutex::new(Some(texture))));
         cache_order.push(index);
         requested.remove(&index);
         debug!(
             "Texture added to cache. New cache state: {:?}",
-            cache.keys()
+            cache.read().keys()
         );
 
         // Check if the loaded texture is for the current frame
@@ -364,7 +377,6 @@ impl Player {
     }
 
     fn advance_frame(&mut self, delta_micros: u64) {
-        let old_time = self.current_time;
         self.current_time += delta_micros;
         if self.current_time >= self.total_duration() {
             self.current_time %= self.total_duration();

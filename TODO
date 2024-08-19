@@ -1,8 +1,9 @@
 TODO:
 - Cache backwards and forwards in time
-- Show image when image has finished loading/caching
-    - Currently image being loaded is considered to be incorrectly already loaded
 - Make worker thread add images to the cache directly instead of sending to main thread
 - Improve locks so there is one lock per image in cache
 - Multithreaded loading
 - Loop video playback
+- Fix playback
+- Stop loading images if we have moved so far past the image that it is not needed anymore
+- Multithreaded loading
