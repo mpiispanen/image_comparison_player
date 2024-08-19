@@ -14,8 +14,8 @@ struct UniformData {
     image2_size: [f32; 2],
 }
 
-type TextureLoadRequest = (String, usize);
-type TextureLoadResponse = (usize, Vec<u8>, wgpu::Extent3d);
+type TextureLoadRequest = (String, usize, bool);
+type TextureLoadResponse = (usize, bool, Vec<u8>, wgpu::Extent3d);
 
 pub struct AppState {
     surface: wgpu::Surface,
@@ -240,10 +240,10 @@ impl AppState {
         let queue_clone = Arc::clone(&queue);
 
         std::thread::spawn(move || {
-            while let Ok((path, index)) = texture_load_receiver.recv() {
+            while let Ok((path, index, is_left)) = texture_load_receiver.recv() {
                 let (image_data, size) = Self::load_image_data_from_path(&path).unwrap();
                 texture_ready_sender
-                    .send((index, image_data, size))
+                    .send((index, is_left, image_data, size))
                     .unwrap();
             }
         });
@@ -321,29 +321,41 @@ impl AppState {
         }
     }
 
-    pub fn update(&mut self) {
+    pub fn update(&mut self) -> bool {
         let now = Instant::now();
         let delta = now.duration_since(self.last_update);
         self.last_update = now;
 
         let frame_changed = self.player.update(delta);
         debug!("Update called, frame changed: {}", frame_changed);
+
+        // Always update textures, regardless of frame change
+        let textures_updated = self.update_textures();
+
         if frame_changed {
-            debug!("Frame changed, updating textures");
-            self.update_textures();
+            debug!("Frame changed");
+            // Perform any additional frame change specific actions here
         }
+
+        textures_updated
     }
 
-    fn update_textures(&mut self) {
+    fn update_textures(&mut self) -> bool {
         let (left_index, right_index) = self.player.current_images();
 
         let mut updated = false;
 
-        // Handle newly loaded textures
-        while let Ok((loaded_index, image_data, size)) = self.texture_load_receiver.try_recv() {
+        while let Ok((loaded_index, is_left, image_data, size)) =
+            self.texture_load_receiver.try_recv()
+        {
             self.player
-                .add_texture_to_cache(loaded_index, &image_data, size);
-            updated = true;
+                .add_texture_to_cache(loaded_index, is_left, &image_data, size);
+
+            // Check if the loaded texture is for the current frame
+            if (is_left && loaded_index == left_index) || (!is_left && loaded_index == right_index)
+            {
+                updated = true;
+            }
         }
 
         // Ensure current textures are loaded
@@ -353,19 +365,37 @@ impl AppState {
             updated = true;
         }
 
-        // Only update the displayed textures if both are available
+        // Update the displayed textures if they are available or have been updated
         if updated
-            && self.player.get_texture(left_index, true).is_some()
-            && self.player.get_texture(right_index, false).is_some()
+            || (self.player.get_texture(left_index, true).is_some()
+                && self.player.get_texture(right_index, false).is_some())
         {
-            *self.left_texture.write().unwrap() =
-                self.player.get_texture(left_index, true).unwrap();
-            *self.right_texture.write().unwrap() =
-                self.player.get_texture(right_index, false).unwrap();
+            *self.left_texture.write().unwrap() = self
+                .player
+                .get_texture(left_index, true)
+                .unwrap_or_else(|| {
+                    debug!(
+                        "Using fallback texture for left image: index={}",
+                        left_index
+                    );
+                    Arc::clone(&self.left_texture.read().unwrap())
+                });
+            *self.right_texture.write().unwrap() = self
+                .player
+                .get_texture(right_index, false)
+                .unwrap_or_else(|| {
+                    debug!(
+                        "Using fallback texture for right image: index={}",
+                        right_index
+                    );
+                    Arc::clone(&self.right_texture.read().unwrap())
+                });
         }
 
         // Preload next textures
         self.player.preload_textures(left_index, right_index);
+
+        updated
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
