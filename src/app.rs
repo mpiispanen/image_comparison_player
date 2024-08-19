@@ -3,7 +3,7 @@ use crate::player::Player;
 use log::{debug, info};
 use parking_lot::RwLock as PLRwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -25,7 +25,7 @@ pub struct AppState {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
-    player: Player,
+    player: Arc<RwLock<Player>>,
     cursor_x: f32,
     last_update: Instant,
     texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -234,7 +234,7 @@ impl AppState {
         let (texture_load_sender, texture_load_receiver) =
             std::sync::mpsc::channel::<TextureLoadRequest>();
 
-        let player = Player::new(
+        let player = Arc::new(RwLock::new(Player::new(
             images1,
             images2,
             cache_size,
@@ -243,62 +243,75 @@ impl AppState {
             texture_load_sender.clone(),
             Arc::clone(&queue),
             Arc::clone(&device),
-        );
+        )));
         debug!("Player initialized");
 
-        let texture_cache_left = Arc::clone(&player.texture_cache_left)
+        let texture_cache_left = Arc::clone(&player.read().unwrap().texture_cache_left)
             as Arc<PLRwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
-        let texture_cache_right = Arc::clone(&player.texture_cache_right)
+        let texture_cache_right = Arc::clone(&player.read().unwrap().texture_cache_right)
             as Arc<PLRwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
 
         let device_clone = Arc::clone(&device);
         let queue_clone = Arc::clone(&queue);
+        let player_clone = Arc::clone(&player);
 
         std::thread::spawn(move || {
             while let Ok((path, index, is_left)) = texture_load_receiver.recv() {
-                let (image_data, size) = Self::load_image_data_from_path(&path).unwrap();
-                let texture = device_clone.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Image Texture"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
+                // Check if the texture is still needed before loading
+                if player_clone
+                    .read()
+                    .unwrap()
+                    .is_within_preload_range(index, is_left)
+                {
+                    let (image_data, size) = Self::load_image_data_from_path(&path).unwrap();
+                    let texture = device_clone.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Image Texture"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
 
-                queue_clone.write_texture(
-                    wgpu::ImageCopyTexture {
-                        aspect: wgpu::TextureAspect::All,
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                    },
-                    &image_data,
-                    wgpu::ImageDataLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * size.width),
-                        rows_per_image: Some(size.height),
-                    },
-                    size,
-                );
+                    queue_clone.write_texture(
+                        wgpu::ImageCopyTexture {
+                            aspect: wgpu::TextureAspect::All,
+                            texture: &texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                        },
+                        &image_data,
+                        wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(4 * size.width),
+                            rows_per_image: Some(size.height),
+                        },
+                        size,
+                    );
 
-                let cache = if is_left {
-                    &texture_cache_left
+                    let cache = if is_left {
+                        &texture_cache_left
+                    } else {
+                        &texture_cache_right
+                    };
+
+                    let cache_read = cache.read();
+                    if let Some(texture_holder) = cache_read.get(&index) {
+                        let mut texture_lock = texture_holder.lock().unwrap();
+                        *texture_lock = Some(Arc::new(texture));
+                    }
                 } else {
-                    &texture_cache_right
-                };
-
-                let cache_read = cache.read();
-                if let Some(texture_holder) = cache_read.get(&index) {
-                    let mut texture_lock = texture_holder.lock().unwrap();
-                    *texture_lock = Some(Arc::new(texture));
+                    debug!(
+                        "Skipping load for out-of-range texture: index={}, is_left={}",
+                        index, is_left
+                    );
                 }
             }
         });
 
-        let (left_texture, right_texture) = player.load_initial_textures()?;
+        let (left_texture, right_texture) = player.write().unwrap().load_initial_textures()?;
 
         debug!(
             "Loaded left texture dimensions: {}x{}",
@@ -366,7 +379,7 @@ impl AppState {
         let delta = now.duration_since(self.last_update);
         self.last_update = now;
 
-        let frame_changed = self.player.update(delta);
+        let frame_changed = self.player.write().unwrap().update(delta);
         debug!("Update called, frame changed: {}", frame_changed);
 
         // Always update textures, regardless of frame change
@@ -381,40 +394,61 @@ impl AppState {
     }
 
     fn update_textures(&mut self) -> bool {
-        let (left_index, right_index) = self.player.current_images();
+        let (left_index, right_index) = self.player.write().unwrap().current_images();
 
         let mut updated = false;
 
         // Ensure current textures are loaded
-        if self.player.ensure_texture_loaded(left_index, true)
-            || self.player.ensure_texture_loaded(right_index, false)
+        if self
+            .player
+            .write()
+            .unwrap()
+            .ensure_texture_loaded(left_index, true)
+            || self
+                .player
+                .write()
+                .unwrap()
+                .ensure_texture_loaded(right_index, false)
         {
             updated = true;
         }
 
         // Update the displayed textures if they are available
-        if self.player.get_texture(left_index, true).is_some()
-            && self.player.get_texture(right_index, false).is_some()
+        if self
+            .player
+            .read()
+            .unwrap()
+            .get_texture(left_index, true)
+            .is_some()
+            && self
+                .player
+                .read()
+                .unwrap()
+                .get_texture(right_index, false)
+                .is_some()
         {
             updated = true;
         }
 
         // Preload next textures
-        self.player.preload_textures(left_index, right_index);
+        self.player
+            .write()
+            .unwrap()
+            .preload_textures(left_index, right_index);
 
         updated
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         debug!("Starting render function");
-        let (left_index, right_index) = self.player.current_images();
+        let (left_index, right_index) = self.player.write().unwrap().current_images();
         debug!(
             "Current frame indices: left={}, right={}",
             left_index, right_index
         );
 
-        let left_texture = self.player.get_texture(left_index, true);
-        let right_texture = self.player.get_texture(right_index, false);
+        let left_texture = self.player.read().unwrap().get_texture(left_index, true);
+        let right_texture = self.player.read().unwrap().get_texture(right_index, false);
 
         debug!(
             "Left texture: {:?}",
@@ -440,6 +474,8 @@ impl AppState {
 
         let left_texture = self
             .player
+            .read()
+            .unwrap()
             .get_texture(left_index, true)
             .unwrap_or_else(|| {
                 debug!(
@@ -450,6 +486,8 @@ impl AppState {
             });
         let right_texture = self
             .player
+            .read()
+            .unwrap()
             .get_texture(right_index, false)
             .unwrap_or_else(|| {
                 debug!(
@@ -561,16 +599,16 @@ impl AppState {
     }
 
     pub fn toggle_play_pause(&mut self) {
-        self.player.toggle_play_pause();
+        self.player.write().unwrap().toggle_play_pause();
     }
 
     pub fn next_frame(&mut self) {
-        self.player.next_frame();
+        self.player.write().unwrap().next_frame();
         self.update_textures();
     }
 
     pub fn previous_frame(&mut self) {
-        self.player.previous_frame();
+        self.player.write().unwrap().previous_frame();
         self.update_textures();
     }
 
@@ -579,6 +617,6 @@ impl AppState {
     }
 
     pub fn handle_mouse_click(&mut self) {
-        self.player.toggle_play_pause();
+        self.player.write().unwrap().toggle_play_pause();
     }
 }

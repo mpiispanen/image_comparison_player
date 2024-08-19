@@ -207,6 +207,10 @@ impl Player {
     }
 
     pub fn ensure_texture_loaded(&self, index: usize, is_left: bool) -> bool {
+        if !self.is_within_preload_range(index, is_left) {
+            return false;
+        }
+
         let cache = if is_left {
             &self.texture_cache_left
         } else {
@@ -217,9 +221,8 @@ impl Player {
         if !cache_read.contains_key(&index) {
             drop(cache_read);
             let mut cache_write = cache.write();
-            if !cache_write.contains_key(&index) {
+            cache_write.entry(index).or_insert_with(|| {
                 let texture_holder = Arc::new(Mutex::new(None));
-                cache_write.insert(index, Arc::clone(&texture_holder));
                 let path = if is_left {
                     &self.image_data1[index].0
                 } else {
@@ -228,10 +231,9 @@ impl Player {
                 self.texture_load_sender
                     .send((path.to_string(), index, is_left))
                     .unwrap();
-                true
-            } else {
-                false
-            }
+                texture_holder
+            });
+            true
         } else {
             false
         }
@@ -245,16 +247,24 @@ impl Player {
         for i in 1..=self.preload_ahead {
             let preload_index1 = (index1 + i) % frame_count1;
             let preload_index2 = (index2 + i) % frame_count2;
-            self.ensure_texture_loaded(preload_index1, true);
-            self.ensure_texture_loaded(preload_index2, false);
+            if !self.ensure_texture_loaded(preload_index1, true) {
+                break;
+            }
+            if !self.ensure_texture_loaded(preload_index2, false) {
+                break;
+            }
         }
 
         // Preload behind
         for i in 1..=self.preload_behind {
             let preload_index1 = (index1 + frame_count1 - i) % frame_count1;
             let preload_index2 = (index2 + frame_count2 - i) % frame_count2;
-            self.ensure_texture_loaded(preload_index1, true);
-            self.ensure_texture_loaded(preload_index2, false);
+            if !self.ensure_texture_loaded(preload_index1, true) {
+                break;
+            }
+            if !self.ensure_texture_loaded(preload_index2, false) {
+                break;
+            }
         }
     }
 
@@ -265,6 +275,14 @@ impl Player {
         image_data: &[u8],
         size: wgpu::Extent3d,
     ) -> bool {
+        if !self.is_within_preload_range(index, is_left) {
+            debug!(
+                "Skipping texture addition to cache: index={}, is_left={} (out of preload range)",
+                index, is_left
+            );
+            return false;
+        }
+
         debug!(
             "Adding texture to cache: index={}, is_left={}, size={:?}",
             index, is_left, size
@@ -498,5 +516,25 @@ impl Player {
             self.ensure_texture_loaded(preload_index1, true);
             self.ensure_texture_loaded(preload_index2, false);
         }
+    }
+
+    pub fn is_within_preload_range(&self, index: usize, is_left: bool) -> bool {
+        let current_frame = if is_left {
+            self.current_frame1
+        } else {
+            self.current_frame2
+        };
+        let frame_count = if is_left {
+            self.frame_count1
+        } else {
+            self.frame_count2
+        };
+
+        let forward_distance = (index + frame_count - current_frame) % frame_count;
+        let backward_distance = (current_frame + frame_count - index) % frame_count;
+
+        let min_distance = std::cmp::min(forward_distance, backward_distance);
+
+        min_distance <= self.preload_ahead || min_distance <= self.preload_behind
     }
 }
