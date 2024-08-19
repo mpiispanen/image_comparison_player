@@ -399,34 +399,30 @@ impl AppState {
         let mut updated = false;
 
         // Ensure current textures are loaded
-        if self
-            .player
+        self.player
             .write()
             .unwrap()
-            .ensure_texture_loaded(left_index, true)
-            || self
-                .player
-                .write()
-                .unwrap()
-                .ensure_texture_loaded(right_index, false)
-        {
-            updated = true;
-        }
-
-        // Update the displayed textures if they are available
-        if self
-            .player
-            .read()
+            .ensure_texture_loaded(left_index, true);
+        self.player
+            .write()
             .unwrap()
-            .get_texture(left_index, true)
-            .is_some()
-            && self
-                .player
-                .read()
+            .ensure_texture_loaded(right_index, false);
+
+        // Only update if both textures are available
+        if let (Some(left_texture), Some(right_texture)) = (
+            self.player.read().unwrap().get_texture(left_index, true),
+            self.player.read().unwrap().get_texture(right_index, false),
+        ) {
+            self.left_texture
+                .write()
+                .lock()
                 .unwrap()
-                .get_texture(right_index, false)
-                .is_some()
-        {
+                .replace(Arc::clone(&left_texture));
+            self.right_texture
+                .write()
+                .lock()
+                .unwrap()
+                .replace(Arc::clone(&right_texture));
             updated = true;
         }
 
@@ -447,17 +443,12 @@ impl AppState {
             left_index, right_index
         );
 
-        let left_texture = self.player.read().unwrap().get_texture(left_index, true);
-        let right_texture = self.player.read().unwrap().get_texture(right_index, false);
+        let left_texture = Arc::clone(&self.left_texture.read().lock().unwrap().as_ref().unwrap());
+        let right_texture =
+            Arc::clone(&self.right_texture.read().lock().unwrap().as_ref().unwrap());
 
-        debug!(
-            "Left texture: {:?}",
-            left_texture.as_ref().map(|t| t.size())
-        );
-        debug!(
-            "Right texture: {:?}",
-            right_texture.as_ref().map(|t| t.size())
-        );
+        debug!("Left texture: {:?}", left_texture.size());
+        debug!("Right texture: {:?}", right_texture.size());
 
         let output = self.surface.get_current_texture()?;
         let view = output
@@ -470,31 +461,6 @@ impl AppState {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
-            });
-
-        let left_texture = self
-            .player
-            .read()
-            .unwrap()
-            .get_texture(left_index, true)
-            .unwrap_or_else(|| {
-                debug!(
-                    "Using fallback texture for left image: index={}",
-                    left_index
-                );
-                Arc::clone(&self.left_texture.read().lock().unwrap().as_ref().unwrap())
-            });
-        let right_texture = self
-            .player
-            .read()
-            .unwrap()
-            .get_texture(right_index, false)
-            .unwrap_or_else(|| {
-                debug!(
-                    "Using fallback texture for right image: index={}",
-                    right_index
-                );
-                Arc::clone(&self.right_texture.read().lock().unwrap().as_ref().unwrap())
             });
 
         let texture_bind_group = self.create_texture_bind_group(&left_texture, &right_texture);
@@ -603,13 +569,14 @@ impl AppState {
     }
 
     pub fn next_frame(&mut self) {
-        self.player.write().unwrap().next_frame();
-        self.update_textures();
+        let frame_changed = self.player.write().unwrap().next_frame();
+        if frame_changed {
+            self.update_textures();
+        }
     }
 
     pub fn previous_frame(&mut self) {
         self.player.write().unwrap().previous_frame();
-        self.update_textures();
     }
 
     pub fn update_cursor_position(&mut self, x: f32, _y: f32) {
