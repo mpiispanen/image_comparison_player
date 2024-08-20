@@ -1,10 +1,11 @@
 use crate::image_loader;
 use crate::player::Player;
 use log::{debug, info};
+use parking_lot::lock_api::RwLock;
+use parking_lot::Mutex;
 use parking_lot::RwLock as PLRwLock;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -25,7 +26,7 @@ pub struct AppState {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
-    player: Arc<RwLock<Player>>,
+    player: Arc<RwLock<parking_lot::RawRwLock, Player>>,
     cursor_x: f32,
     last_update: Instant,
     texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -231,8 +232,6 @@ impl AppState {
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let (texture_load_sender, texture_load_receiver) =
-            std::sync::mpsc::channel::<TextureLoadRequest>();
 
         let player = Arc::new(RwLock::new(Player::new(
             images1,
@@ -240,30 +239,40 @@ impl AppState {
             cache_size,
             preload_ahead,
             preload_behind,
-            texture_load_sender.clone(),
             Arc::clone(&queue),
             Arc::clone(&device),
         )));
         debug!("Player initialized");
 
-        let texture_cache_left = Arc::clone(&player.read().unwrap().texture_cache_left)
-            as Arc<PLRwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
-        let texture_cache_right = Arc::clone(&player.read().unwrap().texture_cache_right)
-            as Arc<PLRwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
+        let texture_cache_left = Arc::clone(&player.read().texture_cache_left);
+        let texture_cache_right = Arc::clone(&player.read().texture_cache_right);
 
         let device_clone = Arc::clone(&device);
         let queue_clone = Arc::clone(&queue);
         let player_clone = Arc::clone(&player);
 
         std::thread::spawn(move || {
-            while let Ok((path, index, is_left)) = texture_load_receiver.recv() {
-                // Check if the texture is still needed before loading
-                if player_clone
-                    .read()
-                    .unwrap()
-                    .is_within_preload_range(index, is_left)
-                {
-                    let (image_data, size) = Self::load_image_data_from_path(&path).unwrap();
+            let mut empty_count = 0;
+            let mut start_time = Instant::now();
+
+            loop {
+                let (path, index, is_left) = {
+                    let request;
+                    {
+                        let player = player_clone.read();
+                        request = player.texture_load_queue.lock().pop();
+                    }
+                    if let Some(req) = request {
+                        req
+                    } else {
+                        // Sleep logic here
+                        continue;
+                    }
+                };
+
+                let is_within_range = player_clone.read().is_within_preload_range(index, is_left);
+                if is_within_range {
+                    let (image_data, size) = Self::load_image_data_from_path(path).unwrap();
                     let texture = device_clone.create_texture(&wgpu::TextureDescriptor {
                         label: Some("Image Texture"),
                         size,
@@ -297,21 +306,23 @@ impl AppState {
                         &texture_cache_right
                     };
 
-                    let cache_read = cache.read();
-                    if let Some(texture_holder) = cache_read.get(&index) {
-                        let mut texture_lock = texture_holder.lock().unwrap();
-                        *texture_lock = Some(Arc::new(texture));
-                    }
+                    let mut cache_write = cache.write();
+                    cache_write.insert(index, Arc::new(Mutex::new(Some(Arc::new(texture)))));
                 } else {
                     debug!(
                         "Skipping load for out-of-range texture: index={}, is_left={}",
                         index, is_left
                     );
                 }
+                empty_count = 0;
+                start_time = Instant::now();
             }
         });
 
-        let (left_texture, right_texture) = player.write().unwrap().load_initial_textures()?;
+        let (left_texture, right_texture) = player.write().load_initial_textures()?;
+
+        let left_texture = Arc::new(left_texture);
+        let right_texture = Arc::new(right_texture);
 
         debug!(
             "Loaded left texture dimensions: {}x{}",
@@ -340,17 +351,17 @@ impl AppState {
             uniform_buffer,
             uniform_bind_group_layout,
             vertex_buffer,
-            left_texture: Arc::new(PLRwLock::new(Arc::new(Mutex::new(Some(Arc::new(
-                left_texture,
+            left_texture: Arc::new(PLRwLock::new(Arc::new(Mutex::new(Some(Arc::clone(
+                &left_texture,
             )))))),
-            right_texture: Arc::new(PLRwLock::new(Arc::new(Mutex::new(Some(Arc::new(
-                right_texture,
+            right_texture: Arc::new(PLRwLock::new(Arc::new(Mutex::new(Some(Arc::clone(
+                &right_texture,
             )))))),
         })
     }
 
     fn load_image_data_from_path(
-        path: &str,
+        path: String,
     ) -> Result<(Vec<u8>, wgpu::Extent3d), Box<dyn std::error::Error>> {
         let img = image::open(path)?;
         let rgba = img.to_rgba8();
@@ -379,7 +390,7 @@ impl AppState {
         let delta = now.duration_since(self.last_update);
         self.last_update = now;
 
-        let frame_changed = self.player.write().unwrap().update(delta);
+        let frame_changed = self.player.write().update(delta);
         debug!("Update called, frame changed: {}", frame_changed);
 
         // Always update textures, regardless of frame change
@@ -394,42 +405,29 @@ impl AppState {
     }
 
     fn update_textures(&mut self) -> bool {
-        let (left_index, right_index) = self.player.write().unwrap().current_images();
+        let (left_index, right_index) = self.player.write().current_images();
 
         let mut updated = false;
 
         // Ensure current textures are loaded
+        self.player.write().ensure_texture_loaded(left_index, true);
         self.player
             .write()
-            .unwrap()
-            .ensure_texture_loaded(left_index, true);
-        self.player
-            .write()
-            .unwrap()
             .ensure_texture_loaded(right_index, false);
 
         // Only update if both textures are available
         if let (Some(left_texture), Some(right_texture)) = (
-            self.player.read().unwrap().get_texture(left_index, true),
-            self.player.read().unwrap().get_texture(right_index, false),
+            self.player.read().get_texture(left_index, true),
+            self.player.read().get_texture(right_index, false),
         ) {
-            self.left_texture
-                .write()
-                .lock()
-                .unwrap()
-                .replace(Arc::clone(&left_texture));
-            self.right_texture
-                .write()
-                .lock()
-                .unwrap()
-                .replace(Arc::clone(&right_texture));
+            *self.left_texture.write() = Arc::new(Mutex::new(Some(Arc::clone(&left_texture))));
+            *self.right_texture.write() = Arc::new(Mutex::new(Some(Arc::clone(&right_texture))));
             updated = true;
         }
 
         // Preload next textures
         self.player
             .write()
-            .unwrap()
             .preload_textures(left_index, right_index);
 
         updated
@@ -437,15 +435,17 @@ impl AppState {
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         debug!("Starting render function");
-        let (left_index, right_index) = self.player.write().unwrap().current_images();
+        let (left_index, right_index) = self.player.write().current_images();
         debug!(
             "Current frame indices: left={}, right={}",
             left_index, right_index
         );
 
-        let left_texture = Arc::clone(&self.left_texture.read().lock().unwrap().as_ref().unwrap());
-        let right_texture =
-            Arc::clone(&self.right_texture.read().lock().unwrap().as_ref().unwrap());
+        let left_texture = self.left_texture.read().lock().clone().unwrap();
+        let right_texture = self.right_texture.read().lock().clone().unwrap();
+
+        let left_texture = left_texture.as_ref();
+        let right_texture = right_texture.as_ref();
 
         debug!("Left texture: {:?}", left_texture.size());
         debug!("Right texture: {:?}", right_texture.size());
@@ -525,8 +525,8 @@ impl AppState {
 
     fn create_texture_bind_group(
         &self,
-        texture1: &Arc<wgpu::Texture>,
-        texture2: &Arc<wgpu::Texture>,
+        texture1: &wgpu::Texture,
+        texture2: &wgpu::Texture,
     ) -> wgpu::BindGroup {
         let texture_view1 = texture1.create_view(&wgpu::TextureViewDescriptor::default());
         let texture_view2 = texture2.create_view(&wgpu::TextureViewDescriptor::default());
@@ -565,18 +565,18 @@ impl AppState {
     }
 
     pub fn toggle_play_pause(&mut self) {
-        self.player.write().unwrap().toggle_play_pause();
+        self.player.write().toggle_play_pause();
     }
 
     pub fn next_frame(&mut self) {
-        let frame_changed = self.player.write().unwrap().next_frame();
+        let frame_changed = self.player.write().next_frame();
         if frame_changed {
             self.update_textures();
         }
     }
 
     pub fn previous_frame(&mut self) {
-        self.player.write().unwrap().previous_frame();
+        self.player.write().previous_frame();
     }
 
     pub fn update_cursor_position(&mut self, x: f32, _y: f32) {
@@ -584,6 +584,6 @@ impl AppState {
     }
 
     pub fn handle_mouse_click(&mut self) {
-        self.player.write().unwrap().toggle_play_pause();
+        self.player.write().toggle_play_pause();
     }
 }

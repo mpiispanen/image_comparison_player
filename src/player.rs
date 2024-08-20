@@ -1,14 +1,14 @@
 use log::debug;
-use parking_lot::RwLock as PLRwLock;
+use parking_lot::{Mutex, RwLock as PLRwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 pub type TextureLoadRequest = (String, usize, bool);
 
 pub struct PriorityTextureLoadQueue {
-    queue: VecDeque<TextureLoadRequest>,
-    unique_requests: HashSet<(usize, bool)>,
+    queue: Arc<Mutex<VecDeque<TextureLoadRequest>>>,
+    unique_requests: Arc<Mutex<HashSet<(usize, bool)>>>,
     frame_count_left: usize,
     frame_count_right: usize,
 }
@@ -16,37 +16,41 @@ pub struct PriorityTextureLoadQueue {
 impl PriorityTextureLoadQueue {
     fn new(frame_count_left: usize, frame_count_right: usize) -> Self {
         Self {
-            queue: VecDeque::new(),
-            unique_requests: HashSet::new(),
+            queue: Arc::new(Mutex::new(VecDeque::new())),
+            unique_requests: Arc::new(Mutex::new(HashSet::new())),
             frame_count_left,
             frame_count_right,
         }
     }
 
-    fn push(&mut self, request: TextureLoadRequest) {
+    pub fn push(&self, request: TextureLoadRequest) {
         let key = (request.1, request.2);
-        if !self.unique_requests.contains(&key) {
-            self.queue.push_back(request);
-            self.unique_requests.insert(key);
+        let mut unique_requests = self.unique_requests.lock();
+        if !unique_requests.contains(&key) {
+            self.queue.lock().push_back(request);
+            unique_requests.insert(key);
         }
     }
 
-    fn pop(&mut self) -> Option<TextureLoadRequest> {
-        if let Some(request) = self.queue.pop_front() {
-            self.unique_requests.remove(&(request.1, request.2));
+    pub fn pop(&self) -> Option<TextureLoadRequest> {
+        let mut queue = self.queue.lock();
+        let mut unique_requests = self.unique_requests.lock();
+        if let Some(request) = queue.pop_front() {
+            unique_requests.remove(&(request.1, request.2));
             Some(request)
         } else {
             None
         }
     }
 
-    fn clear(&mut self) {
-        self.queue.clear();
-        self.unique_requests.clear();
+    pub fn clear(&self) {
+        self.queue.lock().clear();
+        self.unique_requests.lock().clear();
     }
 
-    fn reprioritize(&mut self, current_frame_left: usize, current_frame_right: usize) {
-        self.queue.make_contiguous().sort_by_key(|req| {
+    pub fn reprioritize(&self, current_frame_left: usize, current_frame_right: usize) {
+        let mut queue = self.queue.lock();
+        queue.make_contiguous().sort_by_key(|req| {
             let (current_frame, frame_count) = if req.2 {
                 (current_frame_left, self.frame_count_left)
             } else {
@@ -59,8 +63,8 @@ impl PriorityTextureLoadQueue {
         });
     }
 
-    fn contains(&self, key: &(usize, bool)) -> bool {
-        self.unique_requests.contains(key)
+    pub fn contains(&self, key: &(usize, bool)) -> bool {
+        self.unique_requests.lock().contains(key)
     }
 }
 
@@ -77,7 +81,6 @@ pub struct Player {
     frame_count2: usize,
     last_index1: usize,
     last_index2: usize,
-    texture_load_sender: std::sync::mpsc::Sender<TextureLoadRequest>,
     queue: Arc<wgpu::Queue>,
     device: Arc<wgpu::Device>,
     current_frame1: usize,
@@ -90,7 +93,7 @@ pub struct Player {
     cache_order_right: Vec<usize>,
     texture_reuse_pool: Vec<Arc<wgpu::Texture>>,
     frame_changed: bool,
-    texture_load_queue: Arc<Mutex<PriorityTextureLoadQueue>>,
+    pub texture_load_queue: Arc<Mutex<PriorityTextureLoadQueue>>,
 }
 
 impl Player {
@@ -100,7 +103,6 @@ impl Player {
         cache_size: usize,
         preload_ahead: usize,
         preload_behind: usize,
-        texture_load_sender: std::sync::mpsc::Sender<TextureLoadRequest>,
         queue: Arc<wgpu::Queue>,
         device: Arc<wgpu::Device>,
     ) -> Self {
@@ -119,7 +121,6 @@ impl Player {
             frame_count2,
             last_index1: 0,
             last_index2: 0,
-            texture_load_sender,
             queue,
             device,
             current_frame1: 0,
@@ -153,23 +154,7 @@ impl Player {
         let cache_read = cache.read();
         cache_read
             .get(&index)
-            .and_then(|texture_holder| texture_holder.lock().ok().and_then(|guard| guard.clone()))
-    }
-
-    fn request_texture_load(&self, path: &str, index: usize, is_left: bool) {
-        self.texture_load_sender
-            .send((path.to_string(), index, is_left))
-            .unwrap();
-    }
-
-    fn trigger_preload(&self, index1: usize, index2: usize) {
-        for i in 1..=self.preload_ahead {
-            let preload_index1 = (index1 + i) % self.frame_count1;
-            let preload_index2 = (index2 + i) % self.frame_count2;
-
-            self.request_texture_load(&self.image_data1[preload_index1].0, preload_index1, true);
-            self.request_texture_load(&self.image_data2[preload_index2].0, preload_index2, false);
-        }
+            .and_then(|texture_holder| texture_holder.lock().as_ref().cloned())
     }
 
     fn get_current_index(&self, image_data: &[(String, u64, u64)]) -> usize {
@@ -267,40 +252,46 @@ impl Player {
         if !cache_read.contains_key(&index) {
             drop(cache_read);
             let mut cache_write = cache.write();
-            cache_write.entry(index).or_insert_with(|| {
+            if !cache_write.contains_key(&index) {
                 let texture_holder = Arc::new(Mutex::new(None));
                 let path = if is_left {
                     &self.image_data1[index].0
                 } else {
                     &self.image_data2[index].0
                 };
-                self.texture_load_sender
-                    .send((path.to_string(), index, is_left))
-                    .unwrap();
-                texture_holder
-            });
-            true
+
+                // Check if the request is already in the queue
+                let queue = self.texture_load_queue.lock();
+                if !queue.contains(&(index, is_left)) {
+                    queue.push((path.to_string(), index, is_left));
+                }
+
+                cache_write.insert(index, texture_holder);
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
     }
 
-    pub fn preload_textures(&mut self, index1: usize, index2: usize) {
-        let mut queue = self.texture_load_queue.lock().unwrap();
-
+    pub fn preload_textures(&self, index1: usize, index2: usize) {
         debug!("Current frames: left={}, right={}", index1, index2);
-        debug!("Preloading textures...");
+        debug!("Updating preload queue...");
 
         // Helper function to add a request if it's not already in the queue
-        let mut add_if_not_present = |path: String, index: usize, is_left: bool| {
+        let add_if_not_present = |path: String, index: usize, is_left: bool| {
             let cache = if is_left {
                 &self.texture_cache_left
             } else {
                 &self.texture_cache_right
             };
 
-            if !queue.contains(&(index, is_left)) && !cache.read().contains_key(&index) {
-                queue.push((path, index, is_left));
+            if !self.texture_load_queue.lock().contains(&(index, is_left))
+                && !cache.read().contains_key(&index)
+            {
+                self.texture_load_queue.lock().push((path, index, is_left));
                 debug!(
                     "Queued for preload: {} ({})",
                     index,
@@ -337,21 +328,11 @@ impl Player {
             }
         }
 
-        queue.reprioritize(index1, index2);
-
-        debug!("Preload queue after reprioritization:");
-        for (i, (_, index, is_left)) in queue.queue.iter().enumerate() {
-            debug!(
-                "  {}: {} ({})",
-                i,
-                index,
-                if *is_left { "left" } else { "right" }
-            );
-        }
+        self.texture_load_queue.lock().reprioritize(index1, index2);
     }
 
     pub fn update_current_frame(&self, new_frame_left: usize, new_frame_right: usize) {
-        let mut queue = self.texture_load_queue.lock().unwrap();
+        let queue = self.texture_load_queue.lock();
         queue.reprioritize(new_frame_left, new_frame_right);
     }
 
@@ -414,11 +395,12 @@ impl Player {
         }
 
         // Remove the completed request from the queue
-        let mut queue = self.texture_load_queue.lock().unwrap();
-        queue
-            .queue
+        let queue = self.texture_load_queue.lock();
+        let mut queue_lock = queue.queue.lock();
+        queue_lock
             .retain(|&(_, req_index, req_is_left)| req_index != index || req_is_left != is_left);
-        queue.unique_requests.remove(&(index, is_left));
+        drop(queue_lock);
+        queue.unique_requests.lock().remove(&(index, is_left));
 
         debug!(
             "Texture added to cache and removed from queue. New cache state: {:?}",

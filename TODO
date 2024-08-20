@@ -6,3 +6,6 @@ TODO:
 - Stop loading images if we have moved so far past the image that it is not needed anymore
 - Multithreaded loading
 - Prioritize loading the current frame and frames around it in the direction of playback
+
+Questions:
+- Do we need to lock the player when we are updating the texture cache?
