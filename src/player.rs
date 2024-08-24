@@ -1,8 +1,11 @@
 use log::debug;
-use parking_lot::{Mutex, RwLock as PLRwLock};
+use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use std::time::Instant;
+use threadpool::ThreadPool;
 
 pub type TextureLoadRequest = (String, usize, bool);
 
@@ -71,9 +74,9 @@ impl PriorityTextureLoadQueue {
 pub struct Player {
     image_data1: Vec<(String, u64, u64)>,
     image_data2: Vec<(String, u64, u64)>,
-    current_time: u64,
-    is_playing: bool,
-    last_update: Instant,
+    current_time: AtomicU64,
+    is_playing: AtomicBool,
+    last_update: AtomicU64,
     cache_size: usize,
     preload_ahead: usize,
     preload_behind: usize,
@@ -83,17 +86,26 @@ pub struct Player {
     last_index2: usize,
     queue: Arc<wgpu::Queue>,
     device: Arc<wgpu::Device>,
-    current_frame1: usize,
-    current_frame2: usize,
-    pub texture_cache_left: Arc<PLRwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
-    pub texture_cache_right: Arc<PLRwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
+    current_frame1: AtomicUsize,
+    current_frame2: AtomicUsize,
+    pub texture_cache_left: Arc<RwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
+    pub texture_cache_right: Arc<RwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
     requested_textures_left: HashSet<usize>,
     requested_textures_right: HashSet<usize>,
     cache_order_left: Vec<usize>,
     cache_order_right: Vec<usize>,
-    texture_reuse_pool: Vec<Arc<wgpu::Texture>>,
-    frame_changed: bool,
+    texture_reuse_pool: Arc<Mutex<Vec<Arc<wgpu::Texture>>>>,
+    frame_changed: AtomicBool,
     pub texture_load_queue: Arc<Mutex<PriorityTextureLoadQueue>>,
+    texture_load_pool: ThreadPool,
+    texture_load_sender: Sender<TextureLoadRequest>,
+    texture_load_receiver: Arc<Mutex<Receiver<(String, usize, bool)>>>,
+    texture_process_pool: ThreadPool,
+    texture_process_sender: Sender<(usize, bool, Vec<u8>, wgpu::Extent3d)>,
+    texture_process_receiver: Arc<Mutex<Receiver<(usize, bool, Vec<u8>, wgpu::Extent3d)>>>,
+    left_texture: Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
+    right_texture: Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
+    processing_textures: Arc<Mutex<HashSet<(usize, bool)>>>,
 }
 
 impl Player {
@@ -105,15 +117,30 @@ impl Player {
         preload_behind: usize,
         queue: Arc<wgpu::Queue>,
         device: Arc<wgpu::Device>,
+        num_load_threads: usize,
+        num_process_threads: usize,
     ) -> Self {
         let frame_count1 = image_data1.len();
         let frame_count2 = image_data2.len();
+        let (texture_load_sender, texture_load_receiver) = channel();
+        let texture_load_receiver = Arc::new(Mutex::new(texture_load_receiver));
+        let (texture_process_sender, texture_process_receiver) = channel();
+        let texture_process_receiver = Arc::new(Mutex::new(texture_process_receiver));
+
+        let texture_load_pool = ThreadPool::new(num_load_threads);
+        let texture_process_pool = ThreadPool::new(num_process_threads);
+
         Self {
             image_data1,
             image_data2,
-            current_time: 0,
-            is_playing: false,
-            last_update: Instant::now(),
+            current_time: AtomicU64::new(0),
+            is_playing: AtomicBool::new(false),
+            last_update: AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            ),
             cache_size,
             preload_ahead,
             preload_behind,
@@ -123,25 +150,37 @@ impl Player {
             last_index2: 0,
             queue,
             device,
-            current_frame1: 0,
-            current_frame2: 0,
-            texture_cache_left: Arc::new(PLRwLock::new(HashMap::with_capacity(cache_size / 2))),
-            texture_cache_right: Arc::new(PLRwLock::new(HashMap::with_capacity(cache_size / 2))),
+            current_frame1: AtomicUsize::new(0),
+            current_frame2: AtomicUsize::new(0),
+            texture_cache_left: Arc::new(RwLock::new(HashMap::with_capacity(cache_size / 2))),
+            texture_cache_right: Arc::new(RwLock::new(HashMap::with_capacity(cache_size / 2))),
             requested_textures_left: HashSet::new(),
             requested_textures_right: HashSet::new(),
             cache_order_left: Vec::with_capacity(cache_size / 2),
             cache_order_right: Vec::with_capacity(cache_size / 2),
-            texture_reuse_pool: Vec::new(),
-            frame_changed: false,
+            texture_reuse_pool: Arc::new(Mutex::new(Vec::new())),
+            frame_changed: AtomicBool::new(false),
             texture_load_queue: Arc::new(Mutex::new(PriorityTextureLoadQueue::new(
                 frame_count1,
                 frame_count2,
             ))),
+            texture_load_pool,
+            texture_load_sender,
+            texture_load_receiver,
+            texture_process_pool,
+            texture_process_sender,
+            texture_process_receiver,
+            left_texture: Arc::new(Mutex::new(None)),
+            right_texture: Arc::new(Mutex::new(None)),
+            processing_textures: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     pub fn current_images(&self) -> (usize, usize) {
-        (self.current_frame1, self.current_frame2)
+        (
+            self.current_frame1.load(Ordering::Relaxed),
+            self.current_frame2.load(Ordering::Relaxed),
+        )
     }
 
     pub fn get_texture(&self, index: usize, is_left: bool) -> Option<Arc<wgpu::Texture>> {
@@ -157,89 +196,102 @@ impl Player {
             .and_then(|texture_holder| texture_holder.lock().as_ref().cloned())
     }
 
-    fn get_current_index(&self, image_data: &[(String, u64, u64)]) -> usize {
+    fn get_current_index(&self, image_data: &[(String, u64, u64)], current_time: u64) -> usize {
         image_data
             .iter()
-            .position(|(_, start, end)| *start <= self.current_time && self.current_time < *end)
+            .position(|(_, start, end)| *start <= current_time && current_time < *end)
             .unwrap_or(0)
     }
 
     pub fn is_playing(&self) -> bool {
-        self.is_playing
+        self.is_playing.load(Ordering::Relaxed)
     }
 
-    pub fn toggle_play_pause(&mut self) {
-        self.is_playing = !self.is_playing;
-        self.last_update = Instant::now();
-        debug!(
-            "Player is now {}",
-            if self.is_playing { "playing" } else { "paused" }
+    pub fn toggle_play_pause(&self) {
+        self.is_playing.fetch_xor(true, Ordering::Relaxed);
+        self.last_update.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            Ordering::Relaxed,
         );
     }
 
-    pub fn next_frame(&mut self) -> bool {
-        let old_frame1 = self.current_frame1;
-        let old_frame2 = self.current_frame2;
-        self.current_frame1 = (self.current_frame1 + 1) % self.frame_count1;
-        self.current_frame2 = (self.current_frame2 + 1) % self.frame_count2;
-        self.current_time = std::cmp::max(
-            self.image_data1[self.current_frame1].1,
-            self.image_data2[self.current_frame2].1,
-        );
-        let changed = old_frame1 != self.current_frame1 || old_frame2 != self.current_frame2;
-        self.frame_changed = changed;
-        debug!(
-            "Next frame: {} -> {}, {} -> {}",
-            old_frame1, self.current_frame1, old_frame2, self.current_frame2
-        );
+    pub fn next_frame(&self) -> bool {
+        let old_frame1 = self.current_frame1.fetch_add(1, Ordering::Relaxed);
+        let old_frame2 = self.current_frame2.fetch_add(1, Ordering::Relaxed);
+
+        let new_frame1 = (old_frame1 + 1) % self.frame_count1;
+        let new_frame2 = (old_frame2 + 1) % self.frame_count2;
+
+        self.current_frame1.store(new_frame1, Ordering::Relaxed);
+        self.current_frame2.store(new_frame2, Ordering::Relaxed);
+
+        let changed = old_frame1 != new_frame1 || old_frame2 != new_frame2;
+        self.frame_changed.store(changed, Ordering::Relaxed);
+
         changed
     }
 
-    pub fn previous_frame(&mut self) -> bool {
-        let old_frame1 = self.current_frame1;
-        let old_frame2 = self.current_frame2;
-        self.current_frame1 = (self.current_frame1 + self.frame_count1 - 1) % self.frame_count1;
-        self.current_frame2 = (self.current_frame2 + self.frame_count2 - 1) % self.frame_count2;
-        self.current_time = std::cmp::min(
-            self.image_data1[self.current_frame1].1,
-            self.image_data2[self.current_frame2].1,
-        );
-        self.frame_changed = true;
-        debug!(
-            "Previous frame: {} -> {}, {} -> {}",
-            old_frame1, self.current_frame1, old_frame2, self.current_frame2
-        );
+    pub fn previous_frame(&self) -> bool {
+        let old_frame1 = self.current_frame1.load(Ordering::Relaxed);
+        let old_frame2 = self.current_frame2.load(Ordering::Relaxed);
+        let new_frame1 = (old_frame1 + self.frame_count1 - 1) % self.frame_count1;
+        let new_frame2 = (old_frame2 + self.frame_count2 - 1) % self.frame_count2;
+        self.current_frame1.store(new_frame1, Ordering::Relaxed);
+        self.current_frame2.store(new_frame2, Ordering::Relaxed);
+        self.frame_changed.store(true, Ordering::Relaxed);
         true
     }
 
-    pub fn has_frame_changed(&mut self) -> bool {
-        let changed = self.frame_changed;
-        self.frame_changed = false;
-        changed
+    pub fn has_frame_changed(&self) -> bool {
+        self.frame_changed.swap(false, Ordering::Relaxed)
     }
 
-    fn update_textures(&mut self) {
-        let index1 = self.current_frame1;
-        let index2 = self.current_frame2;
-        debug!("Updating textures: left={}, right={}", index1, index2);
+    pub fn update_textures(&self) -> bool {
+        let (current_left, current_right) = self.current_images();
 
-        // Only ensure the current textures are loaded
-        self.ensure_texture_loaded(index1, true);
-        self.ensure_texture_loaded(index2, false);
+        // Process other textures in the background
+        self.process_loaded_textures();
 
-        // Preload textures, but don't update the current ones again
-        self.preload_textures(index1, index2);
+        // Preload textures
+        self.preload_textures(current_left, current_right);
 
-        debug!(
-            "After update, texture cache state: left={:?}, right={:?}",
-            self.texture_cache_left.read().keys(),
-            self.texture_cache_right.read().keys()
-        );
+        // Check if new textures are available
+        let new_left_texture = self.get_texture(current_left, true);
+        let new_right_texture = self.get_texture(current_right, false);
+
+        let current_left_texture = self.left_texture.lock().clone();
+        let current_right_texture = self.right_texture.lock().clone();
+
+        let textures_updated = match (
+            &new_left_texture,
+            &new_right_texture,
+            &current_left_texture,
+            &current_right_texture,
+        ) {
+            (Some(nl), Some(nr), Some(cl), Some(cr)) => {
+                !Arc::ptr_eq(nl, cl) || !Arc::ptr_eq(nr, cr)
+            }
+            _ => new_left_texture.is_some() || new_right_texture.is_some(),
+        };
+
+        if textures_updated {
+            if let Some(new_left) = new_left_texture {
+                *self.left_texture.lock() = Some(new_left);
+            }
+            if let Some(new_right) = new_right_texture {
+                *self.right_texture.lock() = Some(new_right);
+            }
+        }
+
+        textures_updated
     }
 
-    pub fn ensure_texture_loaded(&self, index: usize, is_left: bool) -> bool {
+    pub fn ensure_texture_loaded(&self, index: usize, is_left: bool) {
         if !self.is_within_preload_range(index, is_left) {
-            return false;
+            return;
         }
 
         let cache = if is_left {
@@ -251,84 +303,173 @@ impl Player {
         let cache_read = cache.read();
         if !cache_read.contains_key(&index) {
             drop(cache_read);
-            let mut cache_write = cache.write();
-            if !cache_write.contains_key(&index) {
-                let texture_holder = Arc::new(Mutex::new(None));
-                let path = if is_left {
-                    &self.image_data1[index].0
-                } else {
-                    &self.image_data2[index].0
-                };
+            let path = if is_left {
+                &self.image_data1[index].0
+            } else {
+                &self.image_data2[index].0
+            };
 
-                // Check if the request is already in the queue
-                let queue = self.texture_load_queue.lock();
+            // Check if the image is already being processed
+            let mut processing_textures = self.processing_textures.lock();
+            if !processing_textures.contains(&(index, is_left)) {
+                processing_textures.insert((index, is_left));
+                drop(processing_textures);
+
+                // Add the request to the queue
+                let mut queue = self.texture_load_queue.lock();
                 if !queue.contains(&(index, is_left)) {
                     queue.push((path.to_string(), index, is_left));
                 }
-
-                cache_write.insert(index, texture_holder);
-                true
-            } else {
-                false
             }
-        } else {
-            false
         }
     }
 
-    pub fn preload_textures(&self, index1: usize, index2: usize) {
-        debug!("Current frames: left={}, right={}", index1, index2);
-        debug!("Updating preload queue...");
+    pub fn process_load_queue(&mut self) {
+        let mut queue = self.texture_load_queue.lock();
+        queue.reprioritize(
+            self.current_frame1.load(Ordering::Relaxed),
+            self.current_frame2.load(Ordering::Relaxed),
+        );
 
-        // Helper function to add a request if it's not already in the queue
-        let add_if_not_present = |path: String, index: usize, is_left: bool| {
+        while let Some((path, index, is_left)) = queue.pop() {
+            let sender = self.texture_load_sender.clone();
+            let texture_process_sender = self.texture_process_sender.clone();
+            let processing_textures = Arc::clone(&self.processing_textures);
+            self.texture_load_pool.execute(move || {
+                if let Ok((image_data, size)) = Self::load_image_data_from_path(&path) {
+                    sender.send((path.to_string(), index, is_left)).unwrap();
+                    texture_process_sender
+                        .send((index, is_left, image_data, size))
+                        .unwrap();
+                }
+                processing_textures.lock().remove(&(index, is_left));
+            });
+        }
+    }
+
+    pub fn process_loaded_textures(&self) {
+        while let Ok((index, is_left, image_data, size)) =
+            self.texture_process_receiver.lock().try_recv()
+        {
+            let texture = if let Some(reused_texture) = self.texture_reuse_pool.lock().pop() {
+                // Reuse an existing texture if available
+                reused_texture
+            } else {
+                // Create a new texture if none are available for reuse
+                Arc::new(self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(&format!(
+                        "Image Texture - {} (Frame {})",
+                        if is_left { "Left" } else { "Right" },
+                        index
+                    )),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                }))
+            };
+
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    aspect: wgpu::TextureAspect::All,
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                },
+                &image_data,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * size.width),
+                    rows_per_image: Some(size.height),
+                },
+                size,
+            );
+
             let cache = if is_left {
                 &self.texture_cache_left
             } else {
                 &self.texture_cache_right
             };
 
-            if !self.texture_load_queue.lock().contains(&(index, is_left))
-                && !cache.read().contains_key(&index)
+            // Update cache
+            let texture_arc = Arc::clone(&texture);
+            let mut cache_write = cache.write();
+            if let Some(old_texture) =
+                cache_write.insert(index, Arc::new(Mutex::new(Some(texture_arc))))
             {
-                self.texture_load_queue.lock().push((path, index, is_left));
-                debug!(
-                    "Queued for preload: {} ({})",
-                    index,
-                    if is_left { "left" } else { "right" }
-                );
+                // If there was an old texture, add it to the reuse pool
+                if let Some(old_texture) = old_texture.lock().take() {
+                    self.texture_reuse_pool.lock().push(old_texture);
+                }
             }
-        };
 
-        // Add textures in order of priority
-        for i in 0..=self.preload_ahead.max(self.preload_behind) {
-            if i <= self.preload_ahead {
-                let ahead_index1 = (index1 + i) % self.frame_count1;
-                let ahead_index2 = (index2 + i) % self.frame_count2;
-                add_if_not_present(self.image_data1[ahead_index1].0.clone(), ahead_index1, true);
-                add_if_not_present(
-                    self.image_data2[ahead_index2].0.clone(),
-                    ahead_index2,
-                    false,
-                );
+            // Evict old textures if the cache is full
+            if cache_write.len() > self.cache_size / 2 {
+                self.evict_old_textures();
             }
-            if i <= self.preload_behind && i > 0 {
-                let behind_index1 = (index1 + self.frame_count1 - i) % self.frame_count1;
-                let behind_index2 = (index2 + self.frame_count2 - i) % self.frame_count2;
-                add_if_not_present(
-                    self.image_data1[behind_index1].0.clone(),
-                    behind_index1,
-                    true,
-                );
-                add_if_not_present(
-                    self.image_data2[behind_index2].0.clone(),
-                    behind_index2,
-                    false,
-                );
-            }
+
+            // Notify that the texture is ready
+            self.frame_changed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn add_texture_to_cache_background(
+        index: usize,
+        is_left: bool,
+        texture: Arc<wgpu::Texture>,
+        texture_cache: Arc<RwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
+        texture_load_queue: Arc<Mutex<PriorityTextureLoadQueue>>,
+    ) {
+        debug!(
+            "Adding texture to cache: index={}, is_left={}, size={:?}",
+            index,
+            is_left,
+            texture.size()
+        );
+
+        let mut cache_write = texture_cache.write();
+        cache_write.insert(index, Arc::new(Mutex::new(Some(Arc::clone(&texture)))));
+
+        // Remove the completed request from the queue
+        let mut queue = texture_load_queue.lock();
+        queue
+            .queue
+            .lock()
+            .retain(|&(_, req_index, req_is_left)| req_index != index || req_is_left != is_left);
+        queue.unique_requests.lock().remove(&(index, is_left));
+
+        debug!(
+            "Texture added to cache and removed from queue. New cache state: {:?}",
+            cache_write.keys().collect::<Vec<_>>()
+        );
+    }
+
+    pub fn preload_textures(&self, index1: usize, index2: usize) {
+        // Ensure current frames are loaded first
+        self.ensure_texture_loaded(index1, true);
+        self.ensure_texture_loaded(index2, false);
+
+        let frame_count1 = self.frame_count1;
+        let frame_count2 = self.frame_count2;
+
+        // Preload ahead
+        for i in 1..=self.preload_ahead {
+            let preload_index1 = (index1 + i) % frame_count1;
+            let preload_index2 = (index2 + i) % frame_count2;
+            self.ensure_texture_loaded(preload_index1, true);
+            self.ensure_texture_loaded(preload_index2, false);
         }
 
-        self.texture_load_queue.lock().reprioritize(index1, index2);
+        // Preload behind
+        for i in 1..=self.preload_behind {
+            let preload_index1 = (index1 + frame_count1 - i) % frame_count1;
+            let preload_index2 = (index2 + frame_count2 - i) % frame_count2;
+            self.ensure_texture_loaded(preload_index1, true);
+            self.ensure_texture_loaded(preload_index2, false);
+        }
     }
 
     pub fn update_current_frame(&self, new_frame_left: usize, new_frame_right: usize) {
@@ -336,92 +477,11 @@ impl Player {
         queue.reprioritize(new_frame_left, new_frame_right);
     }
 
-    pub fn add_texture_to_cache(
-        &mut self,
-        index: usize,
-        is_left: bool,
-        image_data: &[u8],
-        size: wgpu::Extent3d,
-    ) -> bool {
-        if !self.is_within_preload_range(index, is_left) {
-            debug!(
-                "Skipping texture addition to cache: index={}, is_left={} (out of preload range)",
-                index, is_left
-            );
-            return false;
-        }
-
-        let texture = self.get_or_create_texture(size);
-
-        debug!(
-            "Adding texture to cache: index={}, is_left={}, size={:?}",
-            index, is_left, size
-        );
-
-        let cache = if is_left {
-            &mut self.texture_cache_left
-        } else {
-            &mut self.texture_cache_right
-        };
-        let cache_order = if is_left {
-            &mut self.cache_order_left
-        } else {
-            &mut self.cache_order_right
-        };
-
-        self.queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            image_data,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * size.width),
-                rows_per_image: Some(size.height),
-            },
-            size,
-        );
-
-        let texture_arc = Arc::new(texture);
-        cache
-            .write()
-            .insert(index, Arc::new(Mutex::new(Some(Arc::clone(&texture_arc)))));
-
-        if !cache_order.contains(&index) {
-            cache_order.push(index);
-        }
-
-        // Remove the completed request from the queue
-        let queue = self.texture_load_queue.lock();
-        let mut queue_lock = queue.queue.lock();
-        queue_lock
-            .retain(|&(_, req_index, req_is_left)| req_index != index || req_is_left != is_left);
-        drop(queue_lock);
-        queue.unique_requests.lock().remove(&(index, is_left));
-
-        debug!(
-            "Texture added to cache and removed from queue. New cache state: {:?}",
-            cache.read().keys().collect::<Vec<_>>()
-        );
-
-        // Check if the loaded texture is for the current frame
-        let (current_left_index, current_right_index) = self.current_images();
-        (is_left && index == current_left_index) || (!is_left && index == current_right_index)
-    }
-
-    fn get_index_to_evict(&self, is_left: bool) -> Option<usize> {
-        let cache_order = if is_left {
-            &self.cache_order_left
-        } else {
-            &self.cache_order_right
-        };
+    pub fn is_within_preload_range(&self, index: usize, is_left: bool) -> bool {
         let current_frame = if is_left {
-            self.current_frame1
+            self.current_frame1.load(Ordering::Relaxed)
         } else {
-            self.current_frame2
+            self.current_frame2.load(Ordering::Relaxed)
         };
         let frame_count = if is_left {
             self.frame_count1
@@ -429,58 +489,16 @@ impl Player {
             self.frame_count2
         };
 
-        cache_order
-            .iter()
-            .max_by_key(|&&index| {
-                let forward_distance = (index + frame_count - current_frame) % frame_count;
-                let backward_distance = (current_frame + frame_count - index) % frame_count;
-                std::cmp::min(forward_distance, backward_distance)
-            })
-            .copied()
+        let forward_distance = (index + frame_count - current_frame) % frame_count;
+        let backward_distance = (current_frame + frame_count - index) % frame_count;
+
+        let min_distance = std::cmp::min(forward_distance, backward_distance);
+
+        min_distance <= self.preload_ahead || min_distance <= self.preload_behind
     }
 
-    fn get_or_create_texture(&mut self, size: wgpu::Extent3d) -> Arc<wgpu::Texture> {
-        if let Some(texture) = self.texture_reuse_pool.pop() {
-            if texture.size() == size {
-                return texture;
-            }
-            // If size doesn't match, let it drop and create a new one
-        }
-
-        Arc::new(self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Reused Texture"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        }))
-    }
-
-    fn distance_from_current_frame(&self, index: usize, is_left: bool) -> usize {
-        let current_frame = if is_left {
-            self.current_frame1
-        } else {
-            self.current_frame2
-        };
-        let frame_count = if is_left {
-            self.frame_count1
-        } else {
-            self.frame_count2
-        };
-
-        std::cmp::min(
-            (index + frame_count - current_frame) % frame_count,
-            (current_frame + frame_count - index) % frame_count,
-        )
-    }
-
-    pub fn update(&mut self, delta: std::time::Duration) -> bool {
-        if self.is_playing {
+    pub fn update(&self, delta: std::time::Duration) -> bool {
+        if self.is_playing.load(Ordering::Relaxed) {
             self.advance_frame(delta.as_micros() as u64);
             true
         } else {
@@ -488,21 +506,25 @@ impl Player {
         }
     }
 
-    fn advance_frame(&mut self, delta_micros: u64) {
-        self.current_time += delta_micros;
-        if self.current_time >= self.total_duration() {
-            self.current_time %= self.total_duration();
+    fn advance_frame(&self, delta_micros: u64) {
+        let mut current_time = self.current_time.load(Ordering::Relaxed);
+        current_time += delta_micros;
+        if current_time >= self.total_duration() {
+            current_time %= self.total_duration();
         }
+        self.current_time.store(current_time, Ordering::Relaxed);
 
-        let old_frame1 = self.current_frame1;
-        let old_frame2 = self.current_frame2;
+        let old_frame1 = self.current_frame1.load(Ordering::Relaxed);
+        let old_frame2 = self.current_frame2.load(Ordering::Relaxed);
 
-        self.current_frame1 = self.get_current_index(&self.image_data1);
-        self.current_frame2 = self.get_current_index(&self.image_data2);
+        let new_frame1 = self.get_current_index(&self.image_data1, current_time as u64);
+        let new_frame2 = self.get_current_index(&self.image_data2, current_time as u64);
 
-        if self.current_frame1 != old_frame1 || self.current_frame2 != old_frame2 {
-            self.frame_changed = true;
-            self.update_textures();
+        self.current_frame1.store(new_frame1, Ordering::Relaxed);
+        self.current_frame2.store(new_frame2, Ordering::Relaxed);
+
+        if new_frame1 != old_frame1 || new_frame2 != old_frame2 {
+            self.frame_changed.store(true, Ordering::Relaxed);
         }
     }
 
@@ -541,7 +563,11 @@ impl Player {
         };
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Image Texture"),
+            label: Some(&format!(
+                "Image Texture - {} (Frame {})",
+                if is_left { "Left" } else { "Right" },
+                index
+            )),
             size,
             mip_level_count: 1,
             sample_count: 1,
@@ -570,35 +596,82 @@ impl Player {
         Ok(texture)
     }
 
-    fn check_and_load_textures(&mut self) {
-        let (index1, index2) = self.current_images();
+    fn load_image_data_from_path(
+        path: &str,
+    ) -> Result<(Vec<u8>, wgpu::Extent3d), Box<dyn std::error::Error>> {
+        let img = image::open(path)?;
+        let rgba = img.to_rgba8();
+        let dimensions = rgba.dimensions();
 
-        for i in 0..=self.preload_ahead {
-            let preload_index1 = (index1 + i) % self.frame_count1;
-            let preload_index2 = (index2 + i) % self.frame_count2;
+        let size = wgpu::Extent3d {
+            width: dimensions.0,
+            height: dimensions.1,
+            depth_or_array_layers: 1,
+        };
 
-            self.ensure_texture_loaded(preload_index1, true);
-            self.ensure_texture_loaded(preload_index2, false);
-        }
+        Ok((rgba.into_raw(), size))
     }
 
-    pub fn is_within_preload_range(&self, index: usize, is_left: bool) -> bool {
-        let current_frame = if is_left {
-            self.current_frame1
-        } else {
-            self.current_frame2
-        };
-        let frame_count = if is_left {
-            self.frame_count1
-        } else {
-            self.frame_count2
-        };
+    pub fn get_left_texture(&self) -> Option<Arc<wgpu::Texture>> {
+        self.left_texture.lock().clone()
+    }
 
-        let forward_distance = (index + frame_count - current_frame) % frame_count;
-        let backward_distance = (current_frame + frame_count - index) % frame_count;
+    pub fn get_right_texture(&self) -> Option<Arc<wgpu::Texture>> {
+        self.right_texture.lock().clone()
+    }
 
-        let min_distance = std::cmp::min(forward_distance, backward_distance);
+    fn evict_old_textures(&self) {
+        let current_frame_left = self.current_frame1.load(Ordering::Relaxed);
+        let current_frame_right = self.current_frame2.load(Ordering::Relaxed);
 
-        min_distance <= self.preload_ahead || min_distance <= self.preload_behind
+        let mut cache_left = self.texture_cache_left.write();
+        let mut cache_right = self.texture_cache_right.write();
+
+        let mut reuse_pool = self.texture_reuse_pool.lock();
+
+        Self::evict_old_textures_from_cache(
+            &mut cache_left,
+            current_frame_left,
+            self.frame_count1,
+            &mut reuse_pool,
+        );
+        Self::evict_old_textures_from_cache(
+            &mut cache_right,
+            current_frame_right,
+            self.frame_count2,
+            &mut reuse_pool,
+        );
+    }
+
+    fn evict_old_textures_from_cache(
+        cache: &mut HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>,
+        current_frame: usize,
+        frame_count: usize,
+        reuse_pool: &mut Vec<Arc<wgpu::Texture>>,
+    ) {
+        if cache.len() <= 1 {
+            return;
+        }
+
+        let mut frames: Vec<usize> = cache.keys().cloned().collect();
+        frames.sort_by_key(|&frame| {
+            std::cmp::min(
+                (frame as i32 - current_frame as i32).abs() as usize,
+                frame_count - (frame as i32 - current_frame as i32).abs() as usize,
+            )
+        });
+
+        while frames.len() > 1 {
+            let frame_to_evict = frames.pop().unwrap();
+            if frame_to_evict == current_frame {
+                continue;
+            }
+
+            if let Some(evicted_texture) = cache.remove(&frame_to_evict) {
+                if let Some(texture) = evicted_texture.lock().take() {
+                    reuse_pool.push(texture);
+                }
+            }
+        }
     }
 }

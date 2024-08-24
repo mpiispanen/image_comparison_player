@@ -67,6 +67,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Number of images to preload behind")
                 .default_value("25"),
         )
+        .arg(
+            Arg::new("num_load_threads")
+                .long("num-load-threads")
+                .action(ArgAction::Set)
+                .value_name("COUNT")
+                .help("Number of threads to use for loading images")
+                .default_value("4"),
+        )
+        .arg(
+            Arg::new("num_process_threads")
+                .long("num-process-threads")
+                .action(ArgAction::Set)
+                .value_name("COUNT")
+                .help("Number of threads to use for processing images")
+                .default_value("4"),
+        )
         .get_matches();
 
     let dir1 = matches.get_one::<String>("dir1").unwrap();
@@ -87,6 +103,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .parse()
         .unwrap_or(25);
+    let num_load_threads = matches
+        .get_one::<String>("num_load_threads")
+        .unwrap()
+        .parse()
+        .unwrap_or(4);
+    let num_process_threads = matches
+        .get_one::<String>("num_process_threads")
+        .unwrap()
+        .parse()
+        .unwrap_or(4);
 
     let (width, height) = parse_window_size(window_size)?;
 
@@ -108,6 +134,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cache_size,
         preload_ahead,
         preload_behind,
+        num_load_threads,
+        num_process_threads,
     ))?;
 
     event_loop.run(move |event, _, control_flow| {
@@ -125,9 +153,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                     ..
                 } => match keycode {
-                    VirtualKeyCode::Space => app_state.toggle_play_pause(),
-                    VirtualKeyCode::Right => app_state.next_frame(),
-                    VirtualKeyCode::Left => app_state.previous_frame(),
+                    VirtualKeyCode::Space => {
+                        app_state.toggle_play_pause();
+                        window.request_redraw();
+                    }
+                    VirtualKeyCode::Right => {
+                        app_state.next_frame();
+                        window.request_redraw();
+                    }
+                    VirtualKeyCode::Left => {
+                        app_state.previous_frame();
+                        window.request_redraw();
+                    }
                     VirtualKeyCode::Escape => *control_flow = ControlFlow::Exit,
                     _ => {}
                 },

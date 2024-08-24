@@ -9,3 +9,10 @@ TODO:
 
 Questions:
 - Do we need to lock the player when we are updating the texture cache?
+
+AI suggestions:
+Optimize texture caching:
+Implement a more efficient caching strategy that predicts which textures will be needed soon and preloads them in the background.
+Consider using a least recently used (LRU) cache to manage texture memory more effectively.
+Asynchronous rendering:
+Consider implementing a double-buffering or triple-buffering system to allow the main thread to continue processing while waiting for the GPU to finish rendering.

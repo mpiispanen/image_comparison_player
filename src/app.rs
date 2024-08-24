@@ -5,7 +5,7 @@ use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
 use parking_lot::RwLock as PLRwLock;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -17,13 +17,10 @@ struct UniformData {
     image2_size: [f32; 2],
 }
 
-type TextureLoadRequest = (String, usize, bool);
-
 pub struct AppState {
     surface: wgpu::Surface,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
     player: Arc<RwLock<parking_lot::RawRwLock, Player>>,
@@ -45,6 +42,8 @@ impl AppState {
         cache_size: usize,
         preload_ahead: usize,
         preload_behind: usize,
+        num_load_threads: usize,
+        num_process_threads: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         info!("Initializing AppState");
         let dir1 = std::fs::canonicalize(dir1)?;
@@ -241,83 +240,10 @@ impl AppState {
             preload_behind,
             Arc::clone(&queue),
             Arc::clone(&device),
+            num_load_threads,
+            num_process_threads,
         )));
         debug!("Player initialized");
-
-        let texture_cache_left = Arc::clone(&player.read().texture_cache_left);
-        let texture_cache_right = Arc::clone(&player.read().texture_cache_right);
-
-        let device_clone = Arc::clone(&device);
-        let queue_clone = Arc::clone(&queue);
-        let player_clone = Arc::clone(&player);
-
-        std::thread::spawn(move || {
-            let mut empty_count = 0;
-            let mut start_time = Instant::now();
-
-            loop {
-                let (path, index, is_left) = {
-                    let request;
-                    {
-                        let player = player_clone.read();
-                        request = player.texture_load_queue.lock().pop();
-                    }
-                    if let Some(req) = request {
-                        req
-                    } else {
-                        // Sleep logic here
-                        continue;
-                    }
-                };
-
-                let is_within_range = player_clone.read().is_within_preload_range(index, is_left);
-                if is_within_range {
-                    let (image_data, size) = Self::load_image_data_from_path(path).unwrap();
-                    let texture = device_clone.create_texture(&wgpu::TextureDescriptor {
-                        label: Some("Image Texture"),
-                        size,
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                        view_formats: &[],
-                    });
-
-                    queue_clone.write_texture(
-                        wgpu::ImageCopyTexture {
-                            aspect: wgpu::TextureAspect::All,
-                            texture: &texture,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d::ZERO,
-                        },
-                        &image_data,
-                        wgpu::ImageDataLayout {
-                            offset: 0,
-                            bytes_per_row: Some(4 * size.width),
-                            rows_per_image: Some(size.height),
-                        },
-                        size,
-                    );
-
-                    let cache = if is_left {
-                        &texture_cache_left
-                    } else {
-                        &texture_cache_right
-                    };
-
-                    let mut cache_write = cache.write();
-                    cache_write.insert(index, Arc::new(Mutex::new(Some(Arc::new(texture)))));
-                } else {
-                    debug!(
-                        "Skipping load for out-of-range texture: index={}, is_left={}",
-                        index, is_left
-                    );
-                }
-                empty_count = 0;
-                start_time = Instant::now();
-            }
-        });
 
         let (left_texture, right_texture) = player.write().load_initial_textures()?;
 
@@ -341,7 +267,6 @@ impl AppState {
             surface,
             device,
             queue,
-            config,
             size,
             render_pipeline,
             player,
@@ -379,61 +304,29 @@ impl AppState {
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
-            self.surface.configure(&self.device, &self.config);
         }
     }
 
-    pub fn update(&mut self) -> bool {
+    pub fn update(&mut self) {
         let now = Instant::now();
         let delta = now.duration_since(self.last_update);
         self.last_update = now;
 
-        let frame_changed = self.player.write().update(delta);
+        let mut player = self.player.write();
+        let frame_changed = player.update(delta);
+        player.process_load_queue();
         debug!("Update called, frame changed: {}", frame_changed);
 
-        // Always update textures, regardless of frame change
-        let textures_updated = self.update_textures();
-
         if frame_changed {
-            debug!("Frame changed");
-            // Perform any additional frame change specific actions here
+            drop(player); // Release the write lock before calling load_and_update_textures
+            self.load_and_update_textures();
         }
-
-        textures_updated
-    }
-
-    fn update_textures(&mut self) -> bool {
-        let (left_index, right_index) = self.player.write().current_images();
-
-        let mut updated = false;
-
-        // Ensure current textures are loaded
-        self.player.write().ensure_texture_loaded(left_index, true);
-        self.player
-            .write()
-            .ensure_texture_loaded(right_index, false);
-
-        // Only update if both textures are available
-        if let (Some(left_texture), Some(right_texture)) = (
-            self.player.read().get_texture(left_index, true),
-            self.player.read().get_texture(right_index, false),
-        ) {
-            *self.left_texture.write() = Arc::new(Mutex::new(Some(Arc::clone(&left_texture))));
-            *self.right_texture.write() = Arc::new(Mutex::new(Some(Arc::clone(&right_texture))));
-            updated = true;
-        }
-
-        // Preload next textures
-        self.player
-            .write()
-            .preload_textures(left_index, right_index);
-
-        updated
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        // Update textures every frame
+        self.player.write().update_textures();
+
         debug!("Starting render function");
         let (left_index, right_index) = self.player.write().current_images();
         debug!(
@@ -571,12 +464,35 @@ impl AppState {
     pub fn next_frame(&mut self) {
         let frame_changed = self.player.write().next_frame();
         if frame_changed {
-            self.update_textures();
+            self.load_and_update_textures();
         }
     }
 
     pub fn previous_frame(&mut self) {
-        self.player.write().previous_frame();
+        let frame_changed = self.player.write().previous_frame();
+        if frame_changed {
+            self.load_and_update_textures();
+        }
+    }
+
+    fn load_and_update_textures(&mut self) {
+        let mut player = self.player.write();
+        let (current_left, current_right) = player.current_images();
+
+        // Start loading textures in the background
+        player.ensure_texture_loaded(current_left, true);
+        player.ensure_texture_loaded(current_right, false);
+
+        // Check if textures are ready and update if they are
+        if let Some(new_left) = player.get_texture(current_left, true) {
+            *self.left_texture.write() = Arc::new(Mutex::new(Some(new_left)));
+        }
+        if let Some(new_right) = player.get_texture(current_right, false) {
+            *self.right_texture.write() = Arc::new(Mutex::new(Some(new_right)));
+        }
+
+        // Process any loaded textures
+        player.process_loaded_textures();
     }
 
     pub fn update_cursor_position(&mut self, x: f32, _y: f32) {
