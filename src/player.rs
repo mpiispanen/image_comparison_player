@@ -277,15 +277,6 @@ impl Player {
             _ => new_left_texture.is_some() || new_right_texture.is_some(),
         };
 
-        if textures_updated {
-            if let Some(new_left) = new_left_texture {
-                *self.left_texture.lock() = Some(new_left);
-            }
-            if let Some(new_right) = new_right_texture {
-                *self.right_texture.lock() = Some(new_right);
-            }
-        }
-
         textures_updated
     }
 

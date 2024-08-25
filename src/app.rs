@@ -318,14 +318,26 @@ impl AppState {
         debug!("Update called, frame changed: {}", frame_changed);
 
         if frame_changed {
-            drop(player); // Release the write lock before calling load_and_update_textures
+            drop(player);
             self.load_and_update_textures();
         }
     }
 
+    pub fn update_textures(&mut self) {
+        let mut player = self.player.write();
+        let (current_left, current_right) = player.current_images();
+
+        if let Some(new_left) = player.get_texture(current_left, true) {
+            *self.left_texture.write() = Arc::new(Mutex::new(Some(Arc::clone(&new_left))));
+        }
+        if let Some(new_right) = player.get_texture(current_right, false) {
+            *self.right_texture.write() = Arc::new(Mutex::new(Some(Arc::clone(&new_right))));
+        }
+    }
+
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        // Update textures every frame
-        self.player.write().update_textures();
+        self.update_textures();
+        self.player.write().process_loaded_textures();
 
         debug!("Starting render function");
         let (left_index, right_index) = self.player.write().current_images();
@@ -356,7 +368,7 @@ impl AppState {
                 label: Some("Render Encoder"),
             });
 
-        let texture_bind_group = self.create_texture_bind_group(&left_texture, &right_texture);
+        let texture_bind_group = self.create_texture_bind_group(left_texture, right_texture);
 
         let uniforms = UniformData {
             cursor_x: self.cursor_x / self.size.width as f32,
@@ -476,23 +488,16 @@ impl AppState {
     }
 
     fn load_and_update_textures(&mut self) {
-        let mut player = self.player.write();
-        let (current_left, current_right) = player.current_images();
+        {
+            let player = self.player.write();
+            let (current_left, current_right) = player.current_images();
 
-        // Start loading textures in the background
-        player.ensure_texture_loaded(current_left, true);
-        player.ensure_texture_loaded(current_right, false);
+            player.ensure_texture_loaded(current_left, true);
+            player.ensure_texture_loaded(current_right, false);
+        } // player is dropped here
 
-        // Check if textures are ready and update if they are
-        if let Some(new_left) = player.get_texture(current_left, true) {
-            *self.left_texture.write() = Arc::new(Mutex::new(Some(new_left)));
-        }
-        if let Some(new_right) = player.get_texture(current_right, false) {
-            *self.right_texture.write() = Arc::new(Mutex::new(Some(new_right)));
-        }
-
-        // Process any loaded textures
-        player.process_loaded_textures();
+        self.update_textures();
+        self.player.write().process_loaded_textures();
     }
 
     pub fn update_cursor_position(&mut self, x: f32, _y: f32) {
