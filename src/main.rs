@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::RedrawRequested(_) => {
                 app_state.update();
-                match app_state.render() {
+                match app_state.render(&window) {
                     Ok(_) => {}
                     Err(e) => error!("Render error: {}", e),
                 }

@@ -1,5 +1,7 @@
 use crate::image_loader;
 use crate::player::Player;
+use imgui::Ui;
+use imgui::{Condition, StyleVar};
 use log::{debug, info};
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
@@ -7,7 +9,7 @@ use parking_lot::RwLock as PLRwLock;
 use std::sync::Arc;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
-use winit::window::Window;
+use winit::window::Window as WinitWindow;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default, Debug)]
@@ -15,6 +17,51 @@ struct UniformData {
     cursor_x: f32,
     image1_size: [f32; 2],
     image2_size: [f32; 2],
+}
+
+struct CacheDebugWindow {
+    is_open: bool,
+}
+
+impl CacheDebugWindow {
+    fn new() -> Self {
+        Self { is_open: false }
+    }
+
+    fn draw(&mut self, ui: &Ui, player: &Player) {
+        ui.window("Cache Debug")
+            .size([500.0, 100.0], Condition::FirstUseEver)
+            .position([50.0, 50.0], Condition::FirstUseEver)
+            .build(|| {
+                let (current_left, current_right) = player.current_images();
+                let frame_count = player.frame_count1;
+
+                for i in 0..frame_count {
+                    let color = if player.texture_cache_left.read().contains_key(&i) {
+                        [0.0, 1.0, 0.0, 1.0] // Green
+                    } else if player.texture_load_queue.lock().contains(&(i, true)) {
+                        [1.0, 1.0, 0.0, 1.0] // Yellow
+                    } else {
+                        [1.0, 0.0, 0.0, 1.0] // Red
+                    };
+
+                    ui.push_style_var(StyleVar::FramePadding([1.0, 1.0]));
+                    let _ = ui.color_button(&format!("{}", i), color);
+
+                    if i == current_left {
+                        ui.same_line();
+                        ui.text("|");
+                        ui.same_line();
+                    } else {
+                        ui.same_line();
+                    }
+                }
+            });
+    }
+
+    fn toggle(&mut self) {
+        self.is_open = !self.is_open;
+    }
 }
 
 pub struct AppState {
@@ -32,11 +79,16 @@ pub struct AppState {
     vertex_buffer: wgpu::Buffer,
     left_texture: Arc<PLRwLock<Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>,
     right_texture: Arc<PLRwLock<Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>,
+    imgui_context: imgui::Context,
+    imgui_platform: imgui_winit_support::WinitPlatform,
+    imgui_renderer: imgui_wgpu::Renderer,
+    last_frame: std::time::Instant,
+    cache_debug_window: CacheDebugWindow,
 }
 
 impl AppState {
     pub async fn new(
-        window: &Window,
+        window: &WinitWindow,
         dir1: String,
         dir2: String,
         cache_size: usize,
@@ -262,6 +314,26 @@ impl AppState {
             right_texture.height()
         );
 
+        let mut imgui_context = imgui::Context::create();
+        let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
+        imgui_platform.attach_window(
+            imgui_context.io_mut(),
+            window,
+            imgui_winit_support::HiDpiMode::Default,
+        );
+
+        let imgui_renderer_config = imgui_wgpu::RendererConfig {
+            texture_format: config.format,
+            ..Default::default()
+        };
+
+        let imgui_renderer =
+            imgui_wgpu::Renderer::new(&mut imgui_context, &device, &queue, imgui_renderer_config);
+
+        let last_frame = std::time::Instant::now();
+
+        let cache_debug_window = CacheDebugWindow::new();
+
         info!("AppState initialized successfully");
         Ok(Self {
             surface,
@@ -282,6 +354,11 @@ impl AppState {
             right_texture: Arc::new(PLRwLock::new(Arc::new(Mutex::new(Some(Arc::clone(
                 &right_texture,
             )))))),
+            imgui_context,
+            imgui_platform,
+            imgui_renderer,
+            last_frame,
+            cache_debug_window,
         })
     }
 
@@ -335,7 +412,7 @@ impl AppState {
         }
     }
 
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&mut self, window: &WinitWindow) -> Result<(), wgpu::SurfaceError> {
         self.update_textures();
         self.player.write().process_loaded_textures();
 
@@ -368,17 +445,6 @@ impl AppState {
                 label: Some("Render Encoder"),
             });
 
-        let texture_bind_group = self.create_texture_bind_group(left_texture, right_texture);
-
-        let uniforms = UniformData {
-            cursor_x: self.cursor_x / self.size.width as f32,
-            image1_size: [left_texture.width() as f32, left_texture.height() as f32],
-            image2_size: [right_texture.width() as f32, right_texture.height() as f32],
-        };
-
-        self.queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-
         let uniform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Uniform Bind Group"),
             layout: &self.uniform_bind_group_layout,
@@ -388,39 +454,82 @@ impl AppState {
             }],
         });
 
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Render Pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.1,
-                        g: 0.2,
-                        b: 0.3,
-                        a: 1.0,
-                    }),
-                    store: true,
-                },
-            })],
-            depth_stencil_attachment: None,
-        });
+        let texture_bind_group = self.create_texture_bind_group(left_texture, right_texture);
 
-        render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_bind_group(0, &texture_bind_group, &[]);
-        render_pass.set_bind_group(1, &uniform_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.draw(0..6, 0..1);
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.1,
+                            g: 0.2,
+                            b: 0.3,
+                            a: 1.0,
+                        }),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
 
-        debug!("Issued draw calls");
+            let uniforms = UniformData {
+                cursor_x: self.cursor_x / self.size.width as f32,
+                image1_size: [left_texture.width() as f32, left_texture.height() as f32],
+                image2_size: [right_texture.width() as f32, right_texture.height() as f32],
+            };
 
-        drop(render_pass);
+            self.queue
+                .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
-        debug!("Finishing command encoder");
-        let command_buffer = encoder.finish();
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &texture_bind_group, &[]);
+            render_pass.set_bind_group(1, &uniform_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.draw(0..6, 0..1);
+        }
 
-        debug!("Submitting command buffer");
-        self.queue.submit(std::iter::once(command_buffer));
+        // Prepare ImGui frame
+        self.imgui_platform
+            .prepare_frame(self.imgui_context.io_mut(), window)
+            .expect("Failed to prepare ImGui frame");
+
+        let ui = self.imgui_context.frame();
+
+        {
+            // Create a new scope for UI interactions
+            let player = self.player.read();
+            self.cache_debug_window.draw(&ui, &player);
+        }
+
+        // Explicitly end the frame
+        self.imgui_platform.prepare_render(&ui, window);
+
+        // Render ImGui
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ImGui Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            let draw_data = self.imgui_context.render();
+            self.imgui_renderer
+                .render(draw_data, &self.queue, &self.device, &mut render_pass)
+                .expect("Failed to render ImGui");
+        }
+
+        // Submit the ImGui render pass
+        self.queue.submit(std::iter::once(encoder.finish()));
 
         debug!("Presenting output");
         output.present();
@@ -506,5 +615,14 @@ impl AppState {
 
     pub fn handle_mouse_click(&mut self) {
         self.player.write().toggle_play_pause();
+    }
+
+    pub fn handle_event<T>(
+        &mut self,
+        window: &winit::window::Window,
+        event: &winit::event::Event<T>,
+    ) {
+        self.imgui_platform
+            .handle_event(self.imgui_context.io_mut(), window, event);
     }
 }

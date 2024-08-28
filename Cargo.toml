@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 wgpu = "0.17"
-winit = "0.28"
+winit = "0.27"
 clap = { version = "4.3", features = ["derive"] }
 anyhow = "1.0"
 log = "0.4"
@@ -18,6 +18,10 @@ parking_lot = "0.12.1"
 pollster = "0.3"
 bytemuck = { version = "1.13", features = ["derive"] }
 threadpool = "1.8.1"
+imgui = { version = "0.11.0" }
+imgui-wgpu = "0.24.0"
+imgui-winit-support = "0.11.0"
+imgui-sys = "0.11.0"
 
 [[bin]]
 name = "image_comparison_player"
