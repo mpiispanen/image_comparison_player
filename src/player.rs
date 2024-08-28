@@ -252,30 +252,41 @@ impl Player {
     pub fn update_textures(&self) -> bool {
         let (current_left, current_right) = self.current_images();
 
-        // Process other textures in the background
-        self.process_loaded_textures();
+        // Ensure current frames are loaded
+        self.ensure_texture_loaded(current_left, true);
+        self.ensure_texture_loaded(current_right, false);
 
         // Preload textures
         self.preload_textures(current_left, current_right);
 
-        // Check if new textures are available
-        let new_left_texture = self.get_texture(current_left, true);
-        let new_right_texture = self.get_texture(current_right, false);
+        // Process other textures in the background
+        self.process_loaded_textures();
 
-        let current_left_texture = self.left_texture.lock().clone();
-        let current_right_texture = self.right_texture.lock().clone();
+        let mut textures_updated = false;
 
-        let textures_updated = match (
-            &new_left_texture,
-            &new_right_texture,
-            &current_left_texture,
-            &current_right_texture,
-        ) {
-            (Some(nl), Some(nr), Some(cl), Some(cr)) => {
-                !Arc::ptr_eq(nl, cl) || !Arc::ptr_eq(nr, cr)
+        // Update left texture
+        if let Some(new_left) = self.get_texture(current_left, true) {
+            let mut left_texture = self.left_texture.lock();
+            if left_texture
+                .as_ref()
+                .map_or(true, |t| !Arc::ptr_eq(t, &new_left))
+            {
+                *left_texture = Some(new_left);
+                textures_updated = true;
             }
-            _ => new_left_texture.is_some() || new_right_texture.is_some(),
-        };
+        }
+
+        // Update right texture
+        if let Some(new_right) = self.get_texture(current_right, false) {
+            let mut right_texture = self.right_texture.lock();
+            if right_texture
+                .as_ref()
+                .map_or(true, |t| !Arc::ptr_eq(t, &new_right))
+            {
+                *right_texture = Some(new_right);
+                textures_updated = true;
+            }
+        }
 
         textures_updated
     }

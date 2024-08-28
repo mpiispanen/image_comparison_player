@@ -148,13 +148,12 @@ pub struct AppState {
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group_layout: wgpu::BindGroupLayout,
     vertex_buffer: wgpu::Buffer,
-    left_texture: Arc<PLRwLock<Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>,
-    right_texture: Arc<PLRwLock<Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>,
     imgui_context: imgui::Context,
     imgui_platform: imgui_winit_support::WinitPlatform,
     imgui_renderer: imgui_wgpu::Renderer,
     last_frame: std::time::Instant,
     cache_debug_window: CacheDebugWindow,
+    uniform_bind_group: wgpu::BindGroup,
 }
 
 impl AppState {
@@ -287,6 +286,15 @@ impl AppState {
                 }],
             });
 
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Uniform Bind Group"),
+            layout: &uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(&[
@@ -369,7 +377,6 @@ impl AppState {
         debug!("Player initialized");
 
         let (left_texture, right_texture) = player.write().load_initial_textures()?;
-
         let left_texture = Arc::new(left_texture);
         let right_texture = Arc::new(right_texture);
 
@@ -419,17 +426,12 @@ impl AppState {
             uniform_buffer,
             uniform_bind_group_layout,
             vertex_buffer,
-            left_texture: Arc::new(PLRwLock::new(Arc::new(Mutex::new(Some(Arc::clone(
-                &left_texture,
-            )))))),
-            right_texture: Arc::new(PLRwLock::new(Arc::new(Mutex::new(Some(Arc::clone(
-                &right_texture,
-            )))))),
             imgui_context,
             imgui_platform,
             imgui_renderer,
             last_frame,
             cache_debug_window,
+            uniform_bind_group,
         })
     }
 
@@ -471,16 +473,9 @@ impl AppState {
         }
     }
 
-    pub fn update_textures(&mut self) {
-        let mut player = self.player.write();
-        let (current_left, current_right) = player.current_images();
-
-        if let Some(new_left) = player.get_texture(current_left, true) {
-            *self.left_texture.write() = Arc::new(Mutex::new(Some(Arc::clone(&new_left))));
-        }
-        if let Some(new_right) = player.get_texture(current_right, false) {
-            *self.right_texture.write() = Arc::new(Mutex::new(Some(Arc::clone(&new_right))));
-        }
+    pub fn update_textures(&mut self) -> bool {
+        let player = self.player.write();
+        player.update_textures()
     }
 
     pub fn render(&mut self, window: &WinitWindow) -> Result<(), wgpu::SurfaceError> {
@@ -488,17 +483,23 @@ impl AppState {
         self.player.write().process_loaded_textures();
 
         debug!("Starting render function");
-        let (left_index, right_index) = self.player.write().current_images();
+        let player = self.player.read();
+        let (left_index, right_index) = player.current_images();
         debug!(
             "Current frame indices: left={}, right={}",
             left_index, right_index
         );
 
-        let left_texture = self.left_texture.read().lock().clone().unwrap();
-        let right_texture = self.right_texture.read().lock().clone().unwrap();
+        let left_texture = player.get_left_texture();
+        let right_texture = player.get_right_texture();
 
-        let left_texture = left_texture.as_ref();
-        let right_texture = right_texture.as_ref();
+        if left_texture.is_none() || right_texture.is_none() {
+            debug!("Textures not ready yet, skipping render");
+            return Ok(());
+        }
+
+        let left_texture = left_texture.unwrap();
+        let right_texture = right_texture.unwrap();
 
         debug!("Left texture: {:?}", left_texture.size());
         debug!("Right texture: {:?}", right_texture.size());
@@ -516,16 +517,7 @@ impl AppState {
                 label: Some("Render Encoder"),
             });
 
-        let uniform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Uniform Bind Group"),
-            layout: &self.uniform_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: self.uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let texture_bind_group = self.create_texture_bind_group(left_texture, right_texture);
+        let texture_bind_group = self.create_texture_bind_group(&left_texture, &right_texture);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -557,7 +549,7 @@ impl AppState {
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &texture_bind_group, &[]);
-            render_pass.set_bind_group(1, &uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.draw(0..6, 0..1);
         }
