@@ -1,7 +1,7 @@
 use crate::image_loader;
 use crate::player::Player;
-use imgui::Ui;
 use imgui::{Condition, StyleVar};
+use imgui::{StyleColor, Ui};
 use log::{debug, info};
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
@@ -29,34 +29,105 @@ impl CacheDebugWindow {
     }
 
     fn draw(&mut self, ui: &Ui, player: &Player) {
+        let window_size = [400.0, 150.0]; // Increased height
         ui.window("Cache Debug")
-            .size([500.0, 100.0], Condition::FirstUseEver)
+            .size(window_size, Condition::Always)
             .position([50.0, 50.0], Condition::FirstUseEver)
             .build(|| {
                 let (current_left, current_right) = player.current_images();
                 let frame_count = player.frame_count1;
+                let visible_frames = (player.preload_ahead + player.preload_behind + 1).max(20);
 
-                for i in 0..frame_count {
-                    let color = if player.texture_cache_left.read().contains_key(&i) {
-                        [0.0, 1.0, 0.0, 1.0] // Green
-                    } else if player.texture_load_queue.lock().contains(&(i, true)) {
-                        [1.0, 1.0, 0.0, 1.0] // Yellow
-                    } else {
-                        [1.0, 0.0, 0.0, 1.0] // Red
-                    };
-
-                    ui.push_style_var(StyleVar::FramePadding([1.0, 1.0]));
-                    let _ = ui.color_button(&format!("{}", i), color);
-
-                    if i == current_left {
-                        ui.same_line();
-                        ui.text("|");
-                        ui.same_line();
-                    } else {
-                        ui.same_line();
-                    }
-                }
+                self.draw_cache_row(ui, player, true, current_left, frame_count, visible_frames);
+                ui.dummy([0.0, 10.0]); // Add some space between rows
+                self.draw_cache_row(
+                    ui,
+                    player,
+                    false,
+                    current_right,
+                    frame_count,
+                    visible_frames,
+                );
             });
+    }
+
+    fn draw_cache_row(
+        &self,
+        ui: &Ui,
+        player: &Player,
+        is_left: bool,
+        current: usize,
+        frame_count: usize,
+        visible_frames: usize,
+    ) {
+        let cache = if is_left {
+            &player.texture_cache_left
+        } else {
+            &player.texture_cache_right
+        };
+        let label = if is_left { "L:" } else { "R:" };
+
+        ui.text(label);
+        ui.same_line();
+
+        let half_visible = visible_frames / 2;
+        let button_size = 15.0;
+        let spacing = 1.0;
+        let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
+
+        ui.group(|| {
+            ui.set_next_item_width(total_width);
+            ui.dummy([total_width, button_size + 20.0]); // Increased height for labels
+
+            let draw_list = ui.get_window_draw_list();
+            let window_pos = ui.window_pos();
+            let cursor_pos = ui.cursor_pos();
+
+            // Calculate the range of frames to display
+            let start = current.saturating_sub(half_visible);
+            let end = (start + visible_frames).min(frame_count);
+            let start = end.saturating_sub(visible_frames); // Adjust start if we hit the end
+
+            // Draw frame number labels
+            for (index, frame) in (start..end).enumerate() {
+                let x = window_pos[0] + cursor_pos[0] + index as f32 * (button_size + spacing);
+                let y = window_pos[1] + cursor_pos[1];
+
+                if frame % 5 == 0 {
+                    draw_list.add_text([x, y - 15.0], [1.0, 1.0, 1.0, 1.0], &frame.to_string());
+                }
+            }
+
+            // Draw cache status buttons
+            for (index, frame) in (start..end).enumerate() {
+                let x = window_pos[0] + cursor_pos[0] + index as f32 * (button_size + spacing);
+                let y = window_pos[1] + cursor_pos[1] + 5.0; // Moved down to make room for labels
+
+                let color = if cache.read().contains_key(&frame) {
+                    [0.0, 1.0, 0.0, 1.0] // Green
+                } else if player.texture_load_queue.lock().contains(&(frame, is_left)) {
+                    [1.0, 1.0, 0.0, 1.0] // Yellow
+                } else {
+                    [1.0, 0.0, 0.0, 1.0] // Red
+                };
+
+                draw_list
+                    .add_rect([x, y], [x + button_size, y + button_size], color)
+                    .filled(true)
+                    .build();
+
+                if frame == current {
+                    draw_list
+                        .add_rect(
+                            [x, y],
+                            [x + button_size, y + button_size],
+                            [1.0, 1.0, 1.0, 1.0],
+                        )
+                        .thickness(2.0)
+                        .build();
+                }
+            }
+        });
     }
 
     fn toggle(&mut self) {
