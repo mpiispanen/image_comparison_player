@@ -652,7 +652,7 @@ impl Player {
     ) {
         let cache_write = cache.try_write();
         if let Some(mut cache_write) = cache_write {
-            if cache_write.len() <= 1 {
+            if cache_write.len() <= self.cache_size / 2 {
                 return;
             }
 
@@ -666,17 +666,20 @@ impl Player {
 
             let mut reuse_pool = self.texture_reuse_pool.try_lock();
             if let Some(mut reuse_pool) = reuse_pool {
-                while frames.len() > 1 {
-                    let frame_to_evict = frames.pop().unwrap();
-                    if frame_to_evict == current_frame {
-                        continue;
-                    }
-
-                    if let Some(evicted_texture) = cache_write.remove(&frame_to_evict) {
-                        let mut evicted_texture = evicted_texture.lock();
-                        if let Some(texture) = evicted_texture.take() {
-                            reuse_pool.push(texture);
+                while cache_write.len() > self.cache_size / 2 {
+                    if let Some(frame_to_evict) = frames.pop() {
+                        if frame_to_evict == current_frame {
+                            continue;
                         }
+
+                        if let Some(evicted_texture) = cache_write.remove(&frame_to_evict) {
+                            let mut evicted_texture = evicted_texture.lock();
+                            if let Some(texture) = evicted_texture.take() {
+                                reuse_pool.push(texture);
+                            }
+                        }
+                    } else {
+                        break;
                     }
                 }
             }
