@@ -2,7 +2,7 @@ use crate::image_loader;
 use crate::player::Player;
 use imgui::{Condition, StyleVar};
 use imgui::{StyleColor, Ui};
-use log::{debug, info};
+use log::{debug, error, info}; // Add error to the import list
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
 use parking_lot::RwLock as PLRwLock;
@@ -28,7 +28,7 @@ impl CacheDebugWindow {
         Self { is_open: false }
     }
 
-    fn draw(&mut self, ui: &Ui, player: &Player) {
+    fn draw(&mut self, ui: &Ui, player: &Player, mouse_x: f32, mouse_y: f32) {
         let window_size = [400.0, 150.0]; // Increased height
         ui.window("Cache Debug")
             .size(window_size, Condition::Always)
@@ -38,7 +38,16 @@ impl CacheDebugWindow {
                 let frame_count = player.frame_count1;
                 let visible_frames = (player.preload_ahead + player.preload_behind + 1).max(20);
 
-                self.draw_cache_row(ui, player, true, current_left, frame_count, visible_frames);
+                self.draw_cache_row(
+                    ui,
+                    player,
+                    true,
+                    current_left,
+                    frame_count,
+                    visible_frames,
+                    mouse_x,
+                    mouse_y,
+                );
                 ui.dummy([0.0, 10.0]); // Add some space between rows
                 self.draw_cache_row(
                     ui,
@@ -47,6 +56,8 @@ impl CacheDebugWindow {
                     current_right,
                     frame_count,
                     visible_frames,
+                    mouse_x,
+                    mouse_y,
                 );
             });
     }
@@ -59,6 +70,8 @@ impl CacheDebugWindow {
         current: usize,
         frame_count: usize,
         visible_frames: usize,
+        mouse_x: f32,
+        mouse_y: f32,
     ) {
         let cache = if is_left {
             &player.texture_cache_left
@@ -77,18 +90,16 @@ impl CacheDebugWindow {
 
         ui.group(|| {
             ui.set_next_item_width(total_width);
-            ui.dummy([total_width, button_size + 20.0]); // Increased height for labels
+            ui.dummy([total_width, button_size + 20.0]);
 
             let draw_list = ui.get_window_draw_list();
             let window_pos = ui.window_pos();
             let cursor_pos = ui.cursor_pos();
 
-            // Calculate the range of frames to display
             let start = current.saturating_sub(half_visible);
             let end = (start + visible_frames).min(frame_count);
-            let start = end.saturating_sub(visible_frames); // Adjust start if we hit the end
+            let start = end.saturating_sub(visible_frames);
 
-            // Draw frame number labels
             for (index, frame) in (start..end).enumerate() {
                 let x = window_pos[0] + cursor_pos[0] + index as f32 * (button_size + spacing);
                 let y = window_pos[1] + cursor_pos[1];
@@ -98,17 +109,16 @@ impl CacheDebugWindow {
                 }
             }
 
-            // Draw cache status buttons
             for (index, frame) in (start..end).enumerate() {
                 let x = window_pos[0] + cursor_pos[0] + index as f32 * (button_size + spacing);
-                let y = window_pos[1] + cursor_pos[1] + 5.0; // Moved down to make room for labels
+                let y = window_pos[1] + cursor_pos[1] + 5.0;
 
                 let color = if cache.read().contains_key(&frame) {
-                    [0.0, 1.0, 0.0, 1.0] // Green
+                    [0.0, 1.0, 0.0, 1.0]
                 } else if player.texture_load_queue.lock().contains(&(frame, is_left)) {
-                    [1.0, 1.0, 0.0, 1.0] // Yellow
+                    [1.0, 1.0, 0.0, 1.0]
                 } else {
-                    [1.0, 0.0, 0.0, 1.0] // Red
+                    [1.0, 0.0, 0.0, 1.0]
                 };
 
                 draw_list
@@ -125,6 +135,28 @@ impl CacheDebugWindow {
                         )
                         .thickness(2.0)
                         .build();
+                }
+
+                if mouse_x >= x
+                    && mouse_x <= x + button_size
+                    && mouse_y >= y
+                    && mouse_y <= y + button_size
+                {
+                    let tooltip = if let Some(texture_info) =
+                        player.texture_timings.read().get(&(frame, is_left))
+                    {
+                        format!(
+                            "Frame {} (Loaded)\nLoad time: {:.2}ms\nProcess time: {:.2}ms",
+                            frame,
+                            texture_info.load_time.as_secs_f32() * 1000.0,
+                            texture_info.process_time.as_secs_f32() * 1000.0
+                        )
+                    } else if player.texture_load_queue.lock().contains(&(frame, is_left)) {
+                        format!("Frame {} (Loading)", frame)
+                    } else {
+                        format!("Frame {} (Not loaded)", frame)
+                    };
+                    ui.tooltip_text(tooltip);
                 }
             }
         });
@@ -564,7 +596,9 @@ impl AppState {
         {
             // Create a new scope for UI interactions
             let player = self.player.read();
-            self.cache_debug_window.draw(&ui, &player);
+            let mouse_pos = ui.io().mouse_pos;
+            self.cache_debug_window
+                .draw(&ui, &player, mouse_pos[0], mouse_pos[1]);
         }
 
         // Explicitly end the frame
@@ -676,8 +710,16 @@ impl AppState {
         self.cursor_x = x;
     }
 
-    pub fn handle_mouse_click(&mut self) {
-        self.player.write().toggle_play_pause();
+    pub fn handle_mouse_click(&mut self, window: &winit::window::Window) {
+        let cursor_position = window.inner_position().unwrap();
+        let window_size = window.inner_size();
+        if cursor_position.x >= 0
+            && cursor_position.x <= window_size.width as i32
+            && cursor_position.y >= 0
+            && cursor_position.y <= window_size.height as i32
+        {
+            self.player.write().toggle_play_pause();
+        }
     }
 
     pub fn handle_event<T>(
@@ -685,7 +727,19 @@ impl AppState {
         window: &winit::window::Window,
         event: &winit::event::Event<T>,
     ) {
+        // Check if the event is a resize event and update the surface configuration
+        if let winit::event::Event::WindowEvent {
+            event: winit::event::WindowEvent::Resized(size),
+            ..
+        } = event
+        {
+            self.resize(*size);
+            debug!("Window resized to: {:?}", size);
+        }
+
+        // Handle the event
         self.imgui_platform
             .handle_event(self.imgui_context.io_mut(), window, event);
+        debug!("Event handled");
     }
 }

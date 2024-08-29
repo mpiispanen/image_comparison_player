@@ -138,8 +138,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         num_process_threads,
     ))?;
 
+    let mut initialized = false; // Add this line
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
+
+        if initialized {
+            // Check if initialized
+            app_state.handle_event(&window, &event);
+        }
 
         match event {
             Event::WindowEvent { event, .. } => match event {
@@ -168,16 +175,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     VirtualKeyCode::Escape => *control_flow = ControlFlow::Exit,
                     _ => {}
                 },
-                WindowEvent::CursorMoved { position, .. } => {
-                    app_state.update_cursor_position(position.x as f32, position.y as f32);
-                }
-                WindowEvent::MouseInput {
-                    state: ElementState::Pressed,
-                    button: MouseButton::Left,
-                    ..
-                } => {
-                    app_state.handle_mouse_click();
-                }
                 _ => {}
             },
             Event::MainEventsCleared => {
@@ -185,6 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::RedrawRequested(_) => {
                 app_state.update();
+                initialized = true; // Set initialized to true after the event loop starts
                 match app_state.render(&window) {
                     Ok(_) => {}
                     Err(e) => error!("Render error: {}", e),

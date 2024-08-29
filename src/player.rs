@@ -5,9 +5,51 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use threadpool::ThreadPool;
 
-pub type TextureLoadRequest = (String, usize, bool);
+struct TextureLoadRequest {
+    path: String,
+    index: usize,
+    is_left: bool,
+    load_start: Instant,
+}
+
+impl TextureLoadRequest {
+    fn new(path: String, index: usize, is_left: bool) -> Self {
+        Self {
+            path,
+            index,
+            is_left,
+            load_start: Instant::now(),
+        }
+    }
+}
+
+struct TextureProcessRequest {
+    index: usize,
+    is_left: bool,
+    image_data: Vec<u8>,
+    size: wgpu::Extent3d,
+    process_start: Instant,
+}
+
+impl TextureProcessRequest {
+    fn new(index: usize, is_left: bool, image_data: Vec<u8>, size: wgpu::Extent3d) -> Self {
+        Self {
+            index,
+            is_left,
+            image_data,
+            size,
+            process_start: Instant::now(),
+        }
+    }
+}
+
+pub struct TextureTimingInfo {
+    pub load_time: Duration,
+    pub process_time: Duration,
+}
 
 pub struct PriorityTextureLoadQueue {
     queue: Arc<Mutex<VecDeque<TextureLoadRequest>>>,
@@ -27,7 +69,7 @@ impl PriorityTextureLoadQueue {
     }
 
     pub fn push(&self, request: TextureLoadRequest) {
-        let key = (request.1, request.2);
+        let key = (request.index, request.is_left);
         let mut unique_requests = self.unique_requests.lock();
         if !unique_requests.contains(&key) {
             self.queue.lock().push_back(request);
@@ -39,7 +81,7 @@ impl PriorityTextureLoadQueue {
         let mut queue = self.queue.lock();
         let mut unique_requests = self.unique_requests.lock();
         if let Some(request) = queue.pop_front() {
-            unique_requests.remove(&(request.1, request.2));
+            unique_requests.remove(&(request.index, request.is_left));
             Some(request)
         } else {
             None
@@ -54,14 +96,14 @@ impl PriorityTextureLoadQueue {
     pub fn reprioritize(&self, current_frame_left: usize, current_frame_right: usize) {
         let mut queue = self.queue.lock();
         queue.make_contiguous().sort_by_key(|req| {
-            let (current_frame, frame_count) = if req.2 {
+            let (current_frame, frame_count) = if req.is_left {
                 (current_frame_left, self.frame_count_left)
             } else {
                 (current_frame_right, self.frame_count_right)
             };
             std::cmp::min(
-                (req.1 as i32 - current_frame as i32).abs() as usize,
-                frame_count - (req.1 as i32 - current_frame as i32).abs() as usize,
+                (req.index as i32 - current_frame as i32).abs() as usize,
+                frame_count - (req.index as i32 - current_frame as i32).abs() as usize,
             )
         });
     }
@@ -99,13 +141,14 @@ pub struct Player {
     pub texture_load_queue: Arc<Mutex<PriorityTextureLoadQueue>>,
     texture_load_pool: ThreadPool,
     texture_load_sender: Sender<TextureLoadRequest>,
-    texture_load_receiver: Arc<Mutex<Receiver<(String, usize, bool)>>>,
+    texture_load_receiver: Arc<Mutex<Receiver<TextureLoadRequest>>>,
     texture_process_pool: ThreadPool,
     texture_process_sender: Sender<(usize, bool, Vec<u8>, wgpu::Extent3d)>,
     texture_process_receiver: Arc<Mutex<Receiver<(usize, bool, Vec<u8>, wgpu::Extent3d)>>>,
     left_texture: Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
     right_texture: Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
     processing_textures: Arc<Mutex<HashSet<(usize, bool)>>>,
+    pub texture_timings: Arc<RwLock<HashMap<(usize, bool), TextureTimingInfo>>>,
 }
 
 impl Player {
@@ -173,6 +216,7 @@ impl Player {
             left_texture: Arc::new(Mutex::new(None)),
             right_texture: Arc::new(Mutex::new(None)),
             processing_textures: Arc::new(Mutex::new(HashSet::new())),
+            texture_timings: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -320,7 +364,7 @@ impl Player {
                 // Add the request to the queue
                 let mut queue = self.texture_load_queue.lock();
                 if !queue.contains(&(index, is_left)) {
-                    queue.push((path.to_string(), index, is_left));
+                    queue.push(TextureLoadRequest::new(path.to_string(), index, is_left));
                 }
             }
         }
@@ -333,18 +377,47 @@ impl Player {
             self.current_frame2.load(Ordering::Relaxed),
         );
 
-        while let Some((path, index, is_left)) = queue.pop() {
+        while let Some(request) = queue.pop() {
             let sender = self.texture_load_sender.clone();
             let texture_process_sender = self.texture_process_sender.clone();
             let processing_textures = Arc::clone(&self.processing_textures);
+            let texture_timings = Arc::clone(&self.texture_timings);
             self.texture_load_pool.execute(move || {
-                if let Ok((image_data, size)) = Self::load_image_data_from_path(&path) {
-                    sender.send((path.to_string(), index, is_left)).unwrap();
+                let request = TextureLoadRequest::new(
+                    request.path.to_string(),
+                    request.index,
+                    request.is_left,
+                );
+                if let Ok((image_data, size)) = Self::load_image_data_from_path(&request.path) {
+                    let load_end = Instant::now();
+                    let load_time = load_end - request.load_start;
+
+                    let process_request = TextureProcessRequest::new(
+                        request.index,
+                        request.is_left,
+                        image_data,
+                        size,
+                    );
                     texture_process_sender
-                        .send((index, is_left, image_data, size))
+                        .send((
+                            process_request.index,
+                            process_request.is_left,
+                            process_request.image_data,
+                            process_request.size,
+                        ))
                         .unwrap();
+
+                    let mut texture_timings = texture_timings.write();
+                    texture_timings
+                        .entry((request.index, request.is_left))
+                        .or_insert(TextureTimingInfo {
+                            load_time,
+                            process_time: Duration::default(),
+                        });
                 }
-                processing_textures.lock().remove(&(index, is_left));
+                processing_textures
+                    .lock()
+                    .remove(&(request.index, request.is_left));
             });
         }
     }
@@ -353,6 +426,8 @@ impl Player {
         while let Ok((index, is_left, image_data, size)) =
             self.texture_process_receiver.lock().try_recv()
         {
+            let process_start = Instant::now();
+
             let texture = if let Some(reused_texture) = self.texture_reuse_pool.lock().pop() {
                 // Reuse an existing texture if available
                 reused_texture
@@ -415,6 +490,14 @@ impl Player {
 
             // Notify that the texture is ready
             self.frame_changed.store(true, Ordering::Relaxed);
+
+            let process_end = Instant::now();
+            let process_time = process_end - process_start;
+
+            let mut texture_timings = self.texture_timings.write();
+            if let Some(timing) = texture_timings.get_mut(&(index, is_left)) {
+                timing.process_time = process_time;
+            }
         }
     }
 
@@ -440,7 +523,7 @@ impl Player {
         queue
             .queue
             .lock()
-            .retain(|&(_, req_index, req_is_left)| req_index != index || req_is_left != is_left);
+            .retain(|req| req.index != index || req.is_left != is_left);
         queue.unique_requests.lock().remove(&(index, is_left));
 
         debug!(
