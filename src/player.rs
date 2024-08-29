@@ -629,52 +629,55 @@ impl Player {
         let current_frame_left = self.current_frame1.load(Ordering::Relaxed);
         let current_frame_right = self.current_frame2.load(Ordering::Relaxed);
 
-        let mut cache_left = self.texture_cache_left.write();
-        let mut cache_right = self.texture_cache_right.write();
-
-        let mut reuse_pool = self.texture_reuse_pool.lock();
-
-        Self::evict_old_textures_from_cache(
-            &mut cache_left,
+        // Evict textures from the left cache
+        self.evict_old_textures_from_cache(
+            &self.texture_cache_left,
             current_frame_left,
             self.frame_count1,
-            &mut reuse_pool,
         );
-        Self::evict_old_textures_from_cache(
-            &mut cache_right,
+
+        // Evict textures from the right cache
+        self.evict_old_textures_from_cache(
+            &self.texture_cache_right,
             current_frame_right,
             self.frame_count2,
-            &mut reuse_pool,
         );
     }
 
     fn evict_old_textures_from_cache(
-        cache: &mut HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>,
+        &self,
+        cache: &Arc<RwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
         current_frame: usize,
         frame_count: usize,
-        reuse_pool: &mut Vec<Arc<wgpu::Texture>>,
     ) {
-        if cache.len() <= 1 {
-            return;
-        }
-
-        let mut frames: Vec<usize> = cache.keys().cloned().collect();
-        frames.sort_by_key(|&frame| {
-            std::cmp::min(
-                (frame as i32 - current_frame as i32).abs() as usize,
-                frame_count - (frame as i32 - current_frame as i32).abs() as usize,
-            )
-        });
-
-        while frames.len() > 1 {
-            let frame_to_evict = frames.pop().unwrap();
-            if frame_to_evict == current_frame {
-                continue;
+        let cache_write = cache.try_write();
+        if let Some(mut cache_write) = cache_write {
+            if cache_write.len() <= 1 {
+                return;
             }
 
-            if let Some(evicted_texture) = cache.remove(&frame_to_evict) {
-                if let Some(texture) = evicted_texture.lock().take() {
-                    reuse_pool.push(texture);
+            let mut frames: Vec<usize> = cache_write.keys().cloned().collect();
+            frames.sort_by_key(|&frame| {
+                std::cmp::min(
+                    (frame as i32 - current_frame as i32).abs() as usize,
+                    frame_count - (frame as i32 - current_frame as i32).abs() as usize,
+                )
+            });
+
+            let mut reuse_pool = self.texture_reuse_pool.try_lock();
+            if let Some(mut reuse_pool) = reuse_pool {
+                while frames.len() > 1 {
+                    let frame_to_evict = frames.pop().unwrap();
+                    if frame_to_evict == current_frame {
+                        continue;
+                    }
+
+                    if let Some(evicted_texture) = cache_write.remove(&frame_to_evict) {
+                        let mut evicted_texture = evicted_texture.lock();
+                        if let Some(texture) = evicted_texture.take() {
+                            reuse_pool.push(texture);
+                        }
+                    }
                 }
             }
         }
