@@ -200,7 +200,7 @@ impl Player {
         image_data
             .iter()
             .position(|(_, start, end)| *start <= current_time && current_time < *end)
-            .unwrap_or(0)
+            .unwrap_or(image_data.len() - 1)
     }
 
     pub fn is_playing(&self) -> bool {
@@ -531,7 +531,10 @@ impl Player {
     }
 
     fn total_duration(&self) -> u64 {
-        self.image_data1.last().map(|(_, _, end)| *end).unwrap_or(0)
+        std::cmp::max(
+            self.image_data1.last().map(|(_, _, end)| *end).unwrap_or(0),
+            self.image_data2.last().map(|(_, _, end)| *end).unwrap_or(0),
+        )
     }
 
     pub fn load_initial_textures(

@@ -15,6 +15,7 @@ pub fn load_image_paths(dir: &str) -> Result<(Vec<(String, u64, u64)>, usize)> {
     let reader = BufReader::new(file);
     let mut images = Vec::new();
     let mut lines = reader.lines();
+    let mut cumulative_duration = 0;
 
     while let (Some(Ok(file_path)), Some(Ok(duration_str))) = (lines.next(), lines.next()) {
         let file_path = file_path.trim_start_matches("file '").trim_end_matches("'");
@@ -29,10 +30,11 @@ pub fn load_image_paths(dir: &str) -> Result<(Vec<(String, u64, u64)>, usize)> {
             .with_context(|| format!("Failed to get metadata for file '{}'", full_path.display()))?
             .len();
 
+        cumulative_duration += duration;
         images.push((
             full_path.to_string_lossy().into_owned(),
-            duration,
-            file_size,
+            cumulative_duration - duration,
+            cumulative_duration,
         ));
     }
 
