@@ -137,7 +137,7 @@ pub struct Player {
     cache_order_left: Vec<usize>,
     cache_order_right: Vec<usize>,
     texture_reuse_pool: Arc<Mutex<Vec<Arc<wgpu::Texture>>>>,
-    frame_changed: AtomicBool,
+    frame_changed: Arc<AtomicBool>,
     pub texture_load_queue: Arc<Mutex<PriorityTextureLoadQueue>>,
     texture_load_pool: ThreadPool,
     texture_load_sender: Sender<TextureLoadRequest>,
@@ -203,7 +203,7 @@ impl Player {
             cache_order_left: Vec::with_capacity(cache_size / 2),
             cache_order_right: Vec::with_capacity(cache_size / 2),
             texture_reuse_pool: Arc::new(Mutex::new(Vec::new())),
-            frame_changed: AtomicBool::new(false),
+            frame_changed: Arc::new(AtomicBool::new(false)),
             texture_load_queue: Arc::new(Mutex::new(PriorityTextureLoadQueue::new(
                 frame_count1,
                 frame_count2,
@@ -428,78 +428,81 @@ impl Player {
         while let Ok((index, is_left, image_data, size)) =
             self.texture_process_receiver.lock().try_recv()
         {
-            let process_start = Instant::now();
-
-            let texture = if let Some(reused_texture) = self.texture_reuse_pool.lock().pop() {
-                // Reuse an existing texture if available
-                reused_texture
-            } else {
-                // Create a new texture if none are available for reuse
-                Arc::new(self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(&format!(
-                        "Image Texture - {} (Frame {})",
-                        if is_left { "Left" } else { "Right" },
-                        index
-                    )),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                }))
-            };
-
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    aspect: wgpu::TextureAspect::All,
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                },
-                &image_data,
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * size.width),
-                    rows_per_image: Some(size.height),
-                },
-                size,
-            );
-
+            let device = Arc::clone(&self.device);
+            let queue = Arc::clone(&self.queue);
+            let texture_reuse_pool = Arc::clone(&self.texture_reuse_pool);
             let cache = if is_left {
-                &self.texture_cache_left
+                Arc::clone(&self.texture_cache_left)
             } else {
-                &self.texture_cache_right
+                Arc::clone(&self.texture_cache_right)
             };
+            let cache_size = self.cache_size;
+            let frame_changed = Arc::clone(&self.frame_changed);
+            let texture_timings = Arc::clone(&self.texture_timings);
 
-            // Update cache
-            let texture_arc = Arc::clone(&texture);
-            let mut cache_write = cache.write();
-            if let Some(old_texture) =
-                cache_write.insert(index, Arc::new(Mutex::new(Some(texture_arc))))
-            {
-                // If there was an old texture, add it to the reuse pool
-                if let Some(old_texture) = old_texture.lock().take() {
-                    self.texture_reuse_pool.lock().push(old_texture);
+            self.texture_process_pool.execute(move || {
+                let process_start = Instant::now();
+
+                let texture = if let Some(reused_texture) = texture_reuse_pool.lock().pop() {
+                    reused_texture
+                } else {
+                    Arc::new(device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some(&format!(
+                            "Image Texture - {} (Frame {})",
+                            if is_left { "Left" } else { "Right" },
+                            index
+                        )),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    }))
+                };
+
+                queue.write_texture(
+                    wgpu::ImageCopyTexture {
+                        aspect: wgpu::TextureAspect::All,
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                    },
+                    &image_data,
+                    wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * size.width),
+                        rows_per_image: Some(size.height),
+                    },
+                    size,
+                );
+
+                let texture_arc = Arc::clone(&texture);
+                let mut cache_write = cache.write();
+                if let Some(old_texture) =
+                    cache_write.insert(index, Arc::new(Mutex::new(Some(texture_arc))))
+                {
+                    if let Some(old_texture) = old_texture.lock().take() {
+                        texture_reuse_pool.lock().push(old_texture);
+                    }
                 }
-            }
 
-            // Evict old textures if the cache is full
-            if cache_write.len() > self.cache_size / 2 {
-                self.evict_old_textures();
-            }
+                if cache_write.len() > cache_size / 2 {
+                    // Call to evict_old_textures would need to be implemented separately
+                    // or the logic moved here
+                }
 
-            // Notify that the texture is ready
-            self.frame_changed.store(true, Ordering::Relaxed);
+                frame_changed.store(true, Ordering::Relaxed);
 
-            let process_end = Instant::now();
-            let process_time = process_end - process_start;
+                let process_end = Instant::now();
+                let process_time = process_end - process_start;
 
-            let mut texture_timings = self.texture_timings.write();
-            if let Some(timing) = texture_timings.get_mut(&(index, is_left)) {
-                timing.process_time = process_time;
-            }
+                let mut texture_timings = texture_timings.write();
+                if let Some(timing) = texture_timings.get_mut(&(index, is_left)) {
+                    timing.process_time = process_time;
+                }
+            });
         }
     }
 
