@@ -149,6 +149,7 @@ pub struct Player {
     right_texture: Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
     processing_textures: Arc<Mutex<HashSet<(usize, bool)>>>,
     pub texture_timings: Arc<RwLock<HashMap<(usize, bool), TextureTimingInfo>>>,
+    current_frame_set_time: Arc<Mutex<Instant>>,
 }
 
 impl Player {
@@ -217,6 +218,7 @@ impl Player {
             right_texture: Arc::new(Mutex::new(None)),
             processing_textures: Arc::new(Mutex::new(HashSet::new())),
             texture_timings: Arc::new(RwLock::new(HashMap::new())),
+            current_frame_set_time: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
@@ -584,8 +586,24 @@ impl Player {
 
     pub fn update(&self, delta: std::time::Duration) -> bool {
         if self.is_playing.load(Ordering::Relaxed) {
-            self.advance_frame(delta.as_micros() as u64);
-            true
+            let (current_left, current_right) = self.current_images();
+            let now = Instant::now();
+            let elapsed = now.duration_since(*self.current_frame_set_time.lock());
+
+            if self.get_texture(current_left, true).is_some()
+                && self.get_texture(current_right, false).is_some()
+            {
+                debug!("Frame displayed after {:?} delay", elapsed);
+                self.advance_frame(delta.as_micros() as u64);
+                *self.current_frame_set_time.lock() = now;
+                true
+            } else {
+                debug!(
+                    "Waiting for frame to be available. Elapsed time: {:?}",
+                    elapsed
+                );
+                false
+            }
         } else {
             false
         }
@@ -610,6 +628,7 @@ impl Player {
 
         if new_frame1 != old_frame1 || new_frame2 != old_frame2 {
             self.frame_changed.store(true, Ordering::Relaxed);
+            *self.current_frame_set_time.lock() = Instant::now();
         }
     }
 
