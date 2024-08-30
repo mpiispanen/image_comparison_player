@@ -33,14 +33,20 @@ impl CacheDebugWindow {
         }
     }
 
-    fn draw(&mut self, ui: &Ui, player: &Player, mouse_x: f32, mouse_y: f32) {
+    fn draw(&mut self, ui: &Ui, player: &Player, mouse_x: f32, mouse_y: f32, window_width: f32) {
+        let visible_frames = player.preload_ahead * 2 + player.preload_behind * 2 + 1;
+        let button_size = 15.0;
+        let spacing = 1.0;
+        let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
+        let desired_width = total_width.min(window_width - 20.0);
+
         ui.window("Cache Debug")
-            .size(self.size, Condition::Always)
+            .size([desired_width, self.size[1]], Condition::Always)
+            .position([10.0, 10.0], Condition::FirstUseEver)
             .resizable(true)
             .build(|| {
                 let (current_left, current_right) = player.current_images();
                 let frame_count = player.frame_count1;
-                let visible_frames = player.preload_ahead * 2 + player.preload_behind * 2 + 1;
 
                 self.draw_cache_row(
                     ui,
@@ -50,8 +56,9 @@ impl CacheDebugWindow {
                     frame_count,
                     mouse_x,
                     mouse_y,
+                    desired_width,
                 );
-                ui.dummy([0.0, 10.0]); // Add some space between rows
+                ui.dummy([0.0, 10.0]);
                 self.draw_cache_row(
                     ui,
                     player,
@@ -60,9 +67,9 @@ impl CacheDebugWindow {
                     frame_count,
                     mouse_x,
                     mouse_y,
+                    desired_width,
                 );
 
-                // Update size after potential resize
                 self.size = ui.window_size();
             });
     }
@@ -76,6 +83,7 @@ impl CacheDebugWindow {
         frame_count: usize,
         mouse_x: f32,
         mouse_y: f32,
+        available_width: f32,
     ) {
         let cache = if is_left {
             &player.texture_cache_left
@@ -91,10 +99,16 @@ impl CacheDebugWindow {
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
+        let scale_factor = (available_width - ui.calc_text_size(label)[0] - spacing) / total_width;
+        let scaled_button_size = button_size * scale_factor;
+        let scaled_spacing = spacing * scale_factor;
 
         ui.group(|| {
-            ui.set_next_item_width(total_width);
-            ui.dummy([total_width, button_size + 20.0]);
+            ui.set_next_item_width(available_width - ui.calc_text_size(label)[0] - spacing);
+            ui.dummy([
+                available_width - ui.calc_text_size(label)[0] - spacing,
+                scaled_button_size + 20.0,
+            ]);
 
             let draw_list = ui.get_window_draw_list();
             let window_pos = ui.window_pos();
@@ -105,7 +119,9 @@ impl CacheDebugWindow {
             for i in 0..visible_frames {
                 let frame = (current as i64 + i as i64 - half_visible as i64)
                     .rem_euclid(frame_count as i64) as usize;
-                let x = window_pos[0] + cursor_pos[0] + i as f32 * (button_size + spacing);
+                let x = window_pos[0]
+                    + cursor_pos[0]
+                    + i as f32 * (scaled_button_size + scaled_spacing);
                 let y = window_pos[1] + cursor_pos[1];
 
                 if frame % 5 == 0 {
@@ -123,7 +139,11 @@ impl CacheDebugWindow {
                 };
 
                 draw_list
-                    .add_rect([x, y], [x + button_size, y + button_size], color)
+                    .add_rect(
+                        [x, y],
+                        [x + scaled_button_size, y + scaled_button_size],
+                        color,
+                    )
                     .filled(true)
                     .build();
 
@@ -131,7 +151,7 @@ impl CacheDebugWindow {
                     draw_list
                         .add_rect(
                             [x, y],
-                            [x + button_size, y + button_size],
+                            [x + scaled_button_size, y + scaled_button_size],
                             [1.0, 1.0, 1.0, 1.0],
                         )
                         .thickness(2.0)
@@ -139,9 +159,9 @@ impl CacheDebugWindow {
                 }
 
                 if mouse_x >= x
-                    && mouse_x <= x + button_size
+                    && mouse_x <= x + scaled_button_size
                     && mouse_y >= y
-                    && mouse_y <= y + button_size
+                    && mouse_y <= y + scaled_button_size
                 {
                     let tooltip = if let Some(texture_info) =
                         player.texture_timings.read().get(&(frame, is_left))
@@ -595,7 +615,6 @@ impl AppState {
         let mut should_render_imgui = false;
 
         if self.cache_debug_window.is_open {
-            // Prepare ImGui frame only if needed
             self.imgui_platform
                 .prepare_frame(self.imgui_context.io_mut(), window)
                 .expect("Failed to prepare ImGui frame");
@@ -604,15 +623,14 @@ impl AppState {
 
             let player = self.player.read();
             let mouse_pos = ui.io().mouse_pos;
+            let window_width = window.inner_size().width as f32;
             self.cache_debug_window
-                .draw(&ui, &player, mouse_pos[0], mouse_pos[1]);
+                .draw(&ui, &player, mouse_pos[0], mouse_pos[1], window_width);
             should_render_imgui = true;
 
-            // Explicitly end the frame
             self.imgui_platform.prepare_render(&ui, window);
         }
 
-        // Render ImGui only if there are UI elements
         if should_render_imgui {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ImGui Render Pass"),
@@ -633,7 +651,6 @@ impl AppState {
                 .expect("Failed to render ImGui");
         }
 
-        // Submit the command encoder
         self.queue.submit(std::iter::once(encoder.finish()));
 
         debug!("Presenting output");
@@ -708,7 +725,7 @@ impl AppState {
 
             player.ensure_texture_loaded(current_left, true);
             player.ensure_texture_loaded(current_right, false);
-        } // player is dropped here
+        }
 
         self.update_textures();
         self.player.write().process_loaded_textures();
@@ -721,7 +738,7 @@ impl AppState {
             0,
             bytemuck::cast_slice(&[UniformData {
                 cursor_x: x / self.size.width as f32,
-                image1_size: [0.0, 0.0], // These will be updated in the render function
+                image1_size: [0.0, 0.0],
                 image2_size: [0.0, 0.0],
             }]),
         );
@@ -744,7 +761,6 @@ impl AppState {
         window: &winit::window::Window,
         event: &winit::event::Event<T>,
     ) {
-        // Check if the event is a resize event and update the surface configuration
         if let winit::event::Event::WindowEvent {
             event: winit::event::WindowEvent::Resized(size),
             ..
@@ -779,7 +795,6 @@ impl AppState {
             self.cache_debug_window.toggle();
         }
 
-        // Handle the event
         self.imgui_platform
             .handle_event(self.imgui_context.io_mut(), window, event);
         debug!("Event handled");
