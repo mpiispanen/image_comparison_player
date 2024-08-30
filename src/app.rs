@@ -40,7 +40,7 @@ impl CacheDebugWindow {
             .build(|| {
                 let (current_left, current_right) = player.current_images();
                 let frame_count = player.frame_count1;
-                let visible_frames = (player.preload_ahead + player.preload_behind + 1).max(20);
+                let visible_frames = player.preload_ahead * 2 + player.preload_behind * 2 + 1;
 
                 self.draw_cache_row(
                     ui,
@@ -48,7 +48,6 @@ impl CacheDebugWindow {
                     true,
                     current_left,
                     frame_count,
-                    visible_frames,
                     mouse_x,
                     mouse_y,
                 );
@@ -59,7 +58,6 @@ impl CacheDebugWindow {
                     false,
                     current_right,
                     frame_count,
-                    visible_frames,
                     mouse_x,
                     mouse_y,
                 );
@@ -76,7 +74,6 @@ impl CacheDebugWindow {
         is_left: bool,
         current: usize,
         frame_count: usize,
-        visible_frames: usize,
         mouse_x: f32,
         mouse_y: f32,
     ) {
@@ -90,7 +87,7 @@ impl CacheDebugWindow {
         ui.text(label);
         ui.same_line();
 
-        let half_visible = visible_frames / 2;
+        let visible_frames = player.preload_ahead * 2 + player.preload_behind * 2 + 1;
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
@@ -103,22 +100,19 @@ impl CacheDebugWindow {
             let window_pos = ui.window_pos();
             let cursor_pos = ui.cursor_pos();
 
-            let start = current.saturating_sub(half_visible);
-            let end = (start + visible_frames).min(frame_count);
-            let start = end.saturating_sub(visible_frames);
+            let half_visible = visible_frames / 2;
 
-            for (index, frame) in (start..end).enumerate() {
-                let x = window_pos[0] + cursor_pos[0] + index as f32 * (button_size + spacing);
+            for i in 0..visible_frames {
+                let frame = (current as i64 + i as i64 - half_visible as i64)
+                    .rem_euclid(frame_count as i64) as usize;
+                let x = window_pos[0] + cursor_pos[0] + i as f32 * (button_size + spacing);
                 let y = window_pos[1] + cursor_pos[1];
 
                 if frame % 5 == 0 {
                     draw_list.add_text([x, y - 15.0], [1.0, 1.0, 1.0, 1.0], &frame.to_string());
                 }
-            }
 
-            for (index, frame) in (start..end).enumerate() {
-                let x = window_pos[0] + cursor_pos[0] + index as f32 * (button_size + spacing);
-                let y = window_pos[1] + cursor_pos[1] + 5.0;
+                let y = y + 5.0;
 
                 let color = if cache.read().contains_key(&frame) {
                     [0.0, 1.0, 0.0, 1.0]
