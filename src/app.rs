@@ -9,6 +9,7 @@ use parking_lot::RwLock as PLRwLock;
 use std::sync::Arc;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
+use winit::event::VirtualKeyCode;
 use winit::window::Window as WinitWindow;
 
 #[repr(C)]
@@ -21,18 +22,21 @@ struct UniformData {
 
 struct CacheDebugWindow {
     is_open: bool,
+    size: [f32; 2],
 }
 
 impl CacheDebugWindow {
     fn new() -> Self {
-        Self { is_open: false }
+        Self {
+            is_open: false,
+            size: [400.0, 150.0],
+        }
     }
 
     fn draw(&mut self, ui: &Ui, player: &Player, mouse_x: f32, mouse_y: f32) {
-        let window_size = [400.0, 150.0]; // Increased height
         ui.window("Cache Debug")
-            .size(window_size, Condition::Always)
-            .position([50.0, 50.0], Condition::FirstUseEver)
+            .size(self.size, Condition::Always)
+            .resizable(true)
             .build(|| {
                 let (current_left, current_right) = player.current_images();
                 let frame_count = player.frame_count1;
@@ -59,6 +63,9 @@ impl CacheDebugWindow {
                     mouse_x,
                     mouse_y,
                 );
+
+                // Update size after potential resize
+                self.size = ui.window_size();
             });
     }
 
@@ -426,6 +433,7 @@ impl AppState {
         );
 
         let mut imgui_context = imgui::Context::create();
+        imgui_context.set_ini_filename(None); // Disable imgui.ini file
         let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
         imgui_platform.attach_window(
             imgui_context.io_mut(),
@@ -590,26 +598,28 @@ impl AppState {
             render_pass.draw(0..6, 0..1);
         }
 
-        // Prepare ImGui frame
-        self.imgui_platform
-            .prepare_frame(self.imgui_context.io_mut(), window)
-            .expect("Failed to prepare ImGui frame");
+        let mut should_render_imgui = false;
 
-        let ui = self.imgui_context.frame();
+        if self.cache_debug_window.is_open {
+            // Prepare ImGui frame only if needed
+            self.imgui_platform
+                .prepare_frame(self.imgui_context.io_mut(), window)
+                .expect("Failed to prepare ImGui frame");
 
-        {
-            // Create a new scope for UI interactions
+            let ui = self.imgui_context.frame();
+
             let player = self.player.read();
             let mouse_pos = ui.io().mouse_pos;
             self.cache_debug_window
                 .draw(&ui, &player, mouse_pos[0], mouse_pos[1]);
+            should_render_imgui = true;
+
+            // Explicitly end the frame
+            self.imgui_platform.prepare_render(&ui, window);
         }
 
-        // Explicitly end the frame
-        self.imgui_platform.prepare_render(&ui, window);
-
-        // Render ImGui
-        {
+        // Render ImGui only if there are UI elements
+        if should_render_imgui {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ImGui Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -629,7 +639,7 @@ impl AppState {
                 .expect("Failed to render ImGui");
         }
 
-        // Submit the ImGui render pass
+        // Submit the command encoder
         self.queue.submit(std::iter::once(encoder.finish()));
 
         debug!("Presenting output");
@@ -756,6 +766,23 @@ impl AppState {
         } = event
         {
             self.update_mouse_position(position.x as f32, position.y as f32);
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event:
+                winit::event::WindowEvent::KeyboardInput {
+                    input:
+                        winit::event::KeyboardInput {
+                            state: winit::event::ElementState::Pressed,
+                            virtual_keycode: Some(VirtualKeyCode::C),
+                            ..
+                        },
+                    ..
+                },
+            ..
+        } = event
+        {
+            self.cache_debug_window.toggle();
         }
 
         // Handle the event

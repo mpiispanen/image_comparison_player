@@ -1,12 +1,8 @@
 TODO:
 - Make worker thread add images to the cache directly instead of sending to main thread
-- Multithreaded loading
-    - Make processing also happen in the worker threads
 - Loop video playback
-- Fix playback
+    - Works I think?
 - Stop loading images if we have moved so far past the image that it is not needed anymore
-- Multithreaded loading
-- Prioritize loading the current frame and frames around it in the direction of playback
 - Create textures ahead of time
 - Improve cache visualization and make it hideable
 - Fix race condition in player
