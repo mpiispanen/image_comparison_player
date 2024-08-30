@@ -186,6 +186,7 @@ pub struct AppState {
     last_frame: std::time::Instant,
     cache_debug_window: CacheDebugWindow,
     uniform_bind_group: wgpu::BindGroup,
+    mouse_position: (f32, f32),
 }
 
 impl AppState {
@@ -444,6 +445,8 @@ impl AppState {
 
         let cache_debug_window = CacheDebugWindow::new();
 
+        let mouse_position = (0.0, 0.0);
+
         info!("AppState initialized successfully");
         Ok(Self {
             surface,
@@ -464,6 +467,7 @@ impl AppState {
             last_frame,
             cache_debug_window,
             uniform_bind_group,
+            mouse_position,
         })
     }
 
@@ -708,6 +712,15 @@ impl AppState {
 
     pub fn update_cursor_position(&mut self, x: f32, _y: f32) {
         self.cursor_x = x;
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[UniformData {
+                cursor_x: x / self.size.width as f32,
+                image1_size: [0.0, 0.0], // These will be updated in the render function
+                image2_size: [0.0, 0.0],
+            }]),
+        );
     }
 
     pub fn handle_mouse_click(&mut self, window: &winit::window::Window) {
@@ -737,9 +750,22 @@ impl AppState {
             debug!("Window resized to: {:?}", size);
         }
 
+        if let winit::event::Event::WindowEvent {
+            event: winit::event::WindowEvent::CursorMoved { position, .. },
+            ..
+        } = event
+        {
+            self.update_mouse_position(position.x as f32, position.y as f32);
+        }
+
         // Handle the event
         self.imgui_platform
             .handle_event(self.imgui_context.io_mut(), window, event);
         debug!("Event handled");
+    }
+
+    pub fn update_mouse_position(&mut self, x: f32, y: f32) {
+        self.mouse_position = (x, y);
+        self.update_cursor_position(self.mouse_position.0, self.mouse_position.1);
     }
 }
