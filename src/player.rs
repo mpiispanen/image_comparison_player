@@ -154,6 +154,8 @@ pub struct Player {
     pub flip_diff_cache: FlipDiffCache,
     flip_diff_pool: ThreadPool,
     flip_diff_sender: Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>,
+    flip_diff_receiver: Arc<Mutex<Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>,
+    pub show_flip_diff: AtomicBool,
 }
 
 impl Player {
@@ -170,6 +172,7 @@ impl Player {
 
         let flip_diff_pool = ThreadPool::new(config.num_flip_diff_threads);
         let (flip_diff_sender, flip_diff_receiver) = channel();
+        let flip_diff_receiver = Arc::new(Mutex::new(flip_diff_receiver));
 
         Self {
             config,
@@ -207,6 +210,8 @@ impl Player {
             flip_diff_cache: Arc::new(RwLock::new(HashMap::new())),
             flip_diff_pool,
             flip_diff_sender,
+            flip_diff_receiver,
+            show_flip_diff: AtomicBool::new(false),
         }
     }
 
@@ -249,30 +254,66 @@ impl Player {
     }
 
     pub fn next_frame(&self) -> bool {
-        let old_frame1 = self.current_frame1.fetch_add(1, Ordering::Relaxed);
-        let old_frame2 = self.current_frame2.fetch_add(1, Ordering::Relaxed);
-
-        let new_frame1 = (old_frame1 + 1) % self.frame_count1;
-        let new_frame2 = (old_frame2 + 1) % self.frame_count2;
-
-        self.current_frame1.store(new_frame1, Ordering::Relaxed);
-        self.current_frame2.store(new_frame2, Ordering::Relaxed);
-
-        let changed = old_frame1 != new_frame1 || old_frame2 != new_frame2;
-        self.frame_changed.store(changed, Ordering::Relaxed);
-
-        changed
+        self.jump_to_next_time_point(1)
     }
 
     pub fn previous_frame(&self) -> bool {
-        let old_frame1 = self.current_frame1.load(Ordering::Relaxed);
-        let old_frame2 = self.current_frame2.load(Ordering::Relaxed);
-        let new_frame1 = (old_frame1 + self.frame_count1 - 1) % self.frame_count1;
-        let new_frame2 = (old_frame2 + self.frame_count2 - 1) % self.frame_count2;
+        self.jump_to_next_time_point(-1)
+    }
+
+    fn jump_to_next_time_point(&self, direction: i64) -> bool {
+        let current_time = self.current_time.load(Ordering::Relaxed);
+        let new_time = self.find_next_time_point(current_time, direction);
+
+        if new_time != current_time {
+            self.current_time.store(new_time, Ordering::Relaxed);
+            self.update_current_frames();
+
+            if self.show_flip_diff.load(Ordering::Relaxed) {
+                let (current_left, current_right) = self.current_images();
+                self.generate_flip_diff(current_left, current_right);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn find_next_time_point(&self, current_time: u64, direction: i64) -> u64 {
+        let all_time_points: Vec<u64> = self
+            .config
+            .image_data1
+            .iter()
+            .chain(self.config.image_data2.iter())
+            .flat_map(|(_, start, end)| vec![*start, *end])
+            .collect();
+
+        let mut sorted_times: Vec<u64> = all_time_points.into_iter().collect();
+        sorted_times.sort_unstable();
+        sorted_times.dedup();
+
+        if direction > 0 {
+            sorted_times
+                .into_iter()
+                .find(|&t| t > current_time)
+                .unwrap_or(current_time)
+        } else {
+            sorted_times
+                .into_iter()
+                .rev()
+                .find(|&t| t < current_time)
+                .unwrap_or(current_time)
+        }
+    }
+
+    fn update_current_frames(&self) {
+        let current_time = self.current_time.load(Ordering::Relaxed);
+        let new_frame1 = self.get_current_index(&self.config.image_data1, current_time);
+        let new_frame2 = self.get_current_index(&self.config.image_data2, current_time);
+
         self.current_frame1.store(new_frame1, Ordering::Relaxed);
         self.current_frame2.store(new_frame2, Ordering::Relaxed);
         self.frame_changed.store(true, Ordering::Relaxed);
-        true
     }
 
     pub fn update_textures(&self) -> bool {
@@ -542,9 +583,14 @@ impl Player {
                 && self.get_texture(current_right, false).is_some()
             {
                 debug!("Frame displayed after {:?} delay", elapsed);
-                self.advance_frame(delta.as_micros() as u64);
+                let frame_changed = self.advance_frame(delta.as_micros());
                 *self.current_frame_set_time.lock() = now;
-                true
+
+                if frame_changed && self.show_flip_diff.load(Ordering::Relaxed) {
+                    self.generate_flip_diff(current_left, current_right);
+                }
+
+                frame_changed
             } else {
                 debug!(
                     "Waiting for frame to be available. Elapsed time: {:?}",
@@ -557,26 +603,19 @@ impl Player {
         }
     }
 
-    fn advance_frame(&self, delta_micros: u64) {
-        let mut current_time = self.current_time.load(Ordering::Relaxed);
-        current_time += delta_micros;
-        if current_time >= self.total_duration() {
-            current_time %= self.total_duration();
-        }
-        self.current_time.store(current_time, Ordering::Relaxed);
+    fn advance_frame(&self, delta_micros: u128) -> bool {
+        let current_time = self.current_time.load(Ordering::Relaxed);
+        let new_time = current_time.saturating_add(delta_micros as u64);
+        let total_duration = self.total_duration();
 
-        let old_frame1 = self.current_frame1.load(Ordering::Relaxed);
-        let old_frame2 = self.current_frame2.load(Ordering::Relaxed);
-
-        let new_frame1 = self.get_current_index(&self.config.image_data1, current_time);
-        let new_frame2 = self.get_current_index(&self.config.image_data2, current_time);
-
-        self.current_frame1.store(new_frame1, Ordering::Relaxed);
-        self.current_frame2.store(new_frame2, Ordering::Relaxed);
-
-        if new_frame1 != old_frame1 || new_frame2 != old_frame2 {
-            self.frame_changed.store(true, Ordering::Relaxed);
-            *self.current_frame_set_time.lock() = Instant::now();
+        if new_time >= total_duration {
+            self.current_time.store(0, Ordering::Relaxed);
+            self.update_current_frames();
+            true
+        } else {
+            self.current_time.store(new_time, Ordering::Relaxed);
+            self.update_current_frames();
+            self.frame_changed.swap(false, Ordering::Relaxed)
         }
     }
 
