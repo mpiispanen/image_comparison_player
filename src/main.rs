@@ -85,6 +85,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Number of threads to use for processing images")
                 .default_value("4"),
         )
+        .arg(
+            Arg::new("num_flip_diff_threads")
+                .long("num-flip-diff-threads")
+                .action(ArgAction::Set)
+                .value_name("COUNT")
+                .help("Number of threads to use for generating flip diffs")
+                .default_value("4"),
+        )
         .get_matches();
 
     let dir1 = matches.get_one::<String>("dir1").unwrap();
@@ -115,6 +123,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .parse()
         .unwrap_or(4);
+    let num_flip_diff_threads = matches
+        .get_one::<String>("num_flip_diff_threads")
+        .unwrap()
+        .parse()
+        .unwrap_or(4);
 
     let (width, height) = parse_window_size(window_size)?;
 
@@ -137,6 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         preload_behind,
         num_load_threads,
         num_process_threads,
+        num_flip_diff_threads,
     };
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;
@@ -147,7 +161,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         *control_flow = ControlFlow::Poll;
 
         if initialized {
-            // Check if initialized
             app_state.handle_event(&window, &event);
         }
 
@@ -158,26 +171,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     input:
                         KeyboardInput {
                             state: ElementState::Pressed,
-                            virtual_keycode: Some(keycode),
+                            virtual_keycode: Some(VirtualKeyCode::Escape),
                             ..
                         },
                     ..
-                } => match keycode {
-                    VirtualKeyCode::Space => {
-                        app_state.toggle_play_pause();
-                        window.request_redraw();
-                    }
-                    VirtualKeyCode::Right => {
-                        app_state.next_frame();
-                        window.request_redraw();
-                    }
-                    VirtualKeyCode::Left => {
-                        app_state.previous_frame();
-                        window.request_redraw();
-                    }
-                    VirtualKeyCode::Escape => *control_flow = ControlFlow::Exit,
-                    _ => {}
-                },
+                } => *control_flow = ControlFlow::Exit,
                 _ => {}
             },
             Event::MainEventsCleared => {
@@ -185,7 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::RedrawRequested(_) => {
                 app_state.update();
-                initialized = true; // Set initialized to true after the event loop starts
+                initialized = true;
                 match app_state.render(&window) {
                     Ok(_) => {}
                     Err(e) => error!("Render error: {}", e),

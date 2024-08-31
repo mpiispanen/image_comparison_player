@@ -3,13 +3,12 @@ use crate::player::Player;
 use crate::player::PlayerConfig;
 use imgui::Condition;
 use imgui::Ui;
-use log::{debug, error, info}; // Add error to the import list
+use log::{debug, info}; // Add error to the import list
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
-use threadpool::ThreadPool;
 use wgpu::util::DeviceExt;
 use winit::event::VirtualKeyCode;
 use winit::window::Window as WinitWindow;
@@ -307,7 +306,6 @@ struct CacheRowParams {
     available_width: f32,
 }
 
-type FlipDiffSender = mpsc::Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>;
 type FlipDiffReceiver = Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
 type FlipDiffTexture = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
 
@@ -319,6 +317,7 @@ pub struct AppConfig {
     pub preload_behind: usize,
     pub num_load_threads: usize,
     pub num_process_threads: usize,
+    pub num_flip_diff_threads: usize,
 }
 
 pub struct AppState {
@@ -341,8 +340,6 @@ pub struct AppState {
     cache_debug_window: CacheDebugWindow,
     uniform_bind_group: wgpu::BindGroup,
     mouse_position: (f32, f32),
-    flip_diff_pool: ThreadPool,
-    flip_diff_sender: FlipDiffSender,
     flip_diff_receiver: FlipDiffReceiver,
     flip_diff_texture: FlipDiffTexture,
     flip_mode: bool,
@@ -642,6 +639,7 @@ impl AppState {
                 preload_behind: app_config.preload_behind,
                 num_load_threads: app_config.num_load_threads,
                 num_process_threads: app_config.num_process_threads,
+                num_flip_diff_threads: app_config.num_flip_diff_threads,
             },
             Arc::clone(&queue),
             Arc::clone(&device),
@@ -685,10 +683,6 @@ impl AppState {
 
         let mouse_position = (0.0, 0.0);
 
-        let (flip_diff_sender, flip_diff_receiver) = mpsc::channel();
-        let flip_diff_receiver = Arc::new(Mutex::new(flip_diff_receiver));
-        let flip_diff_pool = ThreadPool::new(1);
-
         info!("AppState initialized successfully");
         Ok(Self {
             surface,
@@ -710,12 +704,10 @@ impl AppState {
             cache_debug_window,
             uniform_bind_group,
             mouse_position,
-            flip_diff_pool,
-            flip_diff_sender,
-            flip_diff_receiver,
             flip_diff_texture: Arc::new(Mutex::new(None)),
             flip_mode: false,
             show_flip_diff: false,
+            flip_diff_receiver: Arc::new(Mutex::new(mpsc::channel().1)),
         })
     }
 
@@ -930,17 +922,6 @@ impl AppState {
                 Arc::new(Mutex::new(Some(texture_arc.clone()))),
             );
 
-            // Ensure the data size matches the texture size
-            let data_size = (size.width * size.height * 4) as usize;
-            if diff_data.len() != data_size {
-                error!(
-                    "Data size mismatch: expected {}, got {}",
-                    data_size,
-                    diff_data.len()
-                );
-                return Ok(());
-            }
-
             self.queue.write_texture(
                 wgpu::ImageCopyTexture {
                     texture: &texture_arc,
@@ -1143,11 +1124,9 @@ impl AppState {
     }
 
     pub fn next_frame(&mut self) {
-        let frame_changed = self.player.write().next_frame();
+        let frame_changed = fself.player.write().next_frame();
         if frame_changed {
             self.load_and_update_textures();
-            self.flip_mode = false;
-            self.show_flip_diff = false;
         }
     }
 
@@ -1155,8 +1134,6 @@ impl AppState {
         let frame_changed = self.player.write().previous_frame();
         if frame_changed {
             self.load_and_update_textures();
-            self.flip_mode = false;
-            self.show_flip_diff = false;
         }
     }
 
@@ -1242,8 +1219,6 @@ impl AppState {
                     } else {
                         self.next_frame();
                     }
-                    self.flip_mode = false;
-                    self.show_flip_diff = false;
                 }
                 _ => {}
             }
@@ -1260,17 +1235,17 @@ impl AppState {
     }
 
     fn generate_flip_diff(&mut self) {
-        let player = self.player.read();
-        let (left_index, right_index) = player.current_images();
-        let sender = self.flip_diff_sender.clone();
-        let player_clone = Arc::clone(&self.player);
+        let (left_index, right_index) = {
+            let player = self.player.read();
+            player.current_images()
+        };
 
         // Clear the old flip diff texture
         *self.flip_diff_texture.lock() = None;
 
-        self.flip_diff_pool.execute(move || {
-            let player = player_clone.read();
-            player.generate_flip_diff(left_index, right_index, sender);
-        });
+        // Trigger the flip diff generation in the Player
+        self.player
+            .read()
+            .generate_flip_diff(left_index, right_index);
     }
 }

@@ -1,4 +1,5 @@
 use log::debug;
+use nv_flip::{flip, magma_lut, FlipImageRgb8};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::AtomicU64;
@@ -122,6 +123,7 @@ pub struct PlayerConfig {
     pub preload_behind: usize,
     pub num_load_threads: usize,
     pub num_process_threads: usize,
+    pub num_flip_diff_threads: usize,
 }
 
 pub struct Player {
@@ -150,6 +152,9 @@ pub struct Player {
     pub texture_timings: Arc<RwLock<HashMap<(usize, bool), TextureTimingInfo>>>,
     current_frame_set_time: Arc<Mutex<Instant>>,
     pub flip_diff_cache: FlipDiffCache,
+    flip_diff_pool: ThreadPool,
+    flip_diff_sender: Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>,
+    flip_diff_receiver: Arc<Mutex<Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>,
 }
 
 impl Player {
@@ -163,6 +168,10 @@ impl Player {
         let texture_process_pool = ThreadPool::new(config.num_process_threads);
 
         let cache_size = config.cache_size;
+
+        let flip_diff_pool = ThreadPool::new(config.num_flip_diff_threads);
+        let (flip_diff_sender, flip_diff_receiver) = channel();
+        let flip_diff_receiver = Arc::new(Mutex::new(flip_diff_receiver));
 
         Self {
             config,
@@ -198,6 +207,9 @@ impl Player {
             texture_timings: Arc::new(RwLock::new(HashMap::new())),
             current_frame_set_time: Arc::new(Mutex::new(Instant::now())),
             flip_diff_cache: Arc::new(RwLock::new(HashMap::new())),
+            flip_diff_pool,
+            flip_diff_sender,
+            flip_diff_receiver,
         }
     }
 
@@ -676,12 +688,7 @@ impl Player {
         self.right_texture.lock().clone()
     }
 
-    pub fn generate_flip_diff(
-        &self,
-        left_index: usize,
-        right_index: usize,
-        flip_diff_sender: Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>,
-    ) {
+    pub fn generate_flip_diff(&self, left_index: usize, right_index: usize) {
         let left_texture = self.get_texture(left_index, true);
         let right_texture = self.get_texture(right_index, false);
 
@@ -711,42 +718,84 @@ impl Player {
             let left_data = self.read_buffer(&left_buffer, (width * height * 4) as u64);
             let right_data = self.read_buffer(&right_buffer, (width * height * 4) as u64);
 
-            let left_image = nv_flip::FlipImageRgb8::with_data(
-                width,
-                height,
-                &left_data
-                    .chunks(4)
-                    .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
-                    .collect::<Vec<u8>>(),
-            );
-            let right_image = nv_flip::FlipImageRgb8::with_data(
-                width,
-                height,
-                &right_data
-                    .chunks(4)
-                    .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
-                    .collect::<Vec<u8>>(),
-            );
+            let flip_diff_sender = self.flip_diff_sender.clone();
+            let device = Arc::clone(&self.device);
+            let queue = Arc::clone(&self.queue);
+            let flip_diff_cache = Arc::clone(&self.flip_diff_cache);
 
-            let error_map =
-                nv_flip::flip(left_image, right_image, nv_flip::DEFAULT_PIXELS_PER_DEGREE);
-            let visualized = error_map.apply_color_lut(&nv_flip::magma_lut());
+            self.flip_diff_pool.execute(move || {
+                let left_image = FlipImageRgb8::with_data(
+                    width,
+                    height,
+                    &left_data
+                        .chunks(4)
+                        .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
+                        .collect::<Vec<u8>>(),
+                );
+                let right_image = FlipImageRgb8::with_data(
+                    width,
+                    height,
+                    &right_data
+                        .chunks(4)
+                        .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
+                        .collect::<Vec<u8>>(),
+                );
 
-            let diff_data: Vec<u8> = visualized
-                .to_vec()
-                .chunks_exact(3)
-                .flat_map(|chunk| chunk.iter().chain(std::iter::once(&255u8)))
-                .copied()
-                .collect();
-            let diff_size = wgpu::Extent3d {
-                width: visualized.width(),
-                height: visualized.height(),
-                depth_or_array_layers: 1,
-            };
+                let error_map = flip(left_image, right_image, nv_flip::DEFAULT_PIXELS_PER_DEGREE);
+                let visualized = error_map.apply_color_lut(&magma_lut());
 
-            flip_diff_sender
-                .send((left_index, right_index, diff_data, diff_size))
-                .unwrap();
+                let diff_data: Vec<u8> = visualized
+                    .to_vec()
+                    .chunks_exact(3)
+                    .flat_map(|chunk| chunk.iter().chain(std::iter::once(&255u8)))
+                    .copied()
+                    .collect();
+                let diff_size = wgpu::Extent3d {
+                    width: visualized.width(),
+                    height: visualized.height(),
+                    depth_or_array_layers: 1,
+                };
+
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(&format!(
+                        "Flip Diff Texture - ({}, {})",
+                        left_index, right_index
+                    )),
+                    size: diff_size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+
+                queue.write_texture(
+                    wgpu::ImageCopyTexture {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &diff_data,
+                    wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * diff_size.width),
+                        rows_per_image: Some(diff_size.height),
+                    },
+                    diff_size,
+                );
+
+                let texture_arc = Arc::new(texture);
+                flip_diff_cache.write().insert(
+                    (left_index, right_index),
+                    Arc::new(Mutex::new(Some(texture_arc.clone()))),
+                );
+
+                flip_diff_sender
+                    .send((left_index, right_index, diff_data, diff_size))
+                    .unwrap();
+            });
         }
     }
 
