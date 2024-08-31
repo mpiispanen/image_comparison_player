@@ -22,6 +22,7 @@ imgui = { version = "0.11.0" }
 imgui-wgpu = "0.24.0"
 imgui-winit-support = "0.11.0"
 imgui-sys = "0.11.0"
+nv-flip = "0.1.2"
 
 [[bin]]
 name = "image_comparison_player"

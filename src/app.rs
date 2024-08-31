@@ -6,8 +6,11 @@ use log::{debug, error, info}; // Add error to the import list
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
 use parking_lot::RwLock as PLRwLock;
+use std::collections::HashMap;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
+use threadpool::ThreadPool;
 use wgpu::util::DeviceExt;
 use winit::event::VirtualKeyCode;
 use winit::window::Window as WinitWindow;
@@ -16,8 +19,11 @@ use winit::window::Window as WinitWindow;
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default, Debug)]
 struct UniformData {
     cursor_x: f32,
+    cursor_y: f32,
     image1_size: [f32; 2],
     image2_size: [f32; 2],
+    flip_diff_size: [f32; 2],
+    show_flip_diff: f32,
 }
 
 struct CacheDebugWindow {
@@ -194,8 +200,10 @@ pub struct AppState {
     queue: Arc<wgpu::Queue>,
     size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
+    render_pipeline_with_flip: wgpu::RenderPipeline,
     player: Arc<RwLock<parking_lot::RawRwLock, Player>>,
     cursor_x: f32,
+    cursor_y: f32,
     last_update: Instant,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     uniform_buffer: wgpu::Buffer,
@@ -208,6 +216,18 @@ pub struct AppState {
     cache_debug_window: CacheDebugWindow,
     uniform_bind_group: wgpu::BindGroup,
     mouse_position: (f32, f32),
+    flip_diff_cache: Arc<
+        RwLock<
+            parking_lot::RawRwLock,
+            HashMap<(usize, usize), Arc<Mutex<Option<Arc<wgpu::Texture>>>>>,
+        >,
+    >,
+    flip_diff_pool: ThreadPool,
+    flip_diff_sender: mpsc::Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>,
+    flip_diff_receiver: Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>,
+    flip_diff_texture: Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
+    flip_mode: bool,
+    show_flip_diff: bool,
 }
 
 impl AppState {
@@ -276,7 +296,14 @@ impl AppState {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/diff_2_images.wgsl").into()),
+        });
+
+        let shader_with_flip = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shader with Flip"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/diff_2_images_with_diff.wgsl").into(),
+            ),
         });
 
         let texture_bind_group_layout =
@@ -315,12 +342,28 @@ impl AppState {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Uniform Buffer"),
-            size: 24,
+            size: std::mem::size_of::<UniformData>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -352,7 +395,9 @@ impl AppState {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(&[
-                -1.0f32, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0,
+                // Position (x, y)   // Texture coords (u, v)
+                -1.0f32, -1.0, 0.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0,
+                1.0, 1.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0,
             ]),
             usage: wgpu::BufferUsages::VERTEX,
         });
@@ -371,13 +416,20 @@ impl AppState {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 8,
+                    array_stride: 16,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 8,
+                            shader_location: 1,
+                        },
+                    ],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -406,6 +458,57 @@ impl AppState {
             },
             multiview: None,
         });
+
+        let render_pipeline_with_flip =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Render Pipeline with Flip"),
+                layout: Some(&render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader_with_flip,
+                    entry_point: "vs_main",
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: 16,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 8,
+                                shader_location: 1,
+                            },
+                        ],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_with_flip,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+            });
 
         let (images1, image_len1) = image_loader::load_image_paths(&dir1.to_str().unwrap())?;
         let (images2, image_len2) = image_loader::load_image_paths(&dir2.to_str().unwrap())?;
@@ -469,6 +572,10 @@ impl AppState {
 
         let mouse_position = (0.0, 0.0);
 
+        let (flip_diff_sender, flip_diff_receiver) = mpsc::channel();
+        let flip_diff_receiver = Arc::new(Mutex::new(flip_diff_receiver));
+        let flip_diff_pool = ThreadPool::new(1);
+
         info!("AppState initialized successfully");
         Ok(Self {
             surface,
@@ -476,8 +583,10 @@ impl AppState {
             queue,
             size,
             render_pipeline,
+            render_pipeline_with_flip,
             player,
             cursor_x: size.width as f32 / 2.0,
+            cursor_y: size.height as f32 / 2.0,
             last_update: Instant::now(),
             texture_bind_group_layout,
             uniform_buffer,
@@ -490,6 +599,13 @@ impl AppState {
             cache_debug_window,
             uniform_bind_group,
             mouse_position,
+            flip_diff_cache: Arc::new(RwLock::new(HashMap::new())),
+            flip_diff_pool,
+            flip_diff_sender,
+            flip_diff_receiver,
+            flip_diff_texture: Arc::new(Mutex::new(None)),
+            flip_mode: false,
+            show_flip_diff: false,
         })
     }
 
@@ -532,8 +648,13 @@ impl AppState {
     }
 
     pub fn update_textures(&mut self) -> bool {
-        let player = self.player.write();
-        player.update_textures()
+        let mut player = self.player.write();
+        let frame_changed = player.update_textures();
+        if frame_changed {
+            self.flip_mode = false;
+            self.show_flip_diff = false;
+        }
+        frame_changed
     }
 
     pub fn render(&mut self, window: &WinitWindow) -> Result<(), wgpu::SurfaceError> {
@@ -575,7 +696,27 @@ impl AppState {
                 label: Some("Render Encoder"),
             });
 
-        let texture_bind_group = self.create_texture_bind_group(&left_texture, &right_texture);
+        // Check if a valid flip diff texture exists for the current frame pair
+        let flip_diff_texture = if self.show_flip_diff {
+            self.flip_diff_cache
+                .read()
+                .get(&(left_index, right_index))
+                .and_then(|mutex| mutex.lock().as_ref().cloned())
+        } else {
+            None
+        };
+
+        let use_flip_diff = flip_diff_texture.is_some();
+
+        let texture_bind_group = if use_flip_diff {
+            self.create_texture_bind_group_with_flip(
+                &left_texture,
+                &right_texture,
+                &flip_diff_texture.clone().unwrap(),
+            )
+        } else {
+            self.create_texture_bind_group(&left_texture, &right_texture)
+        };
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -598,14 +739,29 @@ impl AppState {
 
             let uniforms = UniformData {
                 cursor_x: self.cursor_x / self.size.width as f32,
+                cursor_y: self.mouse_position.1 / self.size.height as f32,
                 image1_size: [left_texture.width() as f32, left_texture.height() as f32],
                 image2_size: [right_texture.width() as f32, right_texture.height() as f32],
+                flip_diff_size: if use_flip_diff {
+                    let flip_diff_texture = flip_diff_texture.clone().unwrap();
+                    [
+                        flip_diff_texture.width() as f32,
+                        flip_diff_texture.height() as f32,
+                    ]
+                } else {
+                    [0.0, 0.0]
+                },
+                show_flip_diff: if use_flip_diff { 1.0 } else { 0.0 },
             };
 
             self.queue
                 .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
-            render_pass.set_pipeline(&self.render_pipeline);
+            if use_flip_diff {
+                render_pass.set_pipeline(&self.render_pipeline_with_flip);
+            } else {
+                render_pass.set_pipeline(&self.render_pipeline);
+            }
             render_pass.set_bind_group(0, &texture_bind_group, &[]);
             render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -651,6 +807,117 @@ impl AppState {
                 .expect("Failed to render ImGui");
         }
 
+        while let Ok((left_index, right_index, diff_data, size)) =
+            self.flip_diff_receiver.lock().try_recv()
+        {
+            let device = Arc::clone(&self.device);
+            let flip_diff_texture = Arc::clone(&self.flip_diff_texture);
+            let flip_diff_cache = Arc::clone(&self.flip_diff_cache);
+
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!(
+                    "Flip Diff Texture - ({}, {})",
+                    left_index, right_index
+                )),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+
+            let texture_arc = Arc::new(texture);
+            *flip_diff_texture.lock() = Some(Arc::clone(&texture_arc));
+            flip_diff_cache.write().insert(
+                (left_index, right_index),
+                Arc::new(Mutex::new(Some(texture_arc.clone()))),
+            );
+
+            // Ensure the data size matches the texture size
+            let data_size = (size.width * size.height * 4) as usize;
+            if diff_data.len() != data_size {
+                error!(
+                    "Data size mismatch: expected {}, got {}",
+                    data_size,
+                    diff_data.len()
+                );
+                return Ok(());
+            }
+
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture_arc,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &diff_data,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * size.width),
+                    rows_per_image: Some(size.height),
+                },
+                size,
+            );
+        }
+
+        if self.flip_mode {
+            let flip_diff_texture = self.flip_diff_texture.lock().clone();
+            if let Some(flip_diff_texture) = flip_diff_texture {
+                let mouse_y = self.mouse_position.1;
+                let window_height = window.inner_size().height as f32;
+
+                let texture_bind_group = if mouse_y < window_height / 2.0 {
+                    self.create_texture_bind_group(&left_texture, &right_texture)
+                } else {
+                    self.create_texture_bind_group(&flip_diff_texture, &flip_diff_texture)
+                };
+
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.1,
+                                g: 0.2,
+                                b: 0.3,
+                                a: 1.0,
+                            }),
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
+
+                let flip_diff_size = [
+                    flip_diff_texture.width() as f32,
+                    flip_diff_texture.height() as f32,
+                ];
+
+                let uniforms = UniformData {
+                    cursor_x: self.cursor_x / self.size.width as f32,
+                    cursor_y: mouse_y / window_height,
+                    image1_size: [left_texture.width() as f32, left_texture.height() as f32],
+                    image2_size: [right_texture.width() as f32, right_texture.height() as f32],
+                    flip_diff_size,
+                    show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+                };
+
+                self.queue
+                    .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+                render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_bind_group(0, &texture_bind_group, &[]);
+                render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.draw(0..6, 0..1);
+            }
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
 
         debug!("Presenting output");
@@ -676,6 +943,23 @@ impl AppState {
             ..Default::default()
         });
 
+        // Create a dummy texture for the flip diff
+        let dummy_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            label: Some("Dummy Flip Diff Texture"),
+            view_formats: &[],
+        });
+        let dummy_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Texture Bind Group"),
             layout: &self.texture_bind_group_layout,
@@ -696,6 +980,65 @@ impl AppState {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&dummy_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        })
+    }
+
+    fn create_texture_bind_group_with_flip(
+        &self,
+        texture1: &wgpu::Texture,
+        texture2: &wgpu::Texture,
+        flip_diff_texture: &wgpu::Texture,
+    ) -> wgpu::BindGroup {
+        let texture_view1 = texture1.create_view(&wgpu::TextureViewDescriptor::default());
+        let texture_view2 = texture2.create_view(&wgpu::TextureViewDescriptor::default());
+        let flip_diff_view = flip_diff_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Texture Bind Group with Flip"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view1),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&texture_view2),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&flip_diff_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
             ],
         })
     }
@@ -708,6 +1051,8 @@ impl AppState {
         let frame_changed = self.player.write().next_frame();
         if frame_changed {
             self.load_and_update_textures();
+            self.flip_mode = false;
+            self.show_flip_diff = false;
         }
     }
 
@@ -715,6 +1060,8 @@ impl AppState {
         let frame_changed = self.player.write().previous_frame();
         if frame_changed {
             self.load_and_update_textures();
+            self.flip_mode = false;
+            self.show_flip_diff = false;
         }
     }
 
@@ -731,15 +1078,19 @@ impl AppState {
         self.player.write().process_loaded_textures();
     }
 
-    pub fn update_cursor_position(&mut self, x: f32, _y: f32) {
+    pub fn update_cursor_position(&mut self, x: f32, y: f32) {
         self.cursor_x = x;
+        self.cursor_y = y;
         self.queue.write_buffer(
             &self.uniform_buffer,
             0,
             bytemuck::cast_slice(&[UniformData {
                 cursor_x: x / self.size.width as f32,
+                cursor_y: y / self.size.height as f32,
                 image1_size: [0.0, 0.0],
                 image2_size: [0.0, 0.0],
+                flip_diff_size: [0.0, 0.0],
+                show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
             }]),
         );
     }
@@ -784,7 +1135,7 @@ impl AppState {
                     input:
                         winit::event::KeyboardInput {
                             state: winit::event::ElementState::Pressed,
-                            virtual_keycode: Some(VirtualKeyCode::C),
+                            virtual_keycode: Some(keycode),
                             ..
                         },
                     ..
@@ -792,7 +1143,27 @@ impl AppState {
             ..
         } = event
         {
-            self.cache_debug_window.toggle();
+            match keycode {
+                VirtualKeyCode::C => {
+                    self.cache_debug_window.toggle();
+                }
+                VirtualKeyCode::F => {
+                    self.show_flip_diff = !self.show_flip_diff;
+                    if self.show_flip_diff {
+                        self.generate_flip_diff();
+                    }
+                }
+                VirtualKeyCode::Left | VirtualKeyCode::Right => {
+                    if *keycode == VirtualKeyCode::Left {
+                        self.previous_frame();
+                    } else {
+                        self.next_frame();
+                    }
+                    self.flip_mode = false;
+                    self.show_flip_diff = false;
+                }
+                _ => {}
+            }
         }
 
         self.imgui_platform
@@ -803,5 +1174,20 @@ impl AppState {
     pub fn update_mouse_position(&mut self, x: f32, y: f32) {
         self.mouse_position = (x, y);
         self.update_cursor_position(self.mouse_position.0, self.mouse_position.1);
+    }
+
+    fn generate_flip_diff(&mut self) {
+        let player = self.player.read();
+        let (left_index, right_index) = player.current_images();
+        let sender = self.flip_diff_sender.clone();
+        let player_clone = Arc::clone(&self.player);
+
+        // Clear the old flip diff texture
+        *self.flip_diff_texture.lock() = None;
+
+        self.flip_diff_pool.execute(move || {
+            let player = player_clone.read();
+            player.generate_flip_diff(left_index, right_index, sender);
+        });
     }
 }

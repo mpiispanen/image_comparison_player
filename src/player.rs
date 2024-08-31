@@ -1,3 +1,4 @@
+use image::{ImageBuffer, Rgba};
 use log::debug;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -457,7 +458,9 @@ impl Player {
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
                         format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_DST
+                            | wgpu::TextureUsages::COPY_SRC,
                         view_formats: &[],
                     }))
                 };
@@ -683,7 +686,9 @@ impl Player {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
 
@@ -789,5 +794,126 @@ impl Player {
                 }
             }
         }
+    }
+
+    pub fn generate_flip_diff(
+        &self,
+        left_index: usize,
+        right_index: usize,
+        flip_diff_sender: Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>,
+    ) {
+        let left_texture = self.get_texture(left_index, true);
+        let right_texture = self.get_texture(right_index, false);
+
+        if let (Some(left_texture), Some(right_texture)) = (left_texture, right_texture) {
+            let left_size = left_texture.size();
+            let right_size = right_texture.size();
+
+            if left_size.width != right_size.width || left_size.height != right_size.height {
+                debug!("Skipping Flip diff generation due to size mismatch");
+                return;
+            }
+
+            let width = left_size.width;
+            let height = left_size.height;
+
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+            let left_buffer =
+                self.create_buffer_and_copy_texture(&mut encoder, &left_texture, left_size);
+            let right_buffer =
+                self.create_buffer_and_copy_texture(&mut encoder, &right_texture, right_size);
+
+            self.queue.submit(std::iter::once(encoder.finish()));
+
+            let left_data = self.read_buffer(&left_buffer, (width * height * 4) as u64);
+            let right_data = self.read_buffer(&right_buffer, (width * height * 4) as u64);
+
+            let left_image = nv_flip::FlipImageRgb8::with_data(
+                width,
+                height,
+                &left_data
+                    .chunks(4)
+                    .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
+                    .collect::<Vec<u8>>(),
+            );
+            let right_image = nv_flip::FlipImageRgb8::with_data(
+                width,
+                height,
+                &right_data
+                    .chunks(4)
+                    .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
+                    .collect::<Vec<u8>>(),
+            );
+
+            let error_map =
+                nv_flip::flip(left_image, right_image, nv_flip::DEFAULT_PIXELS_PER_DEGREE);
+            let visualized = error_map.apply_color_lut(&nv_flip::magma_lut());
+
+            let diff_data: Vec<u8> = visualized
+                .to_vec()
+                .chunks_exact(3)
+                .flat_map(|chunk| chunk.iter().chain(std::iter::once(&255u8)))
+                .copied()
+                .collect();
+            let diff_size = wgpu::Extent3d {
+                width: visualized.width(),
+                height: visualized.height(),
+                depth_or_array_layers: 1,
+            };
+
+            flip_diff_sender
+                .send((left_index, right_index, diff_data, diff_size))
+                .unwrap();
+        }
+    }
+
+    fn create_buffer_and_copy_texture(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        size: wgpu::Extent3d,
+    ) -> wgpu::Buffer {
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Texture Buffer"),
+            size: (size.width * size.height * 4) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size.width * 4),
+                    rows_per_image: Some(size.height),
+                },
+            },
+            size,
+        );
+
+        buffer
+    }
+
+    fn read_buffer(&self, buffer: &wgpu::Buffer, size: u64) -> Vec<u8> {
+        let buffer_slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        let data = buffer_slice.get_mapped_range().to_vec();
+        buffer.unmap();
+        data
     }
 }
