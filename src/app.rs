@@ -1124,7 +1124,7 @@ impl AppState {
     }
 
     pub fn next_frame(&mut self) {
-        let frame_changed = fself.player.write().next_frame();
+        let frame_changed = self.player.write().next_frame();
         if frame_changed {
             self.load_and_update_textures();
         }
