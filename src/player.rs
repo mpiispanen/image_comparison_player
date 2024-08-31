@@ -114,6 +114,7 @@ type TextureProcessReceiver = Arc<Mutex<Receiver<(usize, bool, Vec<u8>, wgpu::Ex
 type TextureHolder = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
 
 type FlipDiffCache = Arc<RwLock<HashMap<(usize, usize), Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
+type FlipDiffInProgress = Arc<RwLock<HashSet<(usize, usize)>>>;
 
 pub struct PlayerConfig {
     pub image_data1: Vec<(String, u64, u64)>,
@@ -161,6 +162,7 @@ pub struct Player {
     #[allow(dead_code)]
     flip_diff_receiver: FlipDiffReceiver,
     pub show_flip_diff: AtomicBool,
+    pub flip_diff_in_progress: FlipDiffInProgress,
 }
 
 impl Player {
@@ -217,6 +219,7 @@ impl Player {
             flip_diff_sender,
             flip_diff_receiver,
             show_flip_diff: AtomicBool::new(false),
+            flip_diff_in_progress: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -796,6 +799,11 @@ impl Player {
             let device = Arc::clone(&self.device);
             let queue = Arc::clone(&self.queue);
             let flip_diff_cache = Arc::clone(&self.flip_diff_cache);
+            let flip_diff_in_progress = Arc::clone(&self.flip_diff_in_progress);
+
+            self.flip_diff_in_progress
+                .write()
+                .insert((left_index, right_index));
 
             self.flip_diff_pool.execute(move || {
                 let left_image = FlipImageRgb8::with_data(
@@ -865,6 +873,9 @@ impl Player {
                     (left_index, right_index),
                     Arc::new(Mutex::new(Some(texture_arc.clone()))),
                 );
+                flip_diff_in_progress
+                    .write()
+                    .remove(&(left_index, right_index));
 
                 flip_diff_sender
                     .send((left_index, right_index, diff_data, diff_size))

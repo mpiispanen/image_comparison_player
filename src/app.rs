@@ -259,9 +259,15 @@ impl CacheDebugWindow {
                     .read()
                     .contains_key(&(left_frame, right_frame))
                 {
-                    [0.0, 1.0, 0.0, 1.0]
+                    [0.0, 1.0, 0.0, 1.0] // Green for completed
+                } else if player
+                    .flip_diff_in_progress
+                    .read()
+                    .contains(&(left_frame, right_frame))
+                {
+                    [1.0, 1.0, 0.0, 1.0] // Yellow for in progress
                 } else {
-                    [1.0, 0.0, 0.0, 1.0]
+                    [1.0, 0.0, 0.0, 1.0] // Red for not started
                 };
 
                 draw_list
