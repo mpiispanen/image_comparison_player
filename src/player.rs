@@ -259,11 +259,40 @@ impl Player {
     }
 
     pub fn next_frame(&self) -> bool {
-        self.jump_to_next_time_point(1)
+        let current_frame1 = self.current_frame1.load(Ordering::Relaxed);
+        let current_frame2 = self.current_frame2.load(Ordering::Relaxed);
+
+        let new_frame1 = (current_frame1 + 1) % self.frame_count1;
+        let new_frame2 = (current_frame2 + 1) % self.frame_count2;
+
+        self.current_frame1.store(new_frame1, Ordering::Relaxed);
+        self.current_frame2.store(new_frame2, Ordering::Relaxed);
+
+        self.frame_changed.store(true, Ordering::Relaxed);
+        true
     }
 
     pub fn previous_frame(&self) -> bool {
-        self.jump_to_next_time_point(-1)
+        let current_frame1 = self.current_frame1.load(Ordering::Relaxed);
+        let current_frame2 = self.current_frame2.load(Ordering::Relaxed);
+
+        let new_frame1 = if current_frame1 == 0 {
+            self.frame_count1 - 1
+        } else {
+            current_frame1 - 1
+        };
+
+        let new_frame2 = if current_frame2 == 0 {
+            self.frame_count2 - 1
+        } else {
+            current_frame2 - 1
+        };
+
+        self.current_frame1.store(new_frame1, Ordering::Relaxed);
+        self.current_frame2.store(new_frame2, Ordering::Relaxed);
+
+        self.frame_changed.store(true, Ordering::Relaxed);
+        true
     }
 
     fn jump_to_next_time_point(&self, direction: i64) -> bool {
@@ -297,17 +326,21 @@ impl Player {
         sorted_times.sort_unstable();
         sorted_times.dedup();
 
+        let total_duration = *sorted_times.last().unwrap_or(&0);
+
         if direction > 0 {
             sorted_times
+                .clone()
                 .into_iter()
                 .find(|&t| t > current_time)
-                .unwrap_or(current_time)
+                .unwrap_or_else(|| sorted_times.first().cloned().unwrap_or(0))
         } else {
             sorted_times
+                .clone()
                 .into_iter()
                 .rev()
                 .find(|&t| t < current_time)
-                .unwrap_or(current_time)
+                .unwrap_or_else(|| sorted_times.last().cloned().unwrap_or(total_duration))
         }
     }
 
