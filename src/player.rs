@@ -154,7 +154,6 @@ pub struct Player {
     pub flip_diff_cache: FlipDiffCache,
     flip_diff_pool: ThreadPool,
     flip_diff_sender: Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>,
-    flip_diff_receiver: Arc<Mutex<Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>,
 }
 
 impl Player {
@@ -171,7 +170,6 @@ impl Player {
 
         let flip_diff_pool = ThreadPool::new(config.num_flip_diff_threads);
         let (flip_diff_sender, flip_diff_receiver) = channel();
-        let flip_diff_receiver = Arc::new(Mutex::new(flip_diff_receiver));
 
         Self {
             config,
@@ -209,7 +207,6 @@ impl Player {
             flip_diff_cache: Arc::new(RwLock::new(HashMap::new())),
             flip_diff_pool,
             flip_diff_sender,
-            flip_diff_receiver,
         }
     }
 
