@@ -262,40 +262,11 @@ impl Player {
     }
 
     pub fn next_frame(&self) -> bool {
-        let current_frame1 = self.current_frame1.load(Ordering::Relaxed);
-        let current_frame2 = self.current_frame2.load(Ordering::Relaxed);
-
-        let new_frame1 = (current_frame1 + 1) % self.frame_count1;
-        let new_frame2 = (current_frame2 + 1) % self.frame_count2;
-
-        self.current_frame1.store(new_frame1, Ordering::Relaxed);
-        self.current_frame2.store(new_frame2, Ordering::Relaxed);
-
-        self.frame_changed.store(true, Ordering::Relaxed);
-        true
+        self.jump_to_next_time_point(1)
     }
 
     pub fn previous_frame(&self) -> bool {
-        let current_frame1 = self.current_frame1.load(Ordering::Relaxed);
-        let current_frame2 = self.current_frame2.load(Ordering::Relaxed);
-
-        let new_frame1 = if current_frame1 == 0 {
-            self.frame_count1 - 1
-        } else {
-            current_frame1 - 1
-        };
-
-        let new_frame2 = if current_frame2 == 0 {
-            self.frame_count2 - 1
-        } else {
-            current_frame2 - 1
-        };
-
-        self.current_frame1.store(new_frame1, Ordering::Relaxed);
-        self.current_frame2.store(new_frame2, Ordering::Relaxed);
-
-        self.frame_changed.store(true, Ordering::Relaxed);
-        true
+        self.jump_to_next_time_point(-1)
     }
 
     fn jump_to_next_time_point(&self, direction: i64) -> bool {
