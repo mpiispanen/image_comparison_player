@@ -1,13 +1,15 @@
 use clap::{Arg, ArgAction, Command};
 use log::{error, info};
 use winit::{
-    event::{ElementState, Event, KeyboardInput, MouseButton, VirtualKeyCode, WindowEvent},
+    event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
 mod app;
 mod image_loader;
 mod player;
+
+use crate::app::AppConfig;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -127,16 +129,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_inner_size(winit::dpi::LogicalSize::new(width, height))
         .build(&event_loop)?;
 
-    let mut app_state = pollster::block_on(app::AppState::new(
-        &window,
-        dir1.clone(),
-        dir2.clone(),
+    let app_config = AppConfig {
+        dir1: dir1.to_string(),
+        dir2: dir2.to_string(),
         cache_size,
         preload_ahead,
         preload_behind,
         num_load_threads,
         num_process_threads,
-    ))?;
+    };
+
+    let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;
 
     let mut initialized = false; // Add this line
 

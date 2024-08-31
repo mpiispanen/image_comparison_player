@@ -1,12 +1,11 @@
 use crate::image_loader;
 use crate::player::Player;
-use imgui::{Condition, StyleVar};
-use imgui::{StyleColor, Ui};
+use crate::player::PlayerConfig;
+use imgui::Condition;
+use imgui::Ui;
 use log::{debug, error, info}; // Add error to the import list
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
-use parking_lot::RwLock as PLRwLock;
-use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -40,7 +39,7 @@ impl CacheDebugWindow {
     }
 
     fn draw(&mut self, ui: &Ui, player: &Player, mouse_x: f32, mouse_y: f32, window_width: f32) {
-        let visible_frames = player.preload_ahead * 2 + player.preload_behind * 2 + 1;
+        let visible_frames = player.config.preload_ahead * 2 + player.config.preload_behind * 2 + 1;
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
@@ -59,10 +58,11 @@ impl CacheDebugWindow {
                     player,
                     true,
                     current_left,
-                    frame_count,
-                    mouse_x,
-                    mouse_y,
-                    desired_width,
+                    CacheRowParams {
+                        frame_count,
+                        mouse_pos: (mouse_x, mouse_y),
+                        available_width: desired_width,
+                    },
                 );
                 ui.dummy([0.0, 10.0]);
                 self.draw_cache_row(
@@ -70,10 +70,11 @@ impl CacheDebugWindow {
                     player,
                     false,
                     current_right,
-                    frame_count,
-                    mouse_x,
-                    mouse_y,
-                    desired_width,
+                    CacheRowParams {
+                        frame_count,
+                        mouse_pos: (mouse_x, mouse_y),
+                        available_width: desired_width,
+                    },
                 );
                 ui.dummy([0.0, 10.0]);
                 self.draw_diff_cache_row(
@@ -81,10 +82,11 @@ impl CacheDebugWindow {
                     player,
                     current_left,
                     current_right,
-                    frame_count,
-                    mouse_x,
-                    mouse_y,
-                    desired_width,
+                    CacheRowParams {
+                        frame_count,
+                        mouse_pos: (mouse_x, mouse_y),
+                        available_width: desired_width,
+                    },
                 );
 
                 self.size = ui.window_size();
@@ -97,10 +99,7 @@ impl CacheDebugWindow {
         player: &Player,
         is_left: bool,
         current: usize,
-        frame_count: usize,
-        mouse_x: f32,
-        mouse_y: f32,
-        available_width: f32,
+        params: CacheRowParams,
     ) {
         let cache = if is_left {
             &player.texture_cache_left
@@ -112,18 +111,19 @@ impl CacheDebugWindow {
         ui.text(label);
         ui.same_line();
 
-        let visible_frames = player.preload_ahead * 2 + player.preload_behind * 2 + 1;
+        let visible_frames = player.config.preload_ahead * 2 + player.config.preload_behind * 2 + 1;
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
-        let scale_factor = (available_width - ui.calc_text_size(label)[0] - spacing) / total_width;
+        let scale_factor =
+            (params.available_width - ui.calc_text_size(label)[0] - spacing) / total_width;
         let scaled_button_size = button_size * scale_factor;
         let scaled_spacing = spacing * scale_factor;
 
         ui.group(|| {
-            ui.set_next_item_width(available_width - ui.calc_text_size(label)[0] - spacing);
+            ui.set_next_item_width(params.available_width - ui.calc_text_size(label)[0] - spacing);
             ui.dummy([
-                available_width - ui.calc_text_size(label)[0] - spacing,
+                params.available_width - ui.calc_text_size(label)[0] - spacing,
                 scaled_button_size + 20.0,
             ]);
 
@@ -135,7 +135,7 @@ impl CacheDebugWindow {
 
             for i in 0..visible_frames {
                 let frame = (current as i64 + i as i64 - half_visible as i64)
-                    .rem_euclid(frame_count as i64) as usize;
+                    .rem_euclid(params.frame_count as i64) as usize;
                 let x = window_pos[0]
                     + cursor_pos[0]
                     + i as f32 * (scaled_button_size + scaled_spacing);
@@ -175,10 +175,10 @@ impl CacheDebugWindow {
                         .build();
                 }
 
-                if mouse_x >= x
-                    && mouse_x <= x + scaled_button_size
-                    && mouse_y >= y
-                    && mouse_y <= y + scaled_button_size
+                if params.mouse_pos.0 >= x
+                    && params.mouse_pos.0 <= x + scaled_button_size
+                    && params.mouse_pos.1 >= y
+                    && params.mouse_pos.1 <= y + scaled_button_size
                 {
                     let tooltip = if let Some(texture_info) =
                         player.texture_timings.read().get(&(frame, is_left))
@@ -206,26 +206,24 @@ impl CacheDebugWindow {
         player: &Player,
         current_left: usize,
         current_right: usize,
-        frame_count: usize,
-        mouse_x: f32,
-        mouse_y: f32,
-        available_width: f32,
+        params: CacheRowParams,
     ) {
         ui.text("D:");
         ui.same_line();
 
-        let visible_frames = player.preload_ahead * 2 + player.preload_behind * 2 + 1;
+        let visible_frames = player.config.preload_ahead * 2 + player.config.preload_behind * 2 + 1;
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
-        let scale_factor = (available_width - ui.calc_text_size("D:")[0] - spacing) / total_width;
+        let scale_factor =
+            (params.available_width - ui.calc_text_size("D:")[0] - spacing) / total_width;
         let scaled_button_size = button_size * scale_factor;
         let scaled_spacing = spacing * scale_factor;
 
         ui.group(|| {
-            ui.set_next_item_width(available_width - ui.calc_text_size("D:")[0] - spacing);
+            ui.set_next_item_width(params.available_width - ui.calc_text_size("D:")[0] - spacing);
             ui.dummy([
-                available_width - ui.calc_text_size("D:")[0] - spacing,
+                params.available_width - ui.calc_text_size("D:")[0] - spacing,
                 scaled_button_size + 20.0,
             ]);
 
@@ -237,9 +235,11 @@ impl CacheDebugWindow {
 
             for i in 0..visible_frames {
                 let left_frame = (current_left as i64 + i as i64 - half_visible as i64)
-                    .rem_euclid(frame_count as i64) as usize;
+                    .rem_euclid(params.frame_count as i64)
+                    as usize;
                 let right_frame = (current_right as i64 + i as i64 - half_visible as i64)
-                    .rem_euclid(frame_count as i64) as usize;
+                    .rem_euclid(params.frame_count as i64)
+                    as usize;
                 let x = window_pos[0]
                     + cursor_pos[0]
                     + i as f32 * (scaled_button_size + scaled_spacing);
@@ -285,10 +285,10 @@ impl CacheDebugWindow {
                         .build();
                 }
 
-                if mouse_x >= x
-                    && mouse_x <= x + scaled_button_size
-                    && mouse_y >= y
-                    && mouse_y <= y + scaled_button_size
+                if params.mouse_pos.0 >= x
+                    && params.mouse_pos.0 <= x + scaled_button_size
+                    && params.mouse_pos.1 >= y
+                    && params.mouse_pos.1 <= y + scaled_button_size
                 {
                     ui.tooltip_text(format!("Diff Cache: ({}, {})", left_frame, right_frame));
                 }
@@ -299,6 +299,26 @@ impl CacheDebugWindow {
     fn toggle(&mut self) {
         self.is_open = !self.is_open;
     }
+}
+
+struct CacheRowParams {
+    frame_count: usize,
+    mouse_pos: (f32, f32),
+    available_width: f32,
+}
+
+type FlipDiffSender = mpsc::Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>;
+type FlipDiffReceiver = Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
+type FlipDiffTexture = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
+
+pub struct AppConfig {
+    pub dir1: String,
+    pub dir2: String,
+    pub cache_size: usize,
+    pub preload_ahead: usize,
+    pub preload_behind: usize,
+    pub num_load_threads: usize,
+    pub num_process_threads: usize,
 }
 
 pub struct AppState {
@@ -314,19 +334,17 @@ pub struct AppState {
     last_update: Instant,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     uniform_buffer: wgpu::Buffer,
-    uniform_bind_group_layout: wgpu::BindGroupLayout,
     vertex_buffer: wgpu::Buffer,
     imgui_context: imgui::Context,
     imgui_platform: imgui_winit_support::WinitPlatform,
     imgui_renderer: imgui_wgpu::Renderer,
-    last_frame: std::time::Instant,
     cache_debug_window: CacheDebugWindow,
     uniform_bind_group: wgpu::BindGroup,
     mouse_position: (f32, f32),
     flip_diff_pool: ThreadPool,
-    flip_diff_sender: mpsc::Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>,
-    flip_diff_receiver: Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>,
-    flip_diff_texture: Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
+    flip_diff_sender: FlipDiffSender,
+    flip_diff_receiver: FlipDiffReceiver,
+    flip_diff_texture: FlipDiffTexture,
     flip_mode: bool,
     show_flip_diff: bool,
 }
@@ -334,17 +352,11 @@ pub struct AppState {
 impl AppState {
     pub async fn new(
         window: &WinitWindow,
-        dir1: String,
-        dir2: String,
-        cache_size: usize,
-        preload_ahead: usize,
-        preload_behind: usize,
-        num_load_threads: usize,
-        num_process_threads: usize,
+        app_config: AppConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         info!("Initializing AppState");
-        let dir1 = std::fs::canonicalize(dir1)?;
-        let dir2 = std::fs::canonicalize(dir2)?;
+        let dir1 = std::fs::canonicalize(app_config.dir1)?;
+        let dir2 = std::fs::canonicalize(app_config.dir2)?;
 
         let size = window.inner_size();
 
@@ -611,8 +623,8 @@ impl AppState {
                 multiview: None,
             });
 
-        let (images1, image_len1) = image_loader::load_image_paths(&dir1.to_str().unwrap())?;
-        let (images2, image_len2) = image_loader::load_image_paths(&dir2.to_str().unwrap())?;
+        let (images1, image_len1) = image_loader::load_image_paths(dir1.to_str().unwrap())?;
+        let (images2, image_len2) = image_loader::load_image_paths(dir2.to_str().unwrap())?;
         debug!(
             "Loaded {} images from dir1 and {} images from dir2",
             image_len1, image_len2
@@ -622,15 +634,17 @@ impl AppState {
         let queue = Arc::new(queue);
 
         let player = Arc::new(RwLock::new(Player::new(
-            images1,
-            images2,
-            cache_size,
-            preload_ahead,
-            preload_behind,
+            PlayerConfig {
+                image_data1: images1,
+                image_data2: images2,
+                cache_size: app_config.cache_size,
+                preload_ahead: app_config.preload_ahead,
+                preload_behind: app_config.preload_behind,
+                num_load_threads: app_config.num_load_threads,
+                num_process_threads: app_config.num_process_threads,
+            },
             Arc::clone(&queue),
             Arc::clone(&device),
-            num_load_threads,
-            num_process_threads,
         )));
         debug!("Player initialized");
 
@@ -667,8 +681,6 @@ impl AppState {
         let imgui_renderer =
             imgui_wgpu::Renderer::new(&mut imgui_context, &device, &queue, imgui_renderer_config);
 
-        let last_frame = std::time::Instant::now();
-
         let cache_debug_window = CacheDebugWindow::new();
 
         let mouse_position = (0.0, 0.0);
@@ -691,12 +703,10 @@ impl AppState {
             last_update: Instant::now(),
             texture_bind_group_layout,
             uniform_buffer,
-            uniform_bind_group_layout,
             vertex_buffer,
             imgui_context,
             imgui_platform,
             imgui_renderer,
-            last_frame,
             cache_debug_window,
             uniform_bind_group,
             mouse_position,
@@ -707,22 +717,6 @@ impl AppState {
             flip_mode: false,
             show_flip_diff: false,
         })
-    }
-
-    fn load_image_data_from_path(
-        path: String,
-    ) -> Result<(Vec<u8>, wgpu::Extent3d), Box<dyn std::error::Error>> {
-        let img = image::open(path)?;
-        let rgba = img.to_rgba8();
-        let dimensions = rgba.dimensions();
-
-        let size = wgpu::Extent3d {
-            width: dimensions.0,
-            height: dimensions.1,
-            depth_or_array_layers: 1,
-        };
-
-        Ok((rgba.into_raw(), size))
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -748,7 +742,7 @@ impl AppState {
     }
 
     pub fn update_textures(&mut self) -> bool {
-        let mut player = self.player.write();
+        let player = self.player.write();
         let frame_changed = player.update_textures();
         if frame_changed {
             self.flip_mode = false;
@@ -882,10 +876,10 @@ impl AppState {
             let mouse_pos = ui.io().mouse_pos;
             let window_width = window.inner_size().width as f32;
             self.cache_debug_window
-                .draw(&ui, &player, mouse_pos[0], mouse_pos[1], window_width);
+                .draw(ui, &player, mouse_pos[0], mouse_pos[1], window_width);
             should_render_imgui = true;
 
-            self.imgui_platform.prepare_render(&ui, window);
+            self.imgui_platform.prepare_render(ui, window);
         }
 
         if should_render_imgui {
@@ -1194,18 +1188,6 @@ impl AppState {
                 show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
             }]),
         );
-    }
-
-    pub fn handle_mouse_click(&mut self, window: &winit::window::Window) {
-        let cursor_position = window.inner_position().unwrap();
-        let window_size = window.inner_size();
-        if cursor_position.x >= 0
-            && cursor_position.x <= window_size.width as i32
-            && cursor_position.y >= 0
-            && cursor_position.y <= window_size.height as i32
-        {
-            self.player.write().toggle_play_pause();
-        }
     }
 
     pub fn handle_event<T>(

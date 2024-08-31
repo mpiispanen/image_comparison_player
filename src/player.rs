@@ -1,4 +1,3 @@
-use image::{ImageBuffer, Rgba};
 use log::debug;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -9,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use threadpool::ThreadPool;
 
-struct TextureLoadRequest {
+pub struct TextureLoadRequest {
     path: String,
     index: usize,
     is_left: bool,
@@ -32,7 +31,6 @@ struct TextureProcessRequest {
     is_left: bool,
     image_data: Vec<u8>,
     size: wgpu::Extent3d,
-    process_start: Instant,
 }
 
 impl TextureProcessRequest {
@@ -42,7 +40,6 @@ impl TextureProcessRequest {
             is_left,
             image_data,
             size,
-            process_start: Instant::now(),
         }
     }
 }
@@ -89,11 +86,6 @@ impl PriorityTextureLoadQueue {
         }
     }
 
-    pub fn clear(&self) {
-        self.queue.lock().clear();
-        self.unique_requests.lock().clear();
-    }
-
     pub fn reprioritize(&self, current_frame_left: usize, current_frame_right: usize) {
         let mut queue = self.queue.lock();
         queue.make_contiguous().sort_by_key(|req| {
@@ -103,8 +95,8 @@ impl PriorityTextureLoadQueue {
                 (current_frame_right, self.frame_count_right)
             };
             std::cmp::min(
-                (req.index as i32 - current_frame as i32).abs() as usize,
-                frame_count - (req.index as i32 - current_frame as i32).abs() as usize,
+                usize::abs_diff(req.index, current_frame),
+                frame_count - usize::abs_diff(req.index, current_frame),
             )
         });
     }
@@ -114,72 +106,66 @@ impl PriorityTextureLoadQueue {
     }
 }
 
+type TextureCache = Arc<RwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
+
+type TextureProcessSender = Sender<(usize, bool, Vec<u8>, wgpu::Extent3d)>;
+type TextureProcessReceiver = Arc<Mutex<Receiver<(usize, bool, Vec<u8>, wgpu::Extent3d)>>>;
+type TextureHolder = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
+
+type FlipDiffCache = Arc<RwLock<HashMap<(usize, usize), Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
+
+pub struct PlayerConfig {
+    pub image_data1: Vec<(String, u64, u64)>,
+    pub image_data2: Vec<(String, u64, u64)>,
+    pub cache_size: usize,
+    pub preload_ahead: usize,
+    pub preload_behind: usize,
+    pub num_load_threads: usize,
+    pub num_process_threads: usize,
+}
+
 pub struct Player {
-    image_data1: Vec<(String, u64, u64)>,
-    image_data2: Vec<(String, u64, u64)>,
+    pub config: PlayerConfig,
     current_time: AtomicU64,
     is_playing: AtomicBool,
     last_update: AtomicU64,
-    cache_size: usize,
-    pub preload_ahead: usize,
-    pub preload_behind: usize,
     pub frame_count1: usize,
     pub frame_count2: usize,
-    last_index1: usize,
-    last_index2: usize,
     queue: Arc<wgpu::Queue>,
     device: Arc<wgpu::Device>,
     current_frame1: AtomicUsize,
     current_frame2: AtomicUsize,
-    pub texture_cache_left: Arc<RwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
-    pub texture_cache_right: Arc<RwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
-    requested_textures_left: HashSet<usize>,
-    requested_textures_right: HashSet<usize>,
-    cache_order_left: Vec<usize>,
-    cache_order_right: Vec<usize>,
+    pub texture_cache_left: TextureCache,
+    pub texture_cache_right: TextureCache,
     texture_reuse_pool: Arc<Mutex<Vec<Arc<wgpu::Texture>>>>,
     frame_changed: Arc<AtomicBool>,
     pub texture_load_queue: Arc<Mutex<PriorityTextureLoadQueue>>,
     texture_load_pool: ThreadPool,
-    texture_load_sender: Sender<TextureLoadRequest>,
-    texture_load_receiver: Arc<Mutex<Receiver<TextureLoadRequest>>>,
     texture_process_pool: ThreadPool,
-    texture_process_sender: Sender<(usize, bool, Vec<u8>, wgpu::Extent3d)>,
-    texture_process_receiver: Arc<Mutex<Receiver<(usize, bool, Vec<u8>, wgpu::Extent3d)>>>,
-    left_texture: Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
-    right_texture: Arc<Mutex<Option<Arc<wgpu::Texture>>>>,
+    texture_process_sender: TextureProcessSender,
+    texture_process_receiver: TextureProcessReceiver,
+    left_texture: TextureHolder,
+    right_texture: TextureHolder,
     processing_textures: Arc<Mutex<HashSet<(usize, bool)>>>,
     pub texture_timings: Arc<RwLock<HashMap<(usize, bool), TextureTimingInfo>>>,
     current_frame_set_time: Arc<Mutex<Instant>>,
-    pub flip_diff_cache:
-        Arc<RwLock<HashMap<(usize, usize), Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
+    pub flip_diff_cache: FlipDiffCache,
 }
 
 impl Player {
-    pub fn new(
-        image_data1: Vec<(String, u64, u64)>,
-        image_data2: Vec<(String, u64, u64)>,
-        cache_size: usize,
-        preload_ahead: usize,
-        preload_behind: usize,
-        queue: Arc<wgpu::Queue>,
-        device: Arc<wgpu::Device>,
-        num_load_threads: usize,
-        num_process_threads: usize,
-    ) -> Self {
-        let frame_count1 = image_data1.len();
-        let frame_count2 = image_data2.len();
-        let (texture_load_sender, texture_load_receiver) = channel();
-        let texture_load_receiver = Arc::new(Mutex::new(texture_load_receiver));
+    pub fn new(config: PlayerConfig, queue: Arc<wgpu::Queue>, device: Arc<wgpu::Device>) -> Self {
+        let frame_count1 = config.image_data1.len();
+        let frame_count2 = config.image_data2.len();
         let (texture_process_sender, texture_process_receiver) = channel();
         let texture_process_receiver = Arc::new(Mutex::new(texture_process_receiver));
 
-        let texture_load_pool = ThreadPool::new(num_load_threads);
-        let texture_process_pool = ThreadPool::new(num_process_threads);
+        let texture_load_pool = ThreadPool::new(config.num_load_threads);
+        let texture_process_pool = ThreadPool::new(config.num_process_threads);
+
+        let cache_size = config.cache_size;
 
         Self {
-            image_data1,
-            image_data2,
+            config,
             current_time: AtomicU64::new(0),
             is_playing: AtomicBool::new(false),
             last_update: AtomicU64::new(
@@ -188,23 +174,14 @@ impl Player {
                     .unwrap()
                     .as_secs(),
             ),
-            cache_size,
-            preload_ahead,
-            preload_behind,
             frame_count1,
             frame_count2,
-            last_index1: 0,
-            last_index2: 0,
             queue,
             device,
             current_frame1: AtomicUsize::new(0),
             current_frame2: AtomicUsize::new(0),
             texture_cache_left: Arc::new(RwLock::new(HashMap::with_capacity(cache_size / 2))),
             texture_cache_right: Arc::new(RwLock::new(HashMap::with_capacity(cache_size / 2))),
-            requested_textures_left: HashSet::new(),
-            requested_textures_right: HashSet::new(),
-            cache_order_left: Vec::with_capacity(cache_size / 2),
-            cache_order_right: Vec::with_capacity(cache_size / 2),
             texture_reuse_pool: Arc::new(Mutex::new(Vec::new())),
             frame_changed: Arc::new(AtomicBool::new(false)),
             texture_load_queue: Arc::new(Mutex::new(PriorityTextureLoadQueue::new(
@@ -212,8 +189,6 @@ impl Player {
                 frame_count2,
             ))),
             texture_load_pool,
-            texture_load_sender,
-            texture_load_receiver,
             texture_process_pool,
             texture_process_sender,
             texture_process_receiver,
@@ -253,10 +228,6 @@ impl Player {
             .unwrap_or(image_data.len() - 1)
     }
 
-    pub fn is_playing(&self) -> bool {
-        self.is_playing.load(Ordering::Relaxed)
-    }
-
     pub fn toggle_play_pause(&self) {
         self.is_playing.fetch_xor(true, Ordering::Relaxed);
         self.last_update.store(
@@ -293,10 +264,6 @@ impl Player {
         self.current_frame2.store(new_frame2, Ordering::Relaxed);
         self.frame_changed.store(true, Ordering::Relaxed);
         true
-    }
-
-    pub fn has_frame_changed(&self) -> bool {
-        self.frame_changed.swap(false, Ordering::Relaxed)
     }
 
     pub fn update_textures(&self) -> bool {
@@ -356,9 +323,9 @@ impl Player {
         if !cache_read.contains_key(&index) {
             drop(cache_read);
             let path = if is_left {
-                &self.image_data1[index].0
+                &self.config.image_data1[index].0
             } else {
-                &self.image_data2[index].0
+                &self.config.image_data2[index].0
             };
 
             // Check if the image is already being processed
@@ -368,7 +335,7 @@ impl Player {
                 drop(processing_textures);
 
                 // Add the request to the queue
-                let mut queue = self.texture_load_queue.lock();
+                let queue = self.texture_load_queue.lock();
                 if !queue.contains(&(index, is_left)) {
                     queue.push(TextureLoadRequest::new(path.to_string(), index, is_left));
                 }
@@ -377,14 +344,13 @@ impl Player {
     }
 
     pub fn process_load_queue(&mut self) {
-        let mut queue = self.texture_load_queue.lock();
+        let queue = self.texture_load_queue.lock();
         queue.reprioritize(
             self.current_frame1.load(Ordering::Relaxed),
             self.current_frame2.load(Ordering::Relaxed),
         );
 
         while let Some(request) = queue.pop() {
-            let sender = self.texture_load_sender.clone();
             let texture_process_sender = self.texture_process_sender.clone();
             let processing_textures = Arc::clone(&self.processing_textures);
             let texture_timings = Arc::clone(&self.texture_timings);
@@ -440,7 +406,7 @@ impl Player {
             } else {
                 Arc::clone(&self.texture_cache_right)
             };
-            let cache_size = self.cache_size;
+            let cache_size = self.config.cache_size;
             let frame_changed = Arc::clone(&self.frame_changed);
             let texture_timings = Arc::clone(&self.texture_timings);
 
@@ -512,37 +478,6 @@ impl Player {
         }
     }
 
-    fn add_texture_to_cache_background(
-        index: usize,
-        is_left: bool,
-        texture: Arc<wgpu::Texture>,
-        texture_cache: Arc<RwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
-        texture_load_queue: Arc<Mutex<PriorityTextureLoadQueue>>,
-    ) {
-        debug!(
-            "Adding texture to cache: index={}, is_left={}, size={:?}",
-            index,
-            is_left,
-            texture.size()
-        );
-
-        let mut cache_write = texture_cache.write();
-        cache_write.insert(index, Arc::new(Mutex::new(Some(Arc::clone(&texture)))));
-
-        // Remove the completed request from the queue
-        let mut queue = texture_load_queue.lock();
-        queue
-            .queue
-            .lock()
-            .retain(|req| req.index != index || req.is_left != is_left);
-        queue.unique_requests.lock().remove(&(index, is_left));
-
-        debug!(
-            "Texture added to cache and removed from queue. New cache state: {:?}",
-            cache_write.keys().collect::<Vec<_>>()
-        );
-    }
-
     pub fn preload_textures(&self, index1: usize, index2: usize) {
         // Ensure current frames are loaded first
         self.ensure_texture_loaded(index1, true);
@@ -552,7 +487,7 @@ impl Player {
         let frame_count2 = self.frame_count2;
 
         // Preload ahead
-        for i in 1..=self.preload_ahead {
+        for i in 1..=self.config.preload_ahead {
             let preload_index1 = (index1 + i) % frame_count1;
             let preload_index2 = (index2 + i) % frame_count2;
             self.ensure_texture_loaded(preload_index1, true);
@@ -560,17 +495,12 @@ impl Player {
         }
 
         // Preload behind
-        for i in 1..=self.preload_behind {
+        for i in 1..=self.config.preload_behind {
             let preload_index1 = (index1 + frame_count1 - i) % frame_count1;
             let preload_index2 = (index2 + frame_count2 - i) % frame_count2;
             self.ensure_texture_loaded(preload_index1, true);
             self.ensure_texture_loaded(preload_index2, false);
         }
-    }
-
-    pub fn update_current_frame(&self, new_frame_left: usize, new_frame_right: usize) {
-        let queue = self.texture_load_queue.lock();
-        queue.reprioritize(new_frame_left, new_frame_right);
     }
 
     pub fn is_within_preload_range(&self, index: usize, is_left: bool) -> bool {
@@ -590,7 +520,7 @@ impl Player {
 
         let min_distance = std::cmp::min(forward_distance, backward_distance);
 
-        min_distance <= self.preload_ahead || min_distance <= self.preload_behind
+        min_distance <= self.config.preload_ahead || min_distance <= self.config.preload_behind
     }
 
     pub fn update(&self, delta: std::time::Duration) -> bool {
@@ -629,8 +559,8 @@ impl Player {
         let old_frame1 = self.current_frame1.load(Ordering::Relaxed);
         let old_frame2 = self.current_frame2.load(Ordering::Relaxed);
 
-        let new_frame1 = self.get_current_index(&self.image_data1, current_time as u64);
-        let new_frame2 = self.get_current_index(&self.image_data2, current_time as u64);
+        let new_frame1 = self.get_current_index(&self.config.image_data1, current_time);
+        let new_frame2 = self.get_current_index(&self.config.image_data2, current_time);
 
         self.current_frame1.store(new_frame1, Ordering::Relaxed);
         self.current_frame2.store(new_frame2, Ordering::Relaxed);
@@ -643,8 +573,16 @@ impl Player {
 
     fn total_duration(&self) -> u64 {
         std::cmp::max(
-            self.image_data1.last().map(|(_, _, end)| *end).unwrap_or(0),
-            self.image_data2.last().map(|(_, _, end)| *end).unwrap_or(0),
+            self.config
+                .image_data1
+                .last()
+                .map(|(_, _, end)| *end)
+                .unwrap_or(0),
+            self.config
+                .image_data2
+                .last()
+                .map(|(_, _, end)| *end)
+                .unwrap_or(0),
         )
     }
 
@@ -662,9 +600,9 @@ impl Player {
         is_left: bool,
     ) -> Result<wgpu::Texture, Box<dyn std::error::Error>> {
         let image_data = if is_left {
-            &self.image_data1
+            &self.config.image_data1
         } else {
-            &self.image_data2
+            &self.config.image_data2
         };
 
         let path = &image_data[index].0;
@@ -736,67 +674,6 @@ impl Player {
 
     pub fn get_right_texture(&self) -> Option<Arc<wgpu::Texture>> {
         self.right_texture.lock().clone()
-    }
-
-    fn evict_old_textures(&self) {
-        let current_frame_left = self.current_frame1.load(Ordering::Relaxed);
-        let current_frame_right = self.current_frame2.load(Ordering::Relaxed);
-
-        // Evict textures from the left cache
-        self.evict_old_textures_from_cache(
-            &self.texture_cache_left,
-            current_frame_left,
-            self.frame_count1,
-        );
-
-        // Evict textures from the right cache
-        self.evict_old_textures_from_cache(
-            &self.texture_cache_right,
-            current_frame_right,
-            self.frame_count2,
-        );
-    }
-
-    fn evict_old_textures_from_cache(
-        &self,
-        cache: &Arc<RwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
-        current_frame: usize,
-        frame_count: usize,
-    ) {
-        let cache_write = cache.try_write();
-        if let Some(mut cache_write) = cache_write {
-            if cache_write.len() <= self.cache_size / 2 {
-                return;
-            }
-
-            let mut frames: Vec<usize> = cache_write.keys().cloned().collect();
-            frames.sort_by_key(|&frame| {
-                std::cmp::min(
-                    (frame as i32 - current_frame as i32).abs() as usize,
-                    frame_count - (frame as i32 - current_frame as i32).abs() as usize,
-                )
-            });
-
-            let mut reuse_pool = self.texture_reuse_pool.try_lock();
-            if let Some(mut reuse_pool) = reuse_pool {
-                while cache_write.len() > self.cache_size / 2 {
-                    if let Some(frame_to_evict) = frames.pop() {
-                        if frame_to_evict == current_frame {
-                            continue;
-                        }
-
-                        if let Some(evicted_texture) = cache_write.remove(&frame_to_evict) {
-                            let mut evicted_texture = evicted_texture.lock();
-                            if let Some(texture) = evicted_texture.take() {
-                                reuse_pool.push(texture);
-                            }
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     pub fn generate_flip_diff(
@@ -908,7 +785,7 @@ impl Player {
     }
 
     fn read_buffer(&self, buffer: &wgpu::Buffer, size: u64) -> Vec<u8> {
-        let buffer_slice = buffer.slice(..);
+        let buffer_slice = buffer.slice(..size);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             tx.send(result).unwrap();
