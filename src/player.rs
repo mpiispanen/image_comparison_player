@@ -126,6 +126,10 @@ pub struct PlayerConfig {
     pub num_flip_diff_threads: usize,
 }
 
+type FlipDiffSender = Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>;
+#[allow(dead_code)]
+type FlipDiffReceiver = Arc<Mutex<Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
+
 pub struct Player {
     pub config: PlayerConfig,
     current_time: AtomicU64,
@@ -153,8 +157,9 @@ pub struct Player {
     current_frame_set_time: Arc<Mutex<Instant>>,
     pub flip_diff_cache: FlipDiffCache,
     flip_diff_pool: ThreadPool,
-    flip_diff_sender: Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>,
-    flip_diff_receiver: Arc<Mutex<Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>,
+    flip_diff_sender: FlipDiffSender,
+    #[allow(dead_code)]
+    flip_diff_receiver: FlipDiffReceiver,
     pub show_flip_diff: AtomicBool,
 }
 
