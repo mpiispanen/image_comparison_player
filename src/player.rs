@@ -106,7 +106,7 @@ impl PriorityTextureLoadQueue {
     }
 }
 
-type TextureCache = Arc<RwLock<HashMap<usize, Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
+type TextureCache = Arc<RwLock<HashMap<usize, Arc<Mutex<(Option<Arc<wgpu::Texture>>, Vec<u8>)>>>>>;
 
 type TextureProcessSender = Sender<(usize, bool, Vec<u8>, wgpu::Extent3d)>;
 type TextureProcessReceiver = Arc<Mutex<Receiver<(usize, bool, Vec<u8>, wgpu::Extent3d)>>>;
@@ -218,7 +218,7 @@ impl Player {
         let cache_read = cache.read();
         cache_read
             .get(&index)
-            .and_then(|texture_holder| texture_holder.lock().as_ref().cloned())
+            .and_then(|texture_holder| texture_holder.lock().0.as_ref().cloned())
     }
 
     fn get_current_index(&self, image_data: &[(String, u64, u64)], current_time: u64) -> usize {
@@ -452,10 +452,10 @@ impl Player {
 
                 let texture_arc = Arc::clone(&texture);
                 let mut cache_write = cache.write();
-                if let Some(old_texture) =
-                    cache_write.insert(index, Arc::new(Mutex::new(Some(texture_arc))))
+                if let Some(old_entry) =
+                    cache_write.insert(index, Arc::new(Mutex::new((Some(texture_arc), image_data))))
                 {
-                    if let Some(old_texture) = old_texture.lock().take() {
+                    if let Some(old_texture) = old_entry.lock().0.take() {
                         texture_reuse_pool.lock().push(old_texture);
                     }
                 }
