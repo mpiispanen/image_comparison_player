@@ -1220,6 +1220,9 @@ impl AppState {
                         self.next_frame();
                     }
                 }
+                VirtualKeyCode::Space => {
+                    self.toggle_play_pause();
+                }
                 _ => {}
             }
         }
