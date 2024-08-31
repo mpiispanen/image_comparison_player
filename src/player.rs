@@ -151,6 +151,8 @@ pub struct Player {
     processing_textures: Arc<Mutex<HashSet<(usize, bool)>>>,
     pub texture_timings: Arc<RwLock<HashMap<(usize, bool), TextureTimingInfo>>>,
     current_frame_set_time: Arc<Mutex<Instant>>,
+    pub flip_diff_cache:
+        Arc<RwLock<HashMap<(usize, usize), Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>,
 }
 
 impl Player {
@@ -220,6 +222,7 @@ impl Player {
             processing_textures: Arc::new(Mutex::new(HashSet::new())),
             texture_timings: Arc::new(RwLock::new(HashMap::new())),
             current_frame_set_time: Arc::new(Mutex::new(Instant::now())),
+            flip_diff_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

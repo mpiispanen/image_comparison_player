@@ -35,7 +35,7 @@ impl CacheDebugWindow {
     fn new() -> Self {
         Self {
             is_open: false,
-            size: [400.0, 150.0],
+            size: [400.0, 200.0], // Increased height to accommodate the new row
         }
     }
 
@@ -69,6 +69,17 @@ impl CacheDebugWindow {
                     ui,
                     player,
                     false,
+                    current_right,
+                    frame_count,
+                    mouse_x,
+                    mouse_y,
+                    desired_width,
+                );
+                ui.dummy([0.0, 10.0]);
+                self.draw_diff_cache_row(
+                    ui,
+                    player,
+                    current_left,
                     current_right,
                     frame_count,
                     mouse_x,
@@ -189,6 +200,102 @@ impl CacheDebugWindow {
         });
     }
 
+    fn draw_diff_cache_row(
+        &self,
+        ui: &Ui,
+        player: &Player,
+        current_left: usize,
+        current_right: usize,
+        frame_count: usize,
+        mouse_x: f32,
+        mouse_y: f32,
+        available_width: f32,
+    ) {
+        ui.text("D:");
+        ui.same_line();
+
+        let visible_frames = player.preload_ahead * 2 + player.preload_behind * 2 + 1;
+        let button_size = 15.0;
+        let spacing = 1.0;
+        let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
+        let scale_factor = (available_width - ui.calc_text_size("D:")[0] - spacing) / total_width;
+        let scaled_button_size = button_size * scale_factor;
+        let scaled_spacing = spacing * scale_factor;
+
+        ui.group(|| {
+            ui.set_next_item_width(available_width - ui.calc_text_size("D:")[0] - spacing);
+            ui.dummy([
+                available_width - ui.calc_text_size("D:")[0] - spacing,
+                scaled_button_size + 20.0,
+            ]);
+
+            let draw_list = ui.get_window_draw_list();
+            let window_pos = ui.window_pos();
+            let cursor_pos = ui.cursor_pos();
+
+            let half_visible = visible_frames / 2;
+
+            for i in 0..visible_frames {
+                let left_frame = (current_left as i64 + i as i64 - half_visible as i64)
+                    .rem_euclid(frame_count as i64) as usize;
+                let right_frame = (current_right as i64 + i as i64 - half_visible as i64)
+                    .rem_euclid(frame_count as i64) as usize;
+                let x = window_pos[0]
+                    + cursor_pos[0]
+                    + i as f32 * (scaled_button_size + scaled_spacing);
+                let y = window_pos[1] + cursor_pos[1];
+
+                if left_frame % 5 == 0 {
+                    draw_list.add_text(
+                        [x, y - 15.0],
+                        [1.0, 1.0, 1.0, 1.0],
+                        &left_frame.to_string(),
+                    );
+                }
+
+                let y = y + 5.0;
+
+                let color = if player
+                    .flip_diff_cache
+                    .read()
+                    .contains_key(&(left_frame, right_frame))
+                {
+                    [0.0, 1.0, 0.0, 1.0]
+                } else {
+                    [1.0, 0.0, 0.0, 1.0]
+                };
+
+                draw_list
+                    .add_rect(
+                        [x, y],
+                        [x + scaled_button_size, y + scaled_button_size],
+                        color,
+                    )
+                    .filled(true)
+                    .build();
+
+                if (left_frame, right_frame) == (current_left, current_right) {
+                    draw_list
+                        .add_rect(
+                            [x, y],
+                            [x + scaled_button_size, y + scaled_button_size],
+                            [1.0, 1.0, 1.0, 1.0],
+                        )
+                        .thickness(2.0)
+                        .build();
+                }
+
+                if mouse_x >= x
+                    && mouse_x <= x + scaled_button_size
+                    && mouse_y >= y
+                    && mouse_y <= y + scaled_button_size
+                {
+                    ui.tooltip_text(format!("Diff Cache: ({}, {})", left_frame, right_frame));
+                }
+            }
+        });
+    }
+
     fn toggle(&mut self) {
         self.is_open = !self.is_open;
     }
@@ -216,12 +323,6 @@ pub struct AppState {
     cache_debug_window: CacheDebugWindow,
     uniform_bind_group: wgpu::BindGroup,
     mouse_position: (f32, f32),
-    flip_diff_cache: Arc<
-        RwLock<
-            parking_lot::RawRwLock,
-            HashMap<(usize, usize), Arc<Mutex<Option<Arc<wgpu::Texture>>>>>,
-        >,
-    >,
     flip_diff_pool: ThreadPool,
     flip_diff_sender: mpsc::Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>,
     flip_diff_receiver: Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>,
@@ -599,7 +700,6 @@ impl AppState {
             cache_debug_window,
             uniform_bind_group,
             mouse_position,
-            flip_diff_cache: Arc::new(RwLock::new(HashMap::new())),
             flip_diff_pool,
             flip_diff_sender,
             flip_diff_receiver,
@@ -698,7 +798,8 @@ impl AppState {
 
         // Check if a valid flip diff texture exists for the current frame pair
         let flip_diff_texture = if self.show_flip_diff {
-            self.flip_diff_cache
+            player
+                .flip_diff_cache
                 .read()
                 .get(&(left_index, right_index))
                 .and_then(|mutex| mutex.lock().as_ref().cloned())
@@ -812,7 +913,7 @@ impl AppState {
         {
             let device = Arc::clone(&self.device);
             let flip_diff_texture = Arc::clone(&self.flip_diff_texture);
-            let flip_diff_cache = Arc::clone(&self.flip_diff_cache);
+            let flip_diff_cache = player.flip_diff_cache.clone();
 
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!(
