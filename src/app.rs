@@ -38,7 +38,7 @@ impl CacheDebugWindow {
     }
 
     fn draw(&mut self, ui: &Ui, player: &Player, mouse_x: f32, mouse_y: f32, window_width: f32) {
-        let visible_frames = player.config.preload_ahead * 2 + player.config.preload_behind * 2 + 1;
+        let visible_frames = (player.config.preload_ahead + player.config.preload_behind) * 4 + 1;
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
@@ -110,7 +110,7 @@ impl CacheDebugWindow {
         ui.text(label);
         ui.same_line();
 
-        let visible_frames = player.config.preload_ahead * 2 + player.config.preload_behind * 2 + 1;
+        let visible_frames = (player.config.preload_ahead + player.config.preload_behind) * 4 + 1;
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
@@ -211,7 +211,7 @@ impl CacheDebugWindow {
         ui.text("D:");
         ui.same_line();
 
-        let visible_frames = player.config.preload_ahead * 2 + player.config.preload_behind * 2 + 1;
+        let visible_frames = (player.config.preload_ahead + player.config.preload_behind) * 4 + 1;
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
