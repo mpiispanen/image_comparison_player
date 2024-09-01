@@ -395,6 +395,7 @@ pub struct AppConfig {
     pub num_flip_diff_threads: usize,
     pub diff_preload_ahead: usize,
     pub diff_preload_behind: usize,
+    pub fps: f32,
 }
 
 pub struct AppState {
@@ -702,8 +703,8 @@ impl AppState {
                 multiview: None,
             });
 
-        let (images1, image_len1) = image_loader::load_image_paths(dir1.to_str().unwrap())?;
-        let (images2, image_len2) = image_loader::load_image_paths(dir2.to_str().unwrap())?;
+        let (images1, image_len1) = image_loader::load_image_paths(dir1.to_str().unwrap(), app_config.fps)?;
+        let (images2, image_len2) = image_loader::load_image_paths(dir2.to_str().unwrap(), app_config.fps)?;
         debug!(
             "Loaded {} images from dir1 and {} images from dir2",
             image_len1, image_len2

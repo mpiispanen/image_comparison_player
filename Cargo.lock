@@ -1030,6 +1030,7 @@ dependencies = [
  "parking_lot",
  "pollster",
  "rayon",
+ "regex",
  "threadpool",
  "tokio",
  "wgpu",

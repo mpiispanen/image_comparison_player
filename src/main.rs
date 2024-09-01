@@ -109,6 +109,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Number of diff images to preload behind")
                 .default_value("1"),
         )
+        .arg(
+            Arg::new("fps")
+                .long("fps")
+                .action(ArgAction::Set)
+                .value_name("FPS")
+                .help("Frames per second (overrides input.txt durations)")
+                .default_value("30"),
+        )
         .get_matches();
 
     let dir1 = matches.get_one::<String>("dir1").unwrap();
@@ -154,6 +162,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .parse()
         .unwrap_or(1);
+    let fps: f32 = matches
+        .get_one::<String>("fps")
+        .unwrap()
+        .parse()
+        .unwrap_or(30.0);
 
     let (width, height) = parse_window_size(window_size)?;
 
@@ -179,6 +192,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         num_flip_diff_threads,
         diff_preload_ahead,  // Add this line
         diff_preload_behind, // Add this line
+        fps,
     };
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;

@@ -24,6 +24,7 @@ imgui-winit-support = "0.11.0"
 imgui-sys = "0.11.0"
 nv-flip = "0.1.2"
 memmap2 = "0.5.3"
+regex = "1.10.6"
 
 [[bin]]
 name = "image_comparison_player"
