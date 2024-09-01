@@ -173,6 +173,7 @@ pub struct Player {
     pub diff_image_timings: Arc<RwLock<HashMap<(usize, usize), DiffImageInfo>>>,
     pub frame_switch_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
     pub texture_available_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
+    playback_speed: f32,
 }
 
 impl Player {
@@ -232,6 +233,7 @@ impl Player {
             diff_image_timings: Arc::new(RwLock::new(HashMap::new())),
             frame_switch_times: Arc::new(RwLock::new(HashMap::new())),
             texture_available_times: Arc::new(RwLock::new(HashMap::new())),
+            playback_speed: 1.0,
         }
     }
 
@@ -697,7 +699,8 @@ impl Player {
                 && self.get_texture(current_right, false).is_some()
             {
                 debug!("Frame displayed after {:?} delay", elapsed);
-                let frame_changed = self.advance_frame(delta.as_micros());
+                let scaled_delta = delta.mul_f32(self.playback_speed);
+                let frame_changed = self.advance_frame(scaled_delta.as_micros());
                 *self.current_frame_set_time.lock() = now;
 
                 if frame_changed && show_flip_diff {
@@ -715,6 +718,14 @@ impl Player {
         } else {
             false
         }
+    }
+
+    pub fn decrease_playback_speed(&mut self) {
+        self.playback_speed = (self.playback_speed - 0.25).max(0.25);
+    }
+
+    pub fn increase_playback_speed(&mut self) {
+        self.playback_speed = (self.playback_speed + 0.25).min(4.0);
     }
 
     fn advance_frame(&self, delta_micros: u128) -> bool {
