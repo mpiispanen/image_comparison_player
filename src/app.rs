@@ -15,6 +15,7 @@ use wgpu::util::DeviceExt;
 use winit::event::VirtualKeyCode;
 use winit::window::Window as WinitWindow;
 use winit::event::TouchPhase;
+use std::process;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default, Debug)]
@@ -1291,6 +1292,10 @@ impl AppState {
         } = event
         {
             match keycode {
+                VirtualKeyCode::Escape => {
+                    // Exit the application when Esc is pressed
+                    process::exit(0);
+                }
                 VirtualKeyCode::C => {
                     self.cache_debug_window.toggle();
                 }
