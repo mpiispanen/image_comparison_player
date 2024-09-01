@@ -64,9 +64,9 @@ The application supports two methods of specifying input images:
    - Example:
      ```
      file 'frame_0001.png'
-     duration 33333
+     duration 33333us
      file 'frame_0002.png'
-     duration 33333
+     duration 33333us
      ```
 
 ## Building and Running
