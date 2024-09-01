@@ -183,10 +183,11 @@ impl CacheDebugWindow {
                         player.texture_timings.read().get(&(frame, is_left))
                     {
                         format!(
-                            "Frame {} (Loaded)\nLoad time: {:.2}ms\nProcess time: {:.2}ms",
+                            "Frame {} (Loaded)\nLoad time: {:.2}ms\nProcess time: {:.2}ms\nPlayback delay: {:?}",
                             frame,
                             texture_info.load_time.as_secs_f32() * 1000.0,
-                            texture_info.process_time.as_secs_f32() * 1000.0
+                            texture_info.process_time.as_secs_f32() * 1000.0,
+                            player.current_frame_set_time.lock().elapsed()
                         )
                     } else if player.texture_load_queue.lock().contains(&(frame, is_left)) {
                         format!("Frame {} (Loading)", frame)

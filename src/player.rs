@@ -159,7 +159,7 @@ pub struct Player {
     right_texture: TextureHolder,
     processing_textures: Arc<Mutex<HashSet<(usize, bool)>>>,
     pub texture_timings: Arc<RwLock<HashMap<(usize, bool), TextureTimingInfo>>>,
-    current_frame_set_time: Arc<Mutex<Instant>>,
+    pub current_frame_set_time: Arc<Mutex<Instant>>,
     pub flip_diff_cache: FlipDiffCache,
     flip_diff_pool: ThreadPool,
     flip_diff_sender: FlipDiffSender,

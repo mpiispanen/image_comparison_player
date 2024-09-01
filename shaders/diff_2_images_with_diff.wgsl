@@ -45,7 +45,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let aspect_ratio = 1.0;
     let scaled_tex_coords = vec2<f32>(in.tex_coords.x * aspect_ratio, in.tex_coords.y);
 
-    let flip_diff_aspect_ratio = uniforms.flip_diff_size.x / uniforms.flip_diff_size.y;
+    let flip_diff_aspect_ratio = 1.0;
     let flip_diff_tex_coords = vec2<f32>(in.tex_coords.x * flip_diff_aspect_ratio, in.tex_coords.y);
 
     let color1 = textureSample(t_diffuse, s_diffuse, scaled_tex_coords);
