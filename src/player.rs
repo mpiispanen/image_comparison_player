@@ -171,6 +171,8 @@ pub struct Player {
     flip_diff_receiver: FlipDiffReceiver,
     pub flip_diff_in_progress: FlipDiffInProgress,
     pub diff_image_timings: Arc<RwLock<HashMap<(usize, usize), DiffImageInfo>>>,
+    pub frame_switch_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
+    pub texture_available_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
 }
 
 impl Player {
@@ -228,6 +230,8 @@ impl Player {
             flip_diff_receiver,
             flip_diff_in_progress: Arc::new(RwLock::new(HashSet::new())),
             diff_image_timings: Arc::new(RwLock::new(HashMap::new())),
+            frame_switch_times: Arc::new(RwLock::new(HashMap::new())),
+            texture_available_times: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -336,9 +340,16 @@ impl Player {
         let new_frame1 = self.get_current_index(&self.config.image_data1, current_time);
         let new_frame2 = self.get_current_index(&self.config.image_data2, current_time);
 
-        self.current_frame1.store(new_frame1, Ordering::Relaxed);
-        self.current_frame2.store(new_frame2, Ordering::Relaxed);
-        self.frame_changed.store(true, Ordering::Relaxed);
+        let old_frame1 = self.current_frame1.swap(new_frame1, Ordering::Relaxed);
+        let old_frame2 = self.current_frame2.swap(new_frame2, Ordering::Relaxed);
+
+        if new_frame1 != old_frame1 || new_frame2 != old_frame2 {
+            let now = Instant::now();
+            let mut frame_switch_times = self.frame_switch_times.write();
+            frame_switch_times.insert((new_frame1, true), now);
+            frame_switch_times.insert((new_frame2, false), now);
+            self.frame_changed.store(true, Ordering::Relaxed);
+        }
     }
 
     pub fn update_textures(&self, show_flip_diff: bool) -> bool {
@@ -484,6 +495,7 @@ impl Player {
             let cache_size = self.config.cache_size;
             let frame_changed = Arc::clone(&self.frame_changed);
             let texture_timings = Arc::clone(&self.texture_timings);
+            let texture_available_times = Arc::clone(&self.texture_available_times);
 
             let current_frame = if is_left {
                 self.current_frame1.load(Ordering::Relaxed)
@@ -585,6 +597,10 @@ impl Player {
                 if let Some(timing) = texture_timings.get_mut(&(index, is_left)) {
                     timing.process_time = process_time;
                 }
+
+                // Record the time when the texture becomes available
+                let mut texture_available_times = texture_available_times.write();
+                texture_available_times.insert((index, is_left), Instant::now());
             });
         }
     }
@@ -717,7 +733,7 @@ impl Player {
         }
     }
 
-    fn total_duration(&self) -> u64 {
+    pub fn total_duration(&self) -> u64 {
         std::cmp::max(
             self.config
                 .image_data1
@@ -730,6 +746,18 @@ impl Player {
                 .map(|(_, _, end)| *end)
                 .unwrap_or(0),
         )
+    }
+
+    pub fn get_frame_duration(&self, frame: usize, is_left: bool) -> Option<Duration> {
+        let image_data = if is_left {
+            &self.config.image_data1
+        } else {
+            &self.config.image_data2
+        };
+
+        image_data
+            .get(frame)
+            .map(|(_, start, end)| Duration::from_micros(end - start))
     }
 
     pub fn load_initial_textures(

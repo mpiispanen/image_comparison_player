@@ -8,6 +8,7 @@ use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::event::VirtualKeyCode;
@@ -174,6 +175,25 @@ impl CacheDebugWindow {
                         .build();
                 }
 
+                // Check if playback delay is bigger than frame duration and draw orange border
+                let switch_time = player.frame_switch_times.read().get(&(frame, is_left)).cloned();
+                let available_time = player.texture_available_times.read().get(&(frame, is_left)).cloned();
+                if let (Some(switch), Some(available)) = (switch_time, available_time) {
+                    let playback_delay = available.duration_since(switch);
+                    if let Some(frame_duration) = player.get_frame_duration(frame, is_left) {
+                        if playback_delay > frame_duration {
+                            draw_list
+                                .add_rect(
+                                    [x, y],
+                                    [x + scaled_button_size, y + scaled_button_size],
+                                    [1.0, 0.5, 0.0, 1.0], // Orange color
+                                )
+                                .thickness(2.0)
+                                .build();
+                        }
+                    }
+                }
+
                 if params.mouse_pos.0 >= x
                     && params.mouse_pos.0 <= x + scaled_button_size
                     && params.mouse_pos.1 >= y
@@ -182,12 +202,33 @@ impl CacheDebugWindow {
                     let tooltip = if let Some(texture_info) =
                         player.texture_timings.read().get(&(frame, is_left))
                     {
+                        let switch_time = player
+                            .frame_switch_times
+                            .read()
+                            .get(&(frame, is_left))
+                            .cloned();
+                        
+                        let available_time = player
+                            .texture_available_times
+                            .read()
+                            .get(&(frame, is_left))
+                            .cloned();
+                        
+                        let playback_delay = match (switch_time, available_time) {
+                            (Some(switch), Some(available)) => available.duration_since(switch),
+                            _ => Duration::default(),
+                        };
+
+                        let frame_duration = player.get_frame_duration(frame, is_left)
+                            .unwrap_or_else(|| Duration::from_secs(0));
+
                         format!(
-                            "Frame {} (Loaded)\nLoad time: {:.2}ms\nProcess time: {:.2}ms\nPlayback delay: {:?}",
+                            "Frame {} (Loaded)\nLoad time: {:.2}ms\nProcess time: {:.2}ms\nPlayback delay: {:.2}ms\nFrame duration: {:.2}ms",
                             frame,
                             texture_info.load_time.as_secs_f32() * 1000.0,
                             texture_info.process_time.as_secs_f32() * 1000.0,
-                            player.current_frame_set_time.lock().elapsed()
+                            playback_delay.as_secs_f32() * 1000.0,
+                            frame_duration.as_secs_f32() * 1000.0
                         )
                     } else if player.texture_load_queue.lock().contains(&(frame, is_left)) {
                         format!("Frame {} (Loading)", frame)
