@@ -481,6 +481,17 @@ impl Player {
             let frame_changed = Arc::clone(&self.frame_changed);
             let texture_timings = Arc::clone(&self.texture_timings);
 
+            let current_frame = if is_left {
+                self.current_frame1.load(Ordering::Relaxed)
+            } else {
+                self.current_frame2.load(Ordering::Relaxed)
+            };
+            let frame_count = if is_left {
+                self.frame_count1
+            } else {
+                self.frame_count2
+            };
+
             self.texture_process_pool.execute(move || {
                 let process_start = Instant::now();
 
@@ -531,9 +542,34 @@ impl Player {
                     }
                 }
 
+                // Evict old textures if cache size exceeds limit
                 if cache_write.len() > cache_size / 2 {
-                    // Call to evict_old_textures would need to be implemented separately
-                    // or the logic moved here
+                    let keys_to_evict: Vec<usize> = cache_write.keys().cloned().collect();
+
+                    let mut keys_with_distance: Vec<(usize, usize)> = keys_to_evict
+                        .iter()
+                        .map(|&key| {
+                            let forward_distance =
+                                (key + frame_count - current_frame) % frame_count;
+                            let backward_distance =
+                                (current_frame + frame_count - key) % frame_count;
+                            let min_distance = std::cmp::min(forward_distance, backward_distance);
+                            (key, min_distance)
+                        })
+                        .collect();
+
+                    keys_with_distance.sort_by_key(|&(_, distance)| std::cmp::Reverse(distance));
+
+                    for (key, _) in keys_with_distance
+                        .iter()
+                        .take(cache_write.len() - cache_size / 2)
+                    {
+                        if let Some(old_entry) = cache_write.remove(key) {
+                            if let Some(old_texture) = old_entry.lock().0.take() {
+                                texture_reuse_pool.lock().push(old_texture);
+                            }
+                        }
+                    }
                 }
 
                 frame_changed.store(true, Ordering::Relaxed);

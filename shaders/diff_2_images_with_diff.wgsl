@@ -42,7 +42,7 @@ var s_flip_diff: sampler;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let aspect_ratio = uniforms.image1_size.x / uniforms.image1_size.y;
+    let aspect_ratio = 1.0;
     let scaled_tex_coords = vec2<f32>(in.tex_coords.x * aspect_ratio, in.tex_coords.y);
 
     let flip_diff_aspect_ratio = uniforms.flip_diff_size.x / uniforms.flip_diff_size.y;
