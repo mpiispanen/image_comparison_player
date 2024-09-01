@@ -14,6 +14,7 @@ use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::event::VirtualKeyCode;
 use winit::window::Window as WinitWindow;
+use winit::event::TouchPhase;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default, Debug)]
@@ -423,6 +424,8 @@ pub struct AppState {
     zoom_level: f32,
     zoom_center: (f32, f32),
     fixed_zoom_center: (f32, f32),
+    swipe_start: Option<(f64, f64)>,
+    swipe_threshold: f64,
 }
 
 impl AppState {
@@ -792,6 +795,8 @@ impl AppState {
             zoom_level: 1.0,
             zoom_center: (0.5, 0.5),
             fixed_zoom_center: (0.5, 0.5),
+            swipe_start: None,
+            swipe_threshold: 50.0,
         })
     }
 
@@ -1302,6 +1307,10 @@ impl AppState {
             self.handle_zoom(delta);
         }
 
+        if let winit::event::Event::WindowEvent { event: WindowEvent::Touch(touch), .. } = event {
+            self.handle_touch(touch);
+        }
+
         self.imgui_platform
             .handle_event(self.imgui_context.io_mut(), window, event);
         debug!("Event handled");
@@ -1376,5 +1385,41 @@ impl AppState {
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+    }
+
+    fn handle_touch(&mut self, touch: &winit::event::Touch) {
+        match touch.phase {
+            TouchPhase::Started => {
+                self.swipe_start = Some((touch.location.x, touch.location.y));
+            }
+            TouchPhase::Moved => {
+                if let Some((start_x, start_y)) = self.swipe_start {
+                    let dx = touch.location.x - start_x;
+                    let dy = touch.location.y - start_y;
+
+                    if dx.abs() > self.swipe_threshold || dy.abs() > self.swipe_threshold {
+                        if dx.abs() > dy.abs() {
+                            // Horizontal swipe
+                            if dx > 0.0 {
+                                self.previous_frame();
+                            } else {
+                                self.next_frame();
+                            }
+                        } else {
+                            // Vertical swipe
+                            if dy > 0.0 {
+                                self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0));
+                            } else {
+                                self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0));
+                            }
+                        }
+                        self.swipe_start = None;
+                    }
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.swipe_start = None;
+            }
+        }
     }
 }
