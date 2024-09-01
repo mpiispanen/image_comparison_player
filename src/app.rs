@@ -346,11 +346,22 @@ impl CacheDebugWindow {
                         .read()
                         .get(&(left_frame, right_frame))
                     {
+                        let flip_stats = player.flip_stats.read().get(&(left_frame, right_frame)).cloned();
+                        let stats_str = if let Some(stats) = flip_stats {
+                            format!(
+                                "\nFlip Stats:\n  Mean: {:.4}\n  Min: {:.4}\n  Max: {:.4}\n  P95: {:.4}\n  P99: {:.4}",
+                                stats.mean, stats.min, stats.max, stats.p95, stats.p99
+                            )
+                        } else {
+                            "".to_string()
+                        };
+
                         format!(
-                            "Diff Cache: ({}, {})\nProcess time: {:.2}ms",
+                            "Diff Cache: ({}, {})\nProcess time: {:.2}ms{}",
                             left_frame,
                             right_frame,
-                            diff_info.process_time.as_secs_f32() * 1000.0
+                            diff_info.process_time.as_secs_f32() * 1000.0,
+                            stats_str
                         )
                     } else if player
                         .flip_diff_in_progress

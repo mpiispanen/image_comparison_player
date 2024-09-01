@@ -1,6 +1,6 @@
 use log::debug;
 use memmap2::Mmap;
-use nv_flip::{flip, magma_lut, FlipImageRgb8};
+use nv_flip::{flip, magma_lut, FlipImageRgb8, FlipPool};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -139,6 +139,15 @@ pub struct DiffImageInfo {
     pub process_time: Duration,
 }
 
+#[derive(Clone)]
+pub struct FlipStats {
+    pub mean: f32,
+    pub min: f32,
+    pub max: f32,
+    pub p95: f32,
+    pub p99: f32,
+}
+
 pub struct Player {
     pub config: PlayerConfig,
     current_time: AtomicU64,
@@ -174,6 +183,7 @@ pub struct Player {
     pub frame_switch_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
     pub texture_available_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
     playback_speed: f32,
+    pub flip_stats: Arc<RwLock<HashMap<(usize, usize), FlipStats>>>,
 }
 
 impl Player {
@@ -234,6 +244,7 @@ impl Player {
             frame_switch_times: Arc::new(RwLock::new(HashMap::new())),
             texture_available_times: Arc::new(RwLock::new(HashMap::new())),
             playback_speed: 1.0,
+            flip_stats: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -917,6 +928,7 @@ impl Player {
             let flip_diff_cache = Arc::clone(&self.flip_diff_cache);
             let flip_diff_in_progress = Arc::clone(&self.flip_diff_in_progress);
             let diff_image_timings = Arc::clone(&self.diff_image_timings);
+            let flip_stats = Arc::clone(&self.flip_stats);
 
             self.flip_diff_in_progress
                 .write()
@@ -943,6 +955,19 @@ impl Player {
 
                 let error_map = flip(left_image, right_image, nv_flip::DEFAULT_PIXELS_PER_DEGREE);
                 let visualized = error_map.apply_color_lut(&magma_lut());
+
+                // Collect flip stats
+                let mut pool = FlipPool::from_image(&error_map);
+                let stats = FlipStats {
+                    mean: pool.mean(),
+                    min: pool.min_value(),
+                    max: pool.max_value(),
+                    p95: pool.get_percentile(95.0, true),
+                    p99: pool.get_percentile(99.0, true),
+                };
+
+                // Store the flip stats
+                flip_stats.write().insert((left_index, right_index), stats);
 
                 let diff_data: Vec<u8> = visualized
                     .to_vec()
