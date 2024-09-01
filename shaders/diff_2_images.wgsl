@@ -61,5 +61,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Calculate alpha based on whether the zoomed coordinates are within bounds
     let alpha = 1.0 - step(1.0, max(abs(zoomed_tex_coords.x - 0.5), abs(zoomed_tex_coords.y - 0.5)) * 2.0);
 
+    // Add a narrow white line at the border
+    let line_width = 0.0002; // Adjust this value to change the line width
+    if (abs(in.tex_coords.x - uniforms.cursor_x) < line_width) {
+        return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the line
+    }
+
     return vec4<f32>(mixed_color.rgb, mixed_color.a * alpha);
 }
