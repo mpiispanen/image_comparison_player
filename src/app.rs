@@ -6,7 +6,6 @@ use imgui::Ui;
 use log::{debug, info}; // Add error to the import list
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
-use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -730,7 +729,7 @@ impl AppState {
         self.last_update = now;
 
         let mut player = self.player.write();
-        let frame_changed = player.update(delta);
+        let frame_changed = player.update(delta, self.show_flip_diff);
         player.process_load_queue();
         debug!("Update called, frame changed: {}", frame_changed);
 
@@ -742,11 +741,11 @@ impl AppState {
 
     pub fn update_textures(&mut self) -> bool {
         let player = self.player.write();
-        let frame_changed = player.update_textures();
-        if frame_changed {
-            self.flip_mode = false;
-            self.show_flip_diff = false;
-        }
+        let frame_changed = player.update_textures(self.show_flip_diff);
+        // if frame_changed {
+        //     self.flip_mode = false;
+        //     self.show_flip_diff = false;
+        // }
         frame_changed
     }
 
@@ -790,7 +789,7 @@ impl AppState {
             });
 
         // Check if a valid flip diff texture exists for the current frame pair
-        let flip_diff_texture = if self.player.read().show_flip_diff.load(Ordering::Relaxed) {
+        let flip_diff_texture = if self.show_flip_diff {
             player
                 .flip_diff_cache
                 .read()
@@ -1137,14 +1136,14 @@ impl AppState {
     }
 
     pub fn next_frame(&mut self) {
-        let frame_changed = self.player.write().next_frame();
+        let frame_changed = self.player.write().next_frame(self.show_flip_diff);
         if frame_changed {
             self.load_and_update_textures();
         }
     }
 
     pub fn previous_frame(&mut self) {
-        let frame_changed = self.player.write().previous_frame();
+        let frame_changed = self.player.write().previous_frame(self.show_flip_diff);
         if frame_changed {
             self.load_and_update_textures();
         }
@@ -1248,11 +1247,12 @@ impl AppState {
     }
 
     pub fn toggle_flip_diff(&mut self) {
-        let player = self.player.write();
-        player.show_flip_diff.fetch_xor(true, Ordering::Relaxed);
-        if player.show_flip_diff.load(Ordering::Relaxed) {
-            let (current_left, current_right) = player.current_images();
-            player.generate_flip_diff(current_left, current_right);
+        self.show_flip_diff = !self.show_flip_diff;
+        if self.show_flip_diff {
+            let (current_left, current_right) = self.player.read().current_images();
+            self.player
+                .write()
+                .generate_flip_diff(current_left, current_right);
         }
     }
 }

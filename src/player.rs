@@ -161,7 +161,6 @@ pub struct Player {
     flip_diff_sender: FlipDiffSender,
     #[allow(dead_code)]
     flip_diff_receiver: FlipDiffReceiver,
-    pub show_flip_diff: AtomicBool,
     pub flip_diff_in_progress: FlipDiffInProgress,
 }
 
@@ -218,7 +217,6 @@ impl Player {
             flip_diff_pool,
             flip_diff_sender,
             flip_diff_receiver,
-            show_flip_diff: AtomicBool::new(false),
             flip_diff_in_progress: Arc::new(RwLock::new(HashSet::new())),
         }
     }
@@ -261,12 +259,22 @@ impl Player {
         );
     }
 
-    pub fn next_frame(&self) -> bool {
-        self.jump_to_next_time_point(1)
+    pub fn next_frame(&self, show_flip_diff: bool) -> bool {
+        let frame_changed = self.jump_to_next_time_point(1);
+        if frame_changed && show_flip_diff {
+            let (current_left, current_right) = self.current_images();
+            self.generate_flip_diff(current_left, current_right);
+        }
+        frame_changed
     }
 
-    pub fn previous_frame(&self) -> bool {
-        self.jump_to_next_time_point(-1)
+    pub fn previous_frame(&self, show_flip_diff: bool) -> bool {
+        let frame_changed = self.jump_to_next_time_point(-1);
+        if frame_changed && show_flip_diff {
+            let (current_left, current_right) = self.current_images();
+            self.generate_flip_diff(current_left, current_right);
+        }
+        frame_changed
     }
 
     fn jump_to_next_time_point(&self, direction: i64) -> bool {
@@ -276,11 +284,6 @@ impl Player {
         if new_time != current_time {
             self.current_time.store(new_time, Ordering::Relaxed);
             self.update_current_frames();
-
-            if self.show_flip_diff.load(Ordering::Relaxed) {
-                let (current_left, current_right) = self.current_images();
-                self.generate_flip_diff(current_left, current_right);
-            }
             true
         } else {
             false
@@ -328,7 +331,7 @@ impl Player {
         self.frame_changed.store(true, Ordering::Relaxed);
     }
 
-    pub fn update_textures(&self) -> bool {
+    pub fn update_textures(&self, show_flip_diff: bool) -> bool {
         let (current_left, current_right) = self.current_images();
 
         // Ensure current frames are loaded
@@ -336,7 +339,7 @@ impl Player {
         self.ensure_texture_loaded(current_right, false);
 
         // Preload textures
-        self.preload_textures(current_left, current_right);
+        self.preload_textures(current_left, current_right, show_flip_diff);
 
         // Process other textures in the background
         self.process_loaded_textures();
@@ -540,7 +543,7 @@ impl Player {
         }
     }
 
-    pub fn preload_textures(&self, index1: usize, index2: usize) {
+    pub fn preload_textures(&self, index1: usize, index2: usize, show_flip_diff: bool) {
         // Ensure current frames are loaded first
         self.ensure_texture_loaded(index1, true);
         self.ensure_texture_loaded(index2, false);
@@ -565,7 +568,7 @@ impl Player {
         }
 
         // Preload flip diffs
-        if self.show_flip_diff.load(Ordering::Relaxed) {
+        if show_flip_diff {
             self.preload_flip_diffs(index1, index2);
         }
     }
@@ -622,7 +625,7 @@ impl Player {
         min_distance <= self.config.preload_ahead || min_distance <= self.config.preload_behind
     }
 
-    pub fn update(&self, delta: std::time::Duration) -> bool {
+    pub fn update(&self, delta: std::time::Duration, show_flip_diff: bool) -> bool {
         if self.is_playing.load(Ordering::Relaxed) {
             let (current_left, current_right) = self.current_images();
             let now = Instant::now();
@@ -635,7 +638,7 @@ impl Player {
                 let frame_changed = self.advance_frame(delta.as_micros());
                 *self.current_frame_set_time.lock() = now;
 
-                if frame_changed && self.show_flip_diff.load(Ordering::Relaxed) {
+                if frame_changed && show_flip_diff {
                     self.generate_flip_diff(current_left, current_right);
                 }
 
