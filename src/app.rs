@@ -6,6 +6,7 @@ use imgui::Ui;
 use log::{debug, info}; // Add error to the import list
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
+use winit::event::WindowEvent;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +24,8 @@ struct UniformData {
     image2_size: [f32; 2],
     flip_diff_size: [f32; 2],
     show_flip_diff: f32,
+    zoom_level: f32,
+    zoom_center: [f32; 2],
 }
 
 struct CacheDebugWindow {
@@ -417,6 +420,9 @@ pub struct AppState {
     flip_diff_texture: FlipDiffTexture,
     flip_mode: bool,
     show_flip_diff: bool,
+    zoom_level: f32,
+    zoom_center: (f32, f32),
+    fixed_zoom_center: (f32, f32),
 }
 
 impl AppState {
@@ -783,6 +789,9 @@ impl AppState {
             flip_mode: false,
             show_flip_diff: false,
             flip_diff_receiver: Arc::new(Mutex::new(mpsc::channel().1)),
+            zoom_level: 1.0,
+            zoom_center: (0.5, 0.5),
+            fixed_zoom_center: (0.5, 0.5),
         })
     }
 
@@ -915,6 +924,8 @@ impl AppState {
                     [0.0, 0.0]
                 },
                 show_flip_diff: if use_flip_diff { 1.0 } else { 0.0 },
+                zoom_level: self.zoom_level,
+                zoom_center: [self.fixed_zoom_center.0, self.fixed_zoom_center.1],
             };
 
             self.queue
@@ -1057,6 +1068,8 @@ impl AppState {
                     image2_size: [right_texture.width() as f32, right_texture.height() as f32],
                     flip_diff_size,
                     show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+                    zoom_level: self.zoom_level,
+                    zoom_center: [self.fixed_zoom_center.0, self.fixed_zoom_center.1],
                 };
 
                 self.queue
@@ -1226,23 +1239,6 @@ impl AppState {
         self.player.write().process_loaded_textures();
     }
 
-    pub fn update_cursor_position(&mut self, x: f32, y: f32) {
-        self.cursor_x = x;
-        self.cursor_y = y;
-        self.queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[UniformData {
-                cursor_x: x / self.size.width as f32,
-                cursor_y: y / self.size.height as f32,
-                image1_size: [0.0, 0.0],
-                image2_size: [0.0, 0.0],
-                flip_diff_size: [0.0, 0.0],
-                show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
-            }]),
-        );
-    }
-
     pub fn handle_event<T>(
         &mut self,
         window: &winit::window::Window,
@@ -1296,8 +1292,14 @@ impl AppState {
                 VirtualKeyCode::Space => {
                     self.toggle_play_pause();
                 }
+                VirtualKeyCode::Up => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0)),
+                VirtualKeyCode::Down => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0)),
                 _ => {}
             }
+        }
+
+        if let winit::event::Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } = event {
+            self.handle_zoom(delta);
         }
 
         self.imgui_platform
@@ -1307,7 +1309,9 @@ impl AppState {
 
     pub fn update_mouse_position(&mut self, x: f32, y: f32) {
         self.mouse_position = (x, y);
-        self.update_cursor_position(self.mouse_position.0, self.mouse_position.1);
+        self.cursor_x = x;
+        self.cursor_y = y;
+        self.update_uniform_buffer();
     }
 
     pub fn toggle_flip_diff(&mut self) {
@@ -1318,5 +1322,59 @@ impl AppState {
                 .write()
                 .generate_flip_diff(current_left, current_right);
         }
+    }
+
+    fn handle_zoom(&mut self, delta: &winit::event::MouseScrollDelta) {
+        let zoom_factor = match delta {
+            winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                1.0 + y.signum() * 0.1
+            }
+            winit::event::MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition { y, .. }) => {
+                1.0 + (y / 100.0) as f32
+            }
+        };
+
+        let new_zoom_level = (self.zoom_level * zoom_factor).max(1.0).min(10.0);
+
+        // Calculate the mouse position relative to the image
+        let image_width = self.size.width as f32;
+        let image_height = self.size.height as f32;
+        let mouse_x = self.cursor_x / image_width;
+        let mouse_y = self.cursor_y / image_height;
+
+        // Adjust the fixed zoom center based on the current zoom level and mouse position
+        let zoom_center_x = (mouse_x - self.fixed_zoom_center.0) / self.zoom_level + self.fixed_zoom_center.0;
+        let zoom_center_y = (mouse_y - self.fixed_zoom_center.1) / self.zoom_level + self.fixed_zoom_center.1;
+
+        // Update the zoom level and fixed zoom center
+        self.zoom_level = new_zoom_level;
+        self.fixed_zoom_center = (zoom_center_x, zoom_center_y);
+
+        // Update the uniform buffer
+        self.update_uniform_buffer();
+    }
+
+    fn update_uniform_buffer(&self) {
+        let player = self.player.read();
+        let (left_texture, right_texture) = (player.get_left_texture(), player.get_right_texture());
+        
+        let (image1_size, image2_size) = if let (Some(left), Some(right)) = (left_texture, right_texture) {
+            ([left.width() as f32, left.height() as f32], [right.width() as f32, right.height() as f32])
+        } else {
+            ([self.size.width as f32, self.size.height as f32], [self.size.width as f32, self.size.height as f32])
+        };
+
+        let uniforms = UniformData {
+            cursor_x: self.cursor_x / self.size.width as f32,
+            cursor_y: self.cursor_y / self.size.height as f32,
+            image1_size,
+            image2_size,
+            flip_diff_size: [self.size.width as f32, self.size.height as f32],
+            show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+            zoom_level: self.zoom_level,
+            zoom_center: [self.fixed_zoom_center.0, self.fixed_zoom_center.1],
+        };
+
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }
 }

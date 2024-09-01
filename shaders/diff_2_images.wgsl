@@ -15,6 +15,10 @@ struct Uniforms {
     cursor_y: f32,
     image1_size: vec2<f32>,
     image2_size: vec2<f32>,
+    flip_diff_size: vec2<f32>,
+    show_flip_diff: f32,
+    zoom_level: f32,
+    zoom_center: vec2<f32>,
 }
 
 @group(1) @binding(0)
@@ -41,12 +45,21 @@ var s_diffuse2: sampler;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let aspect_ratio = 1.0;
-    let scaled_tex_coords = vec2<f32>(in.tex_coords.x * aspect_ratio, in.tex_coords.y);
+    // Apply zoom
+    let zoom_offset = (in.tex_coords - uniforms.zoom_center) / uniforms.zoom_level;
+    let zoomed_tex_coords = uniforms.zoom_center + zoom_offset;
+    
+    // Clamp the zoomed coordinates to [0, 1]
+    let clamped_tex_coords = clamp(zoomed_tex_coords, vec2(0.0), vec2(1.0));
 
-    let color1 = textureSample(t_diffuse1, s_diffuse1, scaled_tex_coords);
-    let color2 = textureSample(t_diffuse2, s_diffuse2, scaled_tex_coords);
+    let color1 = textureSample(t_diffuse1, s_diffuse1, clamped_tex_coords);
+    let color2 = textureSample(t_diffuse2, s_diffuse2, clamped_tex_coords);
     
     let t = step(uniforms.cursor_x, in.tex_coords.x);
-    return mix(color1, color2, t);
+    let mixed_color = mix(color1, color2, t);
+
+    // Calculate alpha based on whether the zoomed coordinates are within bounds
+    let alpha = 1.0 - step(1.0, max(abs(zoomed_tex_coords.x - 0.5), abs(zoomed_tex_coords.y - 0.5)) * 2.0);
+
+    return vec4<f32>(mixed_color.rgb, mixed_color.a * alpha);
 }
