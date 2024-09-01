@@ -348,6 +348,8 @@ pub struct AppConfig {
     pub num_load_threads: usize,
     pub num_process_threads: usize,
     pub num_flip_diff_threads: usize,
+    pub diff_preload_ahead: usize,
+    pub diff_preload_behind: usize,
 }
 
 pub struct AppState {
@@ -670,6 +672,8 @@ impl AppState {
                 num_load_threads: app_config.num_load_threads,
                 num_process_threads: app_config.num_process_threads,
                 num_flip_diff_threads: app_config.num_flip_diff_threads,
+                diff_preload_ahead: app_config.diff_preload_ahead,
+                diff_preload_behind: app_config.diff_preload_behind,
             },
             Arc::clone(&queue),
             Arc::clone(&device),

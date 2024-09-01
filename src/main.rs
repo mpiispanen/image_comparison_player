@@ -93,6 +93,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Number of threads to use for generating flip diffs")
                 .default_value("4"),
         )
+        .arg(
+            Arg::new("diff_preload_ahead")
+                .long("diff-preload-ahead")
+                .action(ArgAction::Set)
+                .value_name("COUNT")
+                .help("Number of diff images to preload ahead")
+                .default_value("5"),
+        )
+        .arg(
+            Arg::new("diff_preload_behind")
+                .long("diff-preload-behind")
+                .action(ArgAction::Set)
+                .value_name("COUNT")
+                .help("Number of diff images to preload behind")
+                .default_value("1"),
+        )
         .get_matches();
 
     let dir1 = matches.get_one::<String>("dir1").unwrap();
@@ -128,6 +144,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .parse()
         .unwrap_or(4);
+    let diff_preload_ahead = matches
+        .get_one::<String>("diff_preload_ahead")
+        .unwrap()
+        .parse()
+        .unwrap_or(5);
+    let diff_preload_behind = matches
+        .get_one::<String>("diff_preload_behind")
+        .unwrap()
+        .parse()
+        .unwrap_or(1);
 
     let (width, height) = parse_window_size(window_size)?;
 
@@ -151,6 +177,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         num_load_threads,
         num_process_threads,
         num_flip_diff_threads,
+        diff_preload_ahead,  // Add this line
+        diff_preload_behind, // Add this line
     };
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;

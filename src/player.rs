@@ -125,6 +125,8 @@ pub struct PlayerConfig {
     pub num_load_threads: usize,
     pub num_process_threads: usize,
     pub num_flip_diff_threads: usize,
+    pub diff_preload_ahead: usize,
+    pub diff_preload_behind: usize,
 }
 
 type FlipDiffSender = Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>;
@@ -620,14 +622,14 @@ impl Player {
         let frame_count2 = self.frame_count2;
 
         // Preload ahead
-        for i in 1..=self.config.preload_ahead {
+        for i in 1..=self.config.diff_preload_ahead {
             let preload_index1 = (index1 + i) % frame_count1;
             let preload_index2 = (index2 + i) % frame_count2;
             self.ensure_flip_diff_generated(preload_index1, preload_index2);
         }
 
         // Preload behind
-        for i in 1..=self.config.preload_behind {
+        for i in 1..=self.config.diff_preload_behind {
             let preload_index1 = (index1 + frame_count1 - i) % frame_count1;
             let preload_index2 = (index2 + frame_count2 - i) % frame_count2;
             self.ensure_flip_diff_generated(preload_index1, preload_index2);
