@@ -131,6 +131,10 @@ type FlipDiffSender = Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>;
 #[allow(dead_code)]
 type FlipDiffReceiver = Arc<Mutex<Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
 
+pub struct DiffImageInfo {
+    pub process_time: Duration,
+}
+
 pub struct Player {
     pub config: PlayerConfig,
     current_time: AtomicU64,
@@ -162,6 +166,7 @@ pub struct Player {
     #[allow(dead_code)]
     flip_diff_receiver: FlipDiffReceiver,
     pub flip_diff_in_progress: FlipDiffInProgress,
+    pub diff_image_timings: Arc<RwLock<HashMap<(usize, usize), DiffImageInfo>>>,
 }
 
 impl Player {
@@ -218,6 +223,7 @@ impl Player {
             flip_diff_sender,
             flip_diff_receiver,
             flip_diff_in_progress: Arc::new(RwLock::new(HashSet::new())),
+            diff_image_timings: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -811,12 +817,14 @@ impl Player {
             let queue = Arc::clone(&self.queue);
             let flip_diff_cache = Arc::clone(&self.flip_diff_cache);
             let flip_diff_in_progress = Arc::clone(&self.flip_diff_in_progress);
+            let diff_image_timings = Arc::clone(&self.diff_image_timings);
 
             self.flip_diff_in_progress
                 .write()
                 .insert((left_index, right_index));
 
             self.flip_diff_pool.execute(move || {
+                let process_start = Instant::now();
                 let left_image = FlipImageRgb8::with_data(
                     width,
                     height,
@@ -891,6 +899,12 @@ impl Player {
                 flip_diff_sender
                     .send((left_index, right_index, diff_data, diff_size))
                     .unwrap();
+
+                let process_end = Instant::now();
+                let process_time = process_end - process_start;
+                diff_image_timings
+                    .write()
+                    .insert((left_index, right_index), DiffImageInfo { process_time });
             });
         }
     }

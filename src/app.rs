@@ -295,7 +295,30 @@ impl CacheDebugWindow {
                     && params.mouse_pos.1 >= y
                     && params.mouse_pos.1 <= y + scaled_button_size
                 {
-                    ui.tooltip_text(format!("Diff Cache: ({}, {})", left_frame, right_frame));
+                    let tooltip = if let Some(diff_info) = player
+                        .diff_image_timings
+                        .read()
+                        .get(&(left_frame, right_frame))
+                    {
+                        format!(
+                            "Diff Cache: ({}, {})\nProcess time: {:.2}ms",
+                            left_frame,
+                            right_frame,
+                            diff_info.process_time.as_secs_f32() * 1000.0
+                        )
+                    } else if player
+                        .flip_diff_in_progress
+                        .read()
+                        .contains(&(left_frame, right_frame))
+                    {
+                        format!(
+                            "Diff Cache: ({}, {}) (In Progress)",
+                            left_frame, right_frame
+                        )
+                    } else {
+                        format!("Diff Cache: ({}, {}) (Not Loaded)", left_frame, right_frame)
+                    };
+                    ui.tooltip_text(tooltip);
                 }
             }
         });
@@ -741,12 +764,7 @@ impl AppState {
 
     pub fn update_textures(&mut self) -> bool {
         let player = self.player.write();
-        let frame_changed = player.update_textures(self.show_flip_diff);
-        // if frame_changed {
-        //     self.flip_mode = false;
-        //     self.show_flip_diff = false;
-        // }
-        frame_changed
+        player.update_textures(self.show_flip_diff)
     }
 
     pub fn render(&mut self, window: &WinitWindow) -> Result<(), wgpu::SurfaceError> {
