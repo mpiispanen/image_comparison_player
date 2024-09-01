@@ -6,6 +6,7 @@ use imgui::Ui;
 use log::{debug, info}; // Add error to the import list
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -789,7 +790,7 @@ impl AppState {
             });
 
         // Check if a valid flip diff texture exists for the current frame pair
-        let flip_diff_texture = if self.show_flip_diff {
+        let flip_diff_texture = if self.player.read().show_flip_diff.load(Ordering::Relaxed) {
             player
                 .flip_diff_cache
                 .read()
@@ -836,7 +837,13 @@ impl AppState {
                 image1_size: [left_texture.width() as f32, left_texture.height() as f32],
                 image2_size: [right_texture.width() as f32, right_texture.height() as f32],
                 flip_diff_size: if use_flip_diff {
-                    let flip_diff_texture = flip_diff_texture.clone().unwrap();
+                    let flip_diff_texture = flip_diff_texture.clone().unwrap_or_else(|| {
+                        let cache = player.flip_diff_cache.read();
+                        cache
+                            .get(&(left_index, right_index))
+                            .and_then(|texture_holder| texture_holder.lock().as_ref().cloned())
+                            .unwrap()
+                    });
                     [
                         flip_diff_texture.width() as f32,
                         flip_diff_texture.height() as f32,
@@ -1214,10 +1221,7 @@ impl AppState {
                     self.cache_debug_window.toggle();
                 }
                 VirtualKeyCode::F => {
-                    self.show_flip_diff = !self.show_flip_diff;
-                    if self.show_flip_diff {
-                        self.generate_flip_diff();
-                    }
+                    self.toggle_flip_diff();
                 }
                 VirtualKeyCode::Left | VirtualKeyCode::Right => {
                     if *keycode == VirtualKeyCode::Left {
@@ -1243,18 +1247,12 @@ impl AppState {
         self.update_cursor_position(self.mouse_position.0, self.mouse_position.1);
     }
 
-    fn generate_flip_diff(&mut self) {
-        let (left_index, right_index) = {
-            let player = self.player.read();
-            player.current_images()
-        };
-
-        // Clear the old flip diff texture
-        *self.flip_diff_texture.lock() = None;
-
-        // Trigger the flip diff generation in the Player
-        self.player
-            .read()
-            .generate_flip_diff(left_index, right_index);
+    pub fn toggle_flip_diff(&mut self) {
+        let player = self.player.write();
+        player.show_flip_diff.fetch_xor(true, Ordering::Relaxed);
+        if player.show_flip_diff.load(Ordering::Relaxed) {
+            let (current_left, current_right) = player.current_images();
+            player.generate_flip_diff(current_left, current_right);
+        }
     }
 }

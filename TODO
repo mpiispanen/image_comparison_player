@@ -1,6 +1,6 @@
 TODO:
-- Make flip image generation work in the background
 - Add flip image cache to the visualizer
+    - Add timings
 - Preprocess flip images ahead of time
 - Add flip stats to UI
 - Stop loading images if we have moved so far past the image that it is not needed anymore (works?)

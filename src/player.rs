@@ -563,6 +563,43 @@ impl Player {
             self.ensure_texture_loaded(preload_index1, true);
             self.ensure_texture_loaded(preload_index2, false);
         }
+
+        // Preload flip diffs
+        if self.show_flip_diff.load(Ordering::Relaxed) {
+            self.preload_flip_diffs(index1, index2);
+        }
+    }
+
+    fn preload_flip_diffs(&self, index1: usize, index2: usize) {
+        let frame_count1 = self.frame_count1;
+        let frame_count2 = self.frame_count2;
+
+        // Preload ahead
+        for i in 1..=self.config.preload_ahead {
+            let preload_index1 = (index1 + i) % frame_count1;
+            let preload_index2 = (index2 + i) % frame_count2;
+            self.ensure_flip_diff_generated(preload_index1, preload_index2);
+        }
+
+        // Preload behind
+        for i in 1..=self.config.preload_behind {
+            let preload_index1 = (index1 + frame_count1 - i) % frame_count1;
+            let preload_index2 = (index2 + frame_count2 - i) % frame_count2;
+            self.ensure_flip_diff_generated(preload_index1, preload_index2);
+        }
+    }
+
+    fn ensure_flip_diff_generated(&self, left_index: usize, right_index: usize) {
+        let flip_diff_cache = self.flip_diff_cache.read();
+        let flip_diff_in_progress = self.flip_diff_in_progress.read();
+
+        if !flip_diff_cache.contains_key(&(left_index, right_index))
+            && !flip_diff_in_progress.contains(&(left_index, right_index))
+        {
+            drop(flip_diff_cache);
+            drop(flip_diff_in_progress);
+            self.generate_flip_diff(left_index, right_index);
+        }
     }
 
     pub fn is_within_preload_range(&self, index: usize, is_left: bool) -> bool {
