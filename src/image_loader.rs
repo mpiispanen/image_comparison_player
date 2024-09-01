@@ -3,7 +3,7 @@ use log::{debug, info, warn};
 use regex::Regex;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 type ImageInfo = (String, u64, u64);
 
@@ -22,7 +22,7 @@ pub fn load_image_paths(dir: &str, fps: f32) -> Result<(Vec<ImageInfo>, usize)> 
 
 fn load_from_input_txt(ffmpeg_input: &Path, fps: f32) -> Result<(Vec<ImageInfo>, usize)> {
     debug!("Attempting to open file: {:?}", &ffmpeg_input);
-    let file = File::open(&ffmpeg_input).context("Failed to open input file")?;
+    let file = File::open(ffmpeg_input).context("Failed to open input file")?;
     let reader = BufReader::new(file);
     let mut images = Vec::new();
     let mut lines = reader.lines();
