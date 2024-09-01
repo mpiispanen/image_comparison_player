@@ -1,7 +1,9 @@
 use log::debug;
+use memmap2::Mmap;
 use nv_flip::{flip, magma_lut, FlipImageRgb8};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::File;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -799,17 +801,37 @@ impl Player {
     fn load_image_data_from_path(
         path: &str,
     ) -> Result<(Vec<u8>, wgpu::Extent3d), Box<dyn std::error::Error>> {
-        let img = image::open(path)?;
-        let rgba = img.to_rgba8();
-        let dimensions = rgba.dimensions();
+        let file = File::open(path)?;
+        let file_size = file.metadata()?.len();
 
-        let size = wgpu::Extent3d {
-            width: dimensions.0,
-            height: dimensions.1,
-            depth_or_array_layers: 1,
-        };
+        // Use memory mapping for files larger than 10 MB
+        if file_size > 15 * 1024 * 1024 {
+            let mmap = unsafe { Mmap::map(&file)? };
+            let img = image::load_from_memory(&mmap)?;
+            let rgba = img.to_rgba8();
+            let dimensions = rgba.dimensions();
 
-        Ok((rgba.into_raw(), size))
+            let size = wgpu::Extent3d {
+                width: dimensions.0,
+                height: dimensions.1,
+                depth_or_array_layers: 1,
+            };
+
+            Ok((rgba.into_raw(), size))
+        } else {
+            // For smaller files, use the existing method
+            let img = image::open(path)?;
+            let rgba = img.to_rgba8();
+            let dimensions = rgba.dimensions();
+
+            let size = wgpu::Extent3d {
+                width: dimensions.0,
+                height: dimensions.1,
+                depth_or_array_layers: 1,
+            };
+
+            Ok((rgba.into_raw(), size))
+        }
     }
 
     pub fn get_left_texture(&self) -> Option<Arc<wgpu::Texture>> {
