@@ -472,7 +472,7 @@ impl Player {
             let texture_process_sender = self.texture_process_sender.clone();
             let processing_textures = Arc::clone(&self.processing_textures);
             let texture_timings = Arc::clone(&self.texture_timings);
-            let expected_dimensions = self.expected_image_dimensions.lock().clone();
+            let expected_dimensions = *self.expected_image_dimensions.lock();
             self.texture_load_pool.execute(move || {
                 let request = TextureLoadRequest::new(
                     request.path.to_string(),

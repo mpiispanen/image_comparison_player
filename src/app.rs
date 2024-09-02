@@ -440,6 +440,8 @@ pub struct AppState {
     swipe_start: Option<(f64, f64)>,
     swipe_threshold: f64,
     config: wgpu::SurfaceConfiguration,
+    zoom_center_offset: (f32, f32),
+    zoom_move_speed: f32,
 }
 
 impl AppState {
@@ -811,6 +813,8 @@ impl AppState {
             swipe_start: None,
             swipe_threshold: 50.0,
             config,
+            zoom_center_offset: (0.0, 0.0),
+            zoom_move_speed: 0.01,
         })
     }
 
@@ -901,7 +905,10 @@ impl AppState {
             flip_diff_size: [image_width, image_height],
             show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
             zoom_level: self.zoom_level,
-            zoom_center: [self.fixed_zoom_center.0, self.fixed_zoom_center.1],
+            zoom_center: [
+                self.fixed_zoom_center.0 + self.zoom_center_offset.0,
+                self.fixed_zoom_center.1 + self.zoom_center_offset.1
+            ],
             window_size: [window_size.width as f32, window_size.height as f32],
         };
 
@@ -1096,7 +1103,10 @@ impl AppState {
                     flip_diff_size,
                     show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
                     zoom_level: self.zoom_level,
-                    zoom_center: [self.fixed_zoom_center.0, self.fixed_zoom_center.1],
+                    zoom_center: [
+                        self.fixed_zoom_center.0 + self.zoom_center_offset.0,
+                        self.fixed_zoom_center.1 + self.zoom_center_offset.1
+                    ],
                     window_size: [window_size.width as f32, window_size.height as f32],
                 };
 
@@ -1332,6 +1342,10 @@ impl AppState {
                 VirtualKeyCode::RBracket => {
                     self.player.write().increase_playback_speed();
                 }
+                VirtualKeyCode::W => self.handle_zoom_move((0.0, -1.0)),
+                VirtualKeyCode::A => self.handle_zoom_move((-1.0, 0.0)),
+                VirtualKeyCode::S => self.handle_zoom_move((0.0, 1.0)),
+                VirtualKeyCode::D => self.handle_zoom_move((1.0, 0.0)),
                 _ => {}
             }
         }
@@ -1410,12 +1424,21 @@ impl AppState {
         let mouse_y = self.cursor_y / image_height;
 
         // Adjust the fixed zoom center based on the current zoom level and mouse position
-        let zoom_center_x = (mouse_x - self.fixed_zoom_center.0) / self.zoom_level + self.fixed_zoom_center.0;
-        let zoom_center_y = (mouse_y - self.fixed_zoom_center.1) / self.zoom_level + self.fixed_zoom_center.1;
+        let zoom_center_x = (mouse_x - 0.5) / self.zoom_level + 0.5;
+        let zoom_center_y = (mouse_y - 0.5) / self.zoom_level + 0.5;
+
+        // Calculate the maximum allowed offset based on the new zoom level
+        let max_offset_x = (1.0 - 1.0 / new_zoom_level) / 2.0;
+        let max_offset_y = (1.0 - 1.0 / new_zoom_level) / 2.0;
+
+        // Clamp the zoom center to keep it within the image bounds
+        let clamped_zoom_center_x = zoom_center_x.clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
+        let clamped_zoom_center_y = zoom_center_y.clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
 
         // Update the zoom level and fixed zoom center
         self.zoom_level = new_zoom_level;
-        self.fixed_zoom_center = (zoom_center_x, zoom_center_y);
+        self.fixed_zoom_center = (clamped_zoom_center_x, clamped_zoom_center_y);
+        self.zoom_center_offset = (0.0, 0.0); // Reset the offset when zooming
 
         // Update the uniform buffer
         self.update_uniform_buffer();
@@ -1439,7 +1462,10 @@ impl AppState {
             flip_diff_size: [self.size.width as f32, self.size.height as f32],
             show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
             zoom_level: self.zoom_level,
-            zoom_center: [self.fixed_zoom_center.0, self.fixed_zoom_center.1],
+            zoom_center: [
+                self.fixed_zoom_center.0 + self.zoom_center_offset.0,
+                self.fixed_zoom_center.1 + self.zoom_center_offset.1
+            ],
             window_size: [self.size.width as f32, self.size.height as f32],
         };
 
@@ -1480,5 +1506,24 @@ impl AppState {
                 self.swipe_start = None;
             }
         }
+    }
+
+    pub fn handle_zoom_move(&mut self, direction: (f32, f32)) {
+        let (dx, dy) = direction;
+        let (mut offset_x, mut offset_y) = self.zoom_center_offset;
+        
+        // Calculate the maximum allowed offset based on zoom level
+        let max_offset_x = (1.0 - 1.0 / self.zoom_level) / 2.0;
+        let max_offset_y = (1.0 - 1.0 / self.zoom_level) / 2.0;
+        
+        offset_x += dx * self.zoom_move_speed;
+        offset_y += dy * self.zoom_move_speed;
+        
+        // Clamp the offset to keep the zoom center within the image
+        offset_x = offset_x.clamp(-max_offset_x, max_offset_x);
+        offset_y = offset_y.clamp(-max_offset_y, max_offset_y);
+        
+        self.zoom_center_offset = (offset_x, offset_y);
+        self.update_uniform_buffer();
     }
 }

@@ -44,6 +44,10 @@ The application supports the following keyboard controls:
 - Esc: Exit the application
 - [ : Decrease playback speed
 - ] : Increase playback speed
+- W: Move zoom center up
+- A: Move zoom center left
+- S: Move zoom center down
+- D: Move zoom center right
 
 Mouse controls:
 - Move the cursor horizontally to adjust the split between left and right images
