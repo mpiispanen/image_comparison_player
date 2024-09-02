@@ -28,6 +28,7 @@ struct UniformData {
     show_flip_diff: f32,
     zoom_level: f32,
     zoom_center: [f32; 2],
+    window_size: [f32; 2],
 }
 
 struct CacheDebugWindow {
@@ -438,6 +439,7 @@ pub struct AppState {
     fixed_zoom_center: (f32, f32),
     swipe_start: Option<(f64, f64)>,
     swipe_threshold: f64,
+    config: wgpu::SurfaceConfiguration,
 }
 
 impl AppState {
@@ -808,12 +810,16 @@ impl AppState {
             fixed_zoom_center: (0.5, 0.5),
             swipe_start: None,
             swipe_threshold: 50.0,
+            config,
         })
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
+            self.config.width = new_size.width;
+            self.config.height = new_size.height;
+            self.surface.configure(&self.device, &self.config);
         }
     }
 
@@ -869,6 +875,36 @@ impl AppState {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        let (image_width, image_height) = (left_texture.width() as f32, left_texture.height() as f32);
+        let window_size = window.inner_size();
+        let window_aspect_ratio = window_size.width as f32 / window_size.height as f32;
+        let image_aspect_ratio = image_width / image_height;
+
+        let (render_width, render_height) = if window_aspect_ratio > image_aspect_ratio {
+            let scaled_height = window_size.height as f32;
+            let scaled_width = scaled_height * image_aspect_ratio;
+            (scaled_width, scaled_height)
+        } else {
+            let scaled_width = window_size.width as f32;
+            let scaled_height = scaled_width / image_aspect_ratio;
+            (scaled_width, scaled_height)
+        };
+
+        let x_offset = (window_size.width as f32 - render_width) / 2.0;
+        let y_offset = (window_size.height as f32 - render_height) / 2.0;
+
+        let uniforms = UniformData {
+            cursor_x: (self.cursor_x - x_offset) / render_width,
+            cursor_y: (self.cursor_y - y_offset) / render_height,
+            image1_size: [image_width, image_height],
+            image2_size: [image_width, image_height],
+            flip_diff_size: [image_width, image_height],
+            show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+            zoom_level: self.zoom_level,
+            zoom_center: [self.fixed_zoom_center.0, self.fixed_zoom_center.1],
+            window_size: [window_size.width as f32, window_size.height as f32],
+        };
+
         debug!("Created texture view");
 
         let mut encoder = self
@@ -908,9 +944,9 @@ impl AppState {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
                             a: 1.0,
                         }),
                         store: true,
@@ -918,31 +954,6 @@ impl AppState {
                 })],
                 depth_stencil_attachment: None,
             });
-
-            let uniforms = UniformData {
-                cursor_x: self.cursor_x / self.size.width as f32,
-                cursor_y: self.mouse_position.1 / self.size.height as f32,
-                image1_size: [left_texture.width() as f32, left_texture.height() as f32],
-                image2_size: [right_texture.width() as f32, right_texture.height() as f32],
-                flip_diff_size: if use_flip_diff {
-                    let flip_diff_texture = flip_diff_texture.clone().unwrap_or_else(|| {
-                        let cache = player.flip_diff_cache.read();
-                        cache
-                            .get(&(left_index, right_index))
-                            .and_then(|texture_holder| texture_holder.lock().as_ref().cloned())
-                            .unwrap()
-                    });
-                    [
-                        flip_diff_texture.width() as f32,
-                        flip_diff_texture.height() as f32,
-                    ]
-                } else {
-                    [0.0, 0.0]
-                },
-                show_flip_diff: if use_flip_diff { 1.0 } else { 0.0 },
-                zoom_level: self.zoom_level,
-                zoom_center: [self.fixed_zoom_center.0, self.fixed_zoom_center.1],
-            };
 
             self.queue
                 .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
@@ -1061,9 +1072,9 @@ impl AppState {
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.1,
-                                g: 0.2,
-                                b: 0.3,
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
                                 a: 1.0,
                             }),
                             store: true,
@@ -1086,6 +1097,7 @@ impl AppState {
                     show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
                     zoom_level: self.zoom_level,
                     zoom_center: [self.fixed_zoom_center.0, self.fixed_zoom_center.1],
+                    window_size: [window_size.width as f32, window_size.height as f32],
                 };
 
                 self.queue
@@ -1338,9 +1350,34 @@ impl AppState {
     }
 
     pub fn update_mouse_position(&mut self, x: f32, y: f32) {
+        let player = self.player.read();
+        let left_texture = player.get_left_texture();
+
+        let (image_width, image_height) = if let Some(left) = left_texture {
+            (left.width() as f32, left.height() as f32)
+        } else {
+            (self.size.width as f32, self.size.height as f32)
+        };
+
+        let window_aspect_ratio = self.size.width as f32 / self.size.height as f32;
+        let image_aspect_ratio = image_width / image_height;
+
+        let (render_width, render_height) = if window_aspect_ratio > image_aspect_ratio {
+            let scaled_height = self.size.height as f32;
+            let scaled_width = scaled_height * image_aspect_ratio;
+            (scaled_width, scaled_height)
+        } else {
+            let scaled_width = self.size.width as f32;
+            let scaled_height = scaled_width / image_aspect_ratio;
+            (scaled_width, scaled_height)
+        };
+
+        let x_offset = (self.size.width as f32 - render_width) / 2.0;
+        let y_offset = (self.size.height as f32 - render_height) / 2.0;
+
         self.mouse_position = (x, y);
-        self.cursor_x = x;
-        self.cursor_y = y;
+        self.cursor_x = (x - x_offset).max(0.0).min(render_width);
+        self.cursor_y = (y - y_offset).max(0.0).min(render_height);
         self.update_uniform_buffer();
     }
 
@@ -1403,6 +1440,7 @@ impl AppState {
             show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
             zoom_level: self.zoom_level,
             zoom_center: [self.fixed_zoom_center.0, self.fixed_zoom_center.1],
+            window_size: [self.size.width as f32, self.size.height as f32],
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
