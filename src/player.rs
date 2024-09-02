@@ -1,9 +1,11 @@
+use image::GenericImageView;
 use log::debug;
 use memmap2::Mmap;
 use nv_flip::{flip, magma_lut, FlipImageRgb8, FlipPool};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
+use std::io::BufReader;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -184,6 +186,7 @@ pub struct Player {
     pub texture_available_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
     playback_speed: f32,
     pub flip_stats: Arc<RwLock<HashMap<(usize, usize), FlipStats>>>,
+    expected_image_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
 }
 
 impl Player {
@@ -201,6 +204,10 @@ impl Player {
         let flip_diff_pool = ThreadPool::new(config.num_flip_diff_threads);
         let (flip_diff_sender, flip_diff_receiver) = channel();
         let flip_diff_receiver = Arc::new(Mutex::new(flip_diff_receiver));
+
+        let expected_dimensions =
+            Self::determine_expected_dimensions(&config.image_data1[0].0).unwrap_or((0, 0));
+        let expected_image_dimensions = Arc::new(Mutex::new(Some(expected_dimensions)));
 
         Self {
             config,
@@ -245,7 +252,19 @@ impl Player {
             texture_available_times: Arc::new(RwLock::new(HashMap::new())),
             playback_speed: 1.0,
             flip_stats: Arc::new(RwLock::new(HashMap::new())),
+            expected_image_dimensions,
         }
+    }
+
+    fn determine_expected_dimensions(
+        first_image_path: &str,
+    ) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+        let file = File::open(first_image_path)?;
+        let reader = BufReader::new(file);
+        let dimensions = image::io::Reader::new(reader)
+            .with_guessed_format()?
+            .into_dimensions()?;
+        Ok(dimensions)
     }
 
     pub fn current_images(&self) -> (usize, usize) {
@@ -453,13 +472,16 @@ impl Player {
             let texture_process_sender = self.texture_process_sender.clone();
             let processing_textures = Arc::clone(&self.processing_textures);
             let texture_timings = Arc::clone(&self.texture_timings);
+            let expected_dimensions = self.expected_image_dimensions.lock().clone();
             self.texture_load_pool.execute(move || {
                 let request = TextureLoadRequest::new(
                     request.path.to_string(),
                     request.index,
                     request.is_left,
                 );
-                if let Ok((image_data, size)) = Self::load_image_data_from_path(&request.path) {
+                if let Ok((image_data, size)) =
+                    Self::load_image_data_from_path(&request.path, expected_dimensions)
+                {
                     let load_end = Instant::now();
                     let load_time = load_end - request.load_start;
 
@@ -850,38 +872,40 @@ impl Player {
 
     fn load_image_data_from_path(
         path: &str,
+        expected_dimensions: Option<(u32, u32)>,
     ) -> Result<(Vec<u8>, wgpu::Extent3d), Box<dyn std::error::Error>> {
         let file = File::open(path)?;
         let file_size = file.metadata()?.len();
 
-        // Use memory mapping for files larger than 10 MB
-        if file_size > 15 * 1024 * 1024 {
+        let (img, dimensions) = if file_size > 15 * 1024 * 1024 {
             let mmap = unsafe { Mmap::map(&file)? };
             let img = image::load_from_memory(&mmap)?;
-            let rgba = img.to_rgba8();
-            let dimensions = rgba.dimensions();
-
-            let size = wgpu::Extent3d {
-                width: dimensions.0,
-                height: dimensions.1,
-                depth_or_array_layers: 1,
-            };
-
-            Ok((rgba.into_raw(), size))
+            let dimensions = img.dimensions();
+            (img, dimensions)
         } else {
-            // For smaller files, use the existing method
             let img = image::open(path)?;
-            let rgba = img.to_rgba8();
-            let dimensions = rgba.dimensions();
+            let dimensions = img.dimensions();
+            (img, dimensions)
+        };
 
-            let size = wgpu::Extent3d {
-                width: dimensions.0,
-                height: dimensions.1,
-                depth_or_array_layers: 1,
-            };
-
-            Ok((rgba.into_raw(), size))
+        if let Some(expected) = expected_dimensions {
+            if dimensions != expected {
+                return Err(format!(
+                    "Image dimensions mismatch: expected {:?}, got {:?} for file {}",
+                    expected, dimensions, path
+                )
+                .into());
+            }
         }
+
+        let rgba = img.to_rgba8();
+        let size = wgpu::Extent3d {
+            width: dimensions.0,
+            height: dimensions.1,
+            depth_or_array_layers: 1,
+        };
+
+        Ok((rgba.into_raw(), size))
     }
 
     pub fn get_left_texture(&self) -> Option<Arc<wgpu::Texture>> {
