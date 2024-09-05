@@ -91,3 +91,5 @@ The application uses several external crates, including wgpu for GPU rendering, 
 ## Note
 
 This application is designed for comparing image sequences and may require significant system resources depending on the size and number of images being compared.
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/U7U112X6BE)
