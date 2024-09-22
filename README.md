@@ -2,14 +2,13 @@
 
 The Image Comparison Player is a Rust-based application designed to compare images from two directories. It provides a visual interface for side-by-side comparison, flip difference visualization, and playback control of image sequences.
 
-Side-by-side comparison:
-
 <p align="center">
+   Side-by-side comparison:
   <img src="https://github.com/mpiispanen/image_comparison_player/blob/main/gif/output1.gif" />
 </p>
 
-FLIP diff comparison:
 <p align="center">
+FLIP diff comparison:
   <img src="https://github.com/mpiispanen/image_comparison_player/blob/main/gif/output2.gif" />
 </p>
 
