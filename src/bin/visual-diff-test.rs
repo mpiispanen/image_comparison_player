@@ -112,7 +112,7 @@ fn run_visual_diff_tests(
     Ok(())
 }
 
-fn run_minimal_test(output_dir: &str, reference_dir: &str, _threshold: f32) -> Result<()> {
+fn run_minimal_test(output_dir: &str, _reference_dir: &str, _threshold: f32) -> Result<()> {
     println!("Running minimal visual diff test...");
     
     // Create a simple test output
