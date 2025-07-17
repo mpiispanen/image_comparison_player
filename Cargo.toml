@@ -29,3 +29,11 @@ regex = "1.10.6"
 [[bin]]
 name = "image_comparison_player"
 path = "src/main.rs"
+
+[[bin]]
+name = "test-image-generator"
+path = "src/bin/test-image-generator.rs"
+
+[[bin]]
+name = "visual-diff-test"
+path = "src/bin/visual-diff-test.rs"

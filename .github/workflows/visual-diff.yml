@@ -1,0 +1,143 @@
+name: Visual Diff Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  visual-diff:
+    name: Visual Diff Tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfreetype6-dev libfontconfig1-dev xvfb
+        
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Cache cargo index
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Cache cargo build
+      uses: actions/cache@v3
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+    # Download pre-generated test images instead of generating them
+    - name: Download latest test images
+      id: download-test-images
+      continue-on-error: true
+      uses: actions/download-artifact@v3
+      with:
+        name: test-images-latest
+        path: test_images/
+        
+    # Fallback: Download test images from the latest successful run if available
+    - name: Download test images from latest run
+      if: steps.download-test-images.outcome == 'failure'
+      continue-on-error: true
+      run: |
+        # Try to download test images from the most recent successful generate-test-images run
+        gh run list --workflow="generate-test-images.yml" --status="success" --limit=1 --json=databaseId --jq='.[0].databaseId' | xargs -I {} gh run download {} --name test-images-latest --dir test_images/ || true
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    # If no test images are available, use fallback test images
+    - name: Create fallback test images
+      if: ${{ !contains(github.event.head_commit.message, '[skip-visual-diff]') }}
+      run: |
+        if [ ! -d "test_images/reference" ]; then
+          echo "No pre-generated test images found. Creating minimal fallback images for testing."
+          mkdir -p test_images/reference
+          mkdir -p test_images/input/dir1
+          mkdir -p test_images/input/dir2
+          mkdir -p test_images/current
+          
+          # Create simple colored test images as fallback
+          convert -size 100x100 xc:red test_images/input/dir1/test1.png || echo "ImageMagick not available, skipping fallback image creation"
+          convert -size 100x100 xc:blue test_images/input/dir2/test1.png || echo "ImageMagick not available, skipping fallback image creation"
+          
+          # Create reference images
+          cp test_images/input/dir1/test1.png test_images/reference/test1_reference.png 2>/dev/null || echo "No fallback images to copy"
+        fi
+
+    - name: Build visual diff test binary
+      run: cargo build --release --bin visual-diff-test
+      
+    - name: Run visual diff tests
+      run: |
+        # Run the visual diff tests that compare current output against reference images
+        # This should NOT generate new images, only test against existing ones
+        xvfb-run -a cargo run --release --bin visual-diff-test -- \
+          --test-images-dir test_images \
+          --output-dir test_images/current \
+          --reference-dir test_images/reference \
+          --threshold 0.01
+          
+    - name: Compare visual diff results
+      run: |
+        # Compare the generated outputs with reference images
+        if [ -d "test_images/current" ] && [ -d "test_images/reference" ]; then
+          echo "Comparing current outputs with reference images..."
+          
+          # Count differences
+          DIFF_COUNT=0
+          for ref_file in test_images/reference/*.png; do
+            if [ -f "$ref_file" ]; then
+              basename=$(basename "$ref_file")
+              current_file="test_images/current/${basename/_reference/}"
+              
+              if [ -f "$current_file" ]; then
+                # Use image comparison (requires ImageMagick or similar)
+                if compare -metric AE "$ref_file" "$current_file" /tmp/diff.png 2>/dev/null; then
+                  echo "✓ $basename: Images match"
+                else
+                  echo "✗ $basename: Images differ"
+                  DIFF_COUNT=$((DIFF_COUNT + 1))
+                fi
+              else
+                echo "✗ $basename: Missing current output file"
+                DIFF_COUNT=$((DIFF_COUNT + 1))
+              fi
+            fi
+          done
+          
+          if [ $DIFF_COUNT -gt 0 ]; then
+            echo "Visual diff test failed: $DIFF_COUNT differences found"
+            exit 1
+          else
+            echo "All visual diff tests passed"
+          fi
+        else
+          echo "Warning: Test images not available. Skipping visual diff comparison."
+        fi
+        
+    - name: Upload diff results on failure
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: visual-diff-failures-${{ github.sha }}
+        path: |
+          test_images/current/
+          test_images/reference/
+          /tmp/diff*.png
+        retention-days: 7

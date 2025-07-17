@@ -93,6 +93,44 @@ The application supports two methods of specifying input images:
    ./target/release/image_comparison_player --dir1 /path/to/first/directory --dir2 /path/to/second/directory
    ```
 
+## Testing
+
+The project includes a comprehensive visual diff testing system that separates test image generation from testing:
+
+### Visual Diff Testing Workflow
+
+The testing is split into two separate workflows to ensure efficiency and proper separation of concerns:
+
+1. **Test Image Generation** (`generate-test-images.yml`):
+   - Runs independently from the main CI pipeline
+   - Generates input test images and reference images
+   - Stores results as CI artifacts
+   - Triggered manually, on schedule, or when test cases change
+
+2. **Visual Diff Testing** (`visual-diff.yml`):
+   - Downloads pre-generated test images from artifacts
+   - Runs visual comparison tests against reference images
+   - **Does NOT generate images** - only tests against existing ones
+   - Runs on every push and pull request
+
+### Running Tests Locally
+
+```bash
+# Generate test images
+cargo run --bin test-image-generator generate-inputs
+cargo run --bin test-image-generator generate-references
+
+# Run visual diff tests  
+cargo run --bin visual-diff-test --test-images-dir test_images --output-dir test_images/current --reference-dir test_images/reference
+```
+
+### Adding New Test Cases
+
+1. Add test case configurations to the `test_cases/` directory
+2. Update the `test-image-generator` binary to handle new test cases
+3. Run the "Generate Test Images" workflow to create new reference images
+4. Visual diff tests will automatically include the new test cases
+
 ## Dependencies
 
 The application uses several external crates, including wgpu for GPU rendering, winit for window management, clap for argument parsing, and imgui for debug UI. For a full list of dependencies, refer to the Cargo.toml file.

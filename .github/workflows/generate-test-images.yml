@@ -1,0 +1,85 @@
+name: Generate Test Images
+
+on:
+  workflow_dispatch: # Manual trigger
+  schedule:
+    - cron: '0 2 * * 0' # Weekly on Sunday at 2 AM UTC
+  push:
+    paths:
+      - 'test_cases/**'
+      - 'src/**'
+      - 'shaders/**'
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  generate-test-images:
+    name: Generate Test Images
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfreetype6-dev libfontconfig1-dev xvfb
+        
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Cache cargo index
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Cache cargo build
+      uses: actions/cache@v3
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build test image generator
+      run: cargo build --release --bin test-image-generator
+      
+    - name: Create test image directories
+      run: |
+        mkdir -p test_images/reference
+        mkdir -p test_images/input/dir1
+        mkdir -p test_images/input/dir2
+        
+    - name: Generate test input images
+      run: |
+        # Create sample test images for testing
+        # This would typically generate various test cases with different image sizes,
+        # formats, and visual patterns that need to be tested
+        cargo run --release --bin test-image-generator -- generate-inputs
+      
+    - name: Generate reference images
+      run: |
+        # Run the image comparison player with headless rendering to generate
+        # reference images for visual diff testing
+        xvfb-run -a cargo run --release --bin test-image-generator -- generate-references
+        
+    - name: Upload test images as artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-images-${{ github.sha }}
+        path: test_images/
+        retention-days: 30
+        
+    - name: Upload test images to release (if on main)
+      if: github.ref == 'refs/heads/main'
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-images-latest
+        path: test_images/
+        retention-days: 90
