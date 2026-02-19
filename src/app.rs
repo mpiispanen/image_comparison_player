@@ -3,7 +3,7 @@ use crate::player::Player;
 use crate::player::PlayerConfig;
 use imgui::Condition;
 use imgui::Ui;
-use log::{debug, info, warn}; // Add error to the import list
+use log::{debug, info, warn};
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
 use winit::event::WindowEvent;
