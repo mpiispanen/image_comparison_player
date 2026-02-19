@@ -8,6 +8,7 @@ use winit::{
 mod app;
 mod image_loader;
 mod player;
+mod test_images;
 
 use crate::app::AppConfig;
 
@@ -19,13 +20,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .author("Matias Piispanen")
         .about("Compares images from two directories")
         .arg(
+            Arg::new("test_mode")
+                .long("test-mode")
+                .action(ArgAction::SetTrue)
+                .help("Run in testing mode with synthetically generated images (no real image files required)"),
+        )
+        .arg(
             Arg::new("dir1")
                 .short('1')
                 .long("dir1")
                 .action(ArgAction::Set)
                 .value_name("DIR")
                 .help("First directory containing images")
-                .required(true),
+                .required_unless_present("test_mode"),
         )
         .arg(
             Arg::new("dir2")
@@ -34,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .action(ArgAction::Set)
                 .value_name("DIR")
                 .help("Second directory containing images")
-                .required(true),
+                .required_unless_present("test_mode"),
         )
         .arg(
             Arg::new("window_size")
@@ -119,8 +126,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .get_matches();
 
-    let dir1 = matches.get_one::<String>("dir1").unwrap();
-    let dir2 = matches.get_one::<String>("dir2").unwrap();
+    let test_mode = matches.get_flag("test_mode");
+
+    // In test mode, generate synthetic images instead of requiring real directories.
+    let (dir1_owned, dir2_owned);
+    let (dir1, dir2) = if test_mode {
+        info!("Test mode enabled -- generating synthetic test images");
+        let (d1, d2) = test_images::generate_test_images()?;
+        dir1_owned = d1.to_string_lossy().into_owned();
+        dir2_owned = d2.to_string_lossy().into_owned();
+        (dir1_owned.as_str(), dir2_owned.as_str())
+    } else {
+        let d1 = matches.get_one::<String>("dir1").unwrap().as_str();
+        let d2 = matches.get_one::<String>("dir2").unwrap().as_str();
+        (d1, d2)
+    };
     let window_size = matches.get_one::<String>("window_size").unwrap();
     let cache_size = matches
         .get_one::<String>("cache_size")
