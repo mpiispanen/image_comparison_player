@@ -18,12 +18,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = Command::new("image_comparison_player")
         .version("1.0")
         .author("Matias Piispanen")
-        .about("Compares images from two directories")
+        .about("Compares images from two directories or file lists")
         .arg(
             Arg::new("test_mode")
                 .long("test-mode")
                 .action(ArgAction::SetTrue)
-                .conflicts_with_all(["dir1", "dir2"])
+                .conflicts_with_all(["dir1", "dir2", "images1", "images2"])
                 .help("Run in testing mode with synthetically generated images (no real image files required)"),
         )
         .arg(
@@ -32,8 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("dir1")
                 .action(ArgAction::Set)
                 .value_name("DIR")
-                .help("First directory containing images")
-                .required_unless_present("test_mode"),
+                .help("First directory containing images (mutually exclusive with --images1)")
+                .required(false)
+                .conflicts_with("images1"),
         )
         .arg(
             Arg::new("dir2")
@@ -41,8 +42,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("dir2")
                 .action(ArgAction::Set)
                 .value_name("DIR")
-                .help("Second directory containing images")
-                .required_unless_present("test_mode"),
+                .help("Second directory containing images (mutually exclusive with --images2)")
+                .required(false)
+                .conflicts_with("images2"),
+        )
+        .arg(
+            Arg::new("images1")
+                .long("images1")
+                .action(ArgAction::Append)
+                .value_name("FILE")
+                .help("One or more image files for the left side (use instead of --dir1)")
+                .required(false)
+                .num_args(1..),
+        )
+        .arg(
+            Arg::new("images2")
+                .long("images2")
+                .action(ArgAction::Append)
+                .value_name("FILE")
+                .help("One or more image files for the right side (use instead of --dir2)")
+                .required(false)
+                .num_args(1..),
         )
         .arg(
             Arg::new("window_size")
@@ -129,19 +149,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let test_mode = matches.get_flag("test_mode");
 
-    // In test mode, generate synthetic images instead of requiring real directories.
-    let (dir1_owned, dir2_owned);
-    let (dir1, dir2) = if test_mode {
+    let (dir1, dir2, images1, images2) = if test_mode {
         info!("Test mode enabled -- generating synthetic test images");
         let (d1, d2) = test_images::generate_test_images()?;
-        dir1_owned = d1.to_string_lossy().into_owned();
-        dir2_owned = d2.to_string_lossy().into_owned();
-        (dir1_owned.as_str(), dir2_owned.as_str())
+        (
+            Some(d1.to_string_lossy().into_owned()),
+            Some(d2.to_string_lossy().into_owned()),
+            None,
+            None,
+        )
     } else {
-        let d1 = matches.get_one::<String>("dir1").unwrap().as_str();
-        let d2 = matches.get_one::<String>("dir2").unwrap().as_str();
-        (d1, d2)
+        let dir1 = matches.get_one::<String>("dir1").cloned();
+        let dir2 = matches.get_one::<String>("dir2").cloned();
+        let images1: Option<Vec<String>> = matches
+            .get_many::<String>("images1")
+            .map(|vals| vals.cloned().collect());
+        let images2: Option<Vec<String>> = matches
+            .get_many::<String>("images2")
+            .map(|vals| vals.cloned().collect());
+
+        if dir1.is_none() && images1.as_ref().is_none_or(|v| v.is_empty()) {
+            return Err(
+                "Either --dir1 or --images1 (with at least one file) must be provided".into(),
+            );
+        }
+        if dir2.is_none() && images2.as_ref().is_none_or(|v| v.is_empty()) {
+            return Err(
+                "Either --dir2 or --images2 (with at least one file) must be provided".into(),
+            );
+        }
+
+        (dir1, dir2, images1, images2)
     };
+
     let window_size = matches.get_one::<String>("window_size").unwrap();
     let cache_size = matches
         .get_one::<String>("cache_size")
@@ -192,8 +232,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (width, height) = parse_window_size(window_size)?;
 
     info!(
-        "Starting image comparison player with dir1: {}, dir2: {}, window size: {}x{}",
-        dir1, dir2, width, height
+        "Starting image comparison player with input1: {}, input2: {}, window size: {}x{}",
+        dir1.as_deref()
+            .unwrap_or_else(|| images1.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("?")),
+        dir2.as_deref()
+            .unwrap_or_else(|| images2.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("?")),
+        width,
+        height
     );
 
     let event_loop = EventLoop::new();
@@ -203,22 +248,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build(&event_loop)?;
 
     let app_config = AppConfig {
-        dir1: dir1.to_string(),
-        dir2: dir2.to_string(),
+        dir1,
+        dir2,
+        images1,
+        images2,
         cache_size,
         preload_ahead,
         preload_behind,
         num_load_threads,
         num_process_threads,
         num_flip_diff_threads,
-        diff_preload_ahead,  // Add this line
-        diff_preload_behind, // Add this line
+        diff_preload_ahead,
+        diff_preload_behind,
         fps,
     };
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;
 
-    let mut initialized = false; // Add this line
+    let mut initialized = false;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;

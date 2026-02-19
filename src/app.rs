@@ -410,8 +410,10 @@ type FlipDiffReceiver = Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::E
 type FlipDiffTexture = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
 
 pub struct AppConfig {
-    pub dir1: String,
-    pub dir2: String,
+    pub dir1: Option<String>,
+    pub dir2: Option<String>,
+    pub images1: Option<Vec<String>>,
+    pub images2: Option<Vec<String>>,
     pub cache_size: usize,
     pub preload_ahead: usize,
     pub preload_behind: usize,
@@ -463,8 +465,27 @@ impl AppState {
         app_config: AppConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         info!("Initializing AppState");
-        let dir1 = std::fs::canonicalize(app_config.dir1)?;
-        let dir2 = std::fs::canonicalize(app_config.dir2)?;
+
+        let (images1, image_len1) = if let Some(files) = &app_config.images1 {
+            image_loader::load_image_paths_from_files(files, app_config.fps)?
+        } else {
+            let raw = app_config.dir1.as_deref()
+                .ok_or("dir1 is missing: provide --dir1 or --images1")?;
+            let dir = std::fs::canonicalize(raw)?;
+            image_loader::load_image_paths(dir.to_str().unwrap(), app_config.fps)?
+        };
+        let (images2, image_len2) = if let Some(files) = &app_config.images2 {
+            image_loader::load_image_paths_from_files(files, app_config.fps)?
+        } else {
+            let raw = app_config.dir2.as_deref()
+                .ok_or("dir2 is missing: provide --dir2 or --images2")?;
+            let dir = std::fs::canonicalize(raw)?;
+            image_loader::load_image_paths(dir.to_str().unwrap(), app_config.fps)?
+        };
+        debug!(
+            "Loaded {} images from input1 and {} images from input2",
+            image_len1, image_len2
+        );
 
         let size = window.inner_size();
         let surface_scale = window.scale_factor().ceil() as u32;
@@ -733,13 +754,6 @@ impl AppState {
                 },
                 multiview: None,
             });
-
-        let (images1, image_len1) = image_loader::load_image_paths(dir1.to_str().unwrap(), app_config.fps)?;
-        let (images2, image_len2) = image_loader::load_image_paths(dir2.to_str().unwrap(), app_config.fps)?;
-        debug!(
-            "Loaded {} images from dir1 and {} images from dir2",
-            image_len1, image_len2
-        );
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
