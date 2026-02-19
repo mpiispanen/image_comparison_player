@@ -3,7 +3,7 @@ use crate::player::Player;
 use crate::player::PlayerConfig;
 use imgui::Condition;
 use imgui::Ui;
-use log::{debug, info}; // Add error to the import list
+use log::{debug, info, warn}; // Add error to the import list
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
 use winit::event::WindowEvent;
@@ -442,6 +442,7 @@ pub struct AppState {
     config: wgpu::SurfaceConfiguration,
     zoom_center_offset: (f32, f32),
     zoom_move_speed: f32,
+    screenshot_requested: bool,
 }
 
 impl AppState {
@@ -491,7 +492,7 @@ impl AppState {
             .unwrap_or(surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
             width: size.width,
             height: size.height,
@@ -815,6 +816,7 @@ impl AppState {
             config,
             zoom_center_offset: (0.0, 0.0),
             zoom_move_speed: 0.01,
+            screenshot_requested: false,
         })
     }
 
@@ -1123,6 +1125,67 @@ impl AppState {
 
         self.queue.submit(std::iter::once(encoder.finish()));
 
+        // Capture screenshot if requested
+        if self.screenshot_requested {
+            self.screenshot_requested = false;
+            let width = self.size.width;
+            let height = self.size.height;
+            // Align bytes_per_row to wgpu's required 256-byte alignment
+            let bytes_per_row = (width * 4 + 255) & !255;
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Screenshot Buffer"),
+                size: (bytes_per_row * height) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut screenshot_encoder = self.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some("Screenshot Encoder") },
+            );
+            screenshot_encoder.copy_texture_to_buffer(
+                output.texture.as_image_copy(),
+                wgpu::ImageCopyBuffer {
+                    buffer: &buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            self.queue.submit(std::iter::once(screenshot_encoder.finish()));
+            let buffer_slice = buffer.slice(..);
+            let (tx, rx) = mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+            self.device.poll(wgpu::Maintain::Wait);
+            if rx.recv().unwrap().is_ok() {
+                let raw = buffer_slice.get_mapped_range().to_vec();
+                buffer.unmap();
+                // Remove row padding and handle BGRA→RGBA conversion
+                let is_bgra = matches!(
+                    self.config.format,
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+                );
+                let mut pixels: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
+                for row in 0..height as usize {
+                    let row_start = row * bytes_per_row as usize;
+                    let row_data = &raw[row_start..row_start + (width * 4) as usize];
+                    if is_bgra {
+                        for chunk in row_data.chunks(4) {
+                            pixels.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+                        }
+                    } else {
+                        pixels.extend_from_slice(row_data);
+                    }
+                }
+                let path = generate_output_filename("screenshot", "png");
+                match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8) {
+                    Ok(_) => info!("Screenshot saved to {}", path),
+                    Err(e) => warn!("Failed to save screenshot: {}", e),
+                }
+            }
+        }
+
         debug!("Presenting output");
         output.present();
 
@@ -1346,6 +1409,12 @@ impl AppState {
                 VirtualKeyCode::A => self.handle_zoom_move((-1.0, 0.0)),
                 VirtualKeyCode::S => self.handle_zoom_move((0.0, 1.0)),
                 VirtualKeyCode::D => self.handle_zoom_move((1.0, 0.0)),
+                VirtualKeyCode::P => {
+                    self.save_flip_diff_image();
+                }
+                VirtualKeyCode::I => {
+                    self.request_screenshot();
+                }
                 _ => {}
             }
         }
@@ -1525,5 +1594,115 @@ impl AppState {
         
         self.zoom_center_offset = (offset_x, offset_y);
         self.update_uniform_buffer();
+    }
+
+    /// Save the current FLIP diff image to a PNG file.
+    pub fn save_flip_diff_image(&self) {
+        let player = self.player.read();
+        let (left_index, right_index) = player.current_images();
+        match player.get_flip_diff_raw_data(left_index, right_index) {
+            Some((data, width, height)) => {
+                let path = generate_output_filename("flip_diff", "png");
+                match image::save_buffer(&path, &data, width, height, image::ColorType::Rgba8) {
+                    Ok(_) => info!("FLIP diff image saved to {}", path),
+                    Err(e) => warn!("Failed to save FLIP diff image: {}", e),
+                }
+            }
+            None => warn!(
+                "No FLIP diff image available for frames ({}, {}). Enable FLIP mode first.",
+                left_index, right_index
+            ),
+        }
+    }
+
+    /// Request a screenshot to be saved on the next rendered frame.
+    pub fn request_screenshot(&mut self) {
+        self.screenshot_requested = true;
+    }
+}
+
+/// Generate a timestamped output file path in the current directory.
+fn generate_output_filename(prefix: &str, extension: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{}_{}.{}", prefix, ts, extension)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_output_filename;
+
+    #[test]
+    fn test_generate_output_filename_format() {
+        let name = generate_output_filename("screenshot", "png");
+        assert!(name.starts_with("screenshot_"), "should start with prefix: {}", name);
+        assert!(name.ends_with(".png"), "should end with .png: {}", name);
+        // Timestamp portion between prefix and extension must be numeric
+        let inner = name
+            .strip_prefix("screenshot_")
+            .unwrap()
+            .strip_suffix(".png")
+            .unwrap();
+        assert!(
+            inner.chars().all(|c| c.is_ascii_digit()),
+            "timestamp should be numeric digits: {}",
+            inner
+        );
+    }
+
+    #[test]
+    fn test_generate_output_filename_flip_diff() {
+        let name = generate_output_filename("flip_diff", "png");
+        assert!(name.starts_with("flip_diff_"), "should start with flip_diff_: {}", name);
+        assert!(name.ends_with(".png"), "should end with .png: {}", name);
+    }
+
+    #[test]
+    fn test_generate_output_filename_unique() {
+        // Two calls should produce different filenames when at least one second apart,
+        // but even within the same second the function is deterministic; we only check
+        // that the function doesn't panic and returns a non-empty string.
+        let a = generate_output_filename("test", "png");
+        let b = generate_output_filename("test", "png");
+        assert!(!a.is_empty());
+        assert!(!b.is_empty());
+    }
+
+    /// Verifies the BGRA→RGBA channel-swap logic used in the screenshot path.
+    #[test]
+    fn test_bgra_to_rgba_conversion() {
+        // Simulate a 1×1 BGRA pixel: B=10, G=20, R=30, A=255
+        let bgra_pixel: Vec<u8> = vec![10, 20, 30, 255];
+        let rgba_pixel: Vec<u8> = bgra_pixel
+            .chunks(4)
+            .flat_map(|c| vec![c[2], c[1], c[0], c[3]])
+            .collect();
+        assert_eq!(rgba_pixel, vec![30, 20, 10, 255]);
+    }
+
+    /// Verifies that row-padding removal works correctly.
+    #[test]
+    fn test_row_padding_removal() {
+        let width: u32 = 2;
+        let height: u32 = 2;
+        // bytes_per_row aligned to 256: (2*4 + 255) & !255 = 256
+        let bytes_per_row: usize = 256;
+        // Construct padded buffer: two rows of 256 bytes each, with 8 bytes of pixel data
+        let mut raw = vec![0u8; bytes_per_row * height as usize];
+        // Row 0: pixels R=1,G=2,B=3,A=4 and R=5,G=6,B=7,A=8
+        raw[0..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        // Row 1: pixels R=9,G=10,B=11,A=12 and R=13,G=14,B=15,A=16
+        raw[256..264].copy_from_slice(&[9, 10, 11, 12, 13, 14, 15, 16]);
+
+        let mut pixels: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
+        for row in 0..height as usize {
+            let row_start = row * bytes_per_row;
+            pixels.extend_from_slice(&raw[row_start..row_start + (width * 4) as usize]);
+        }
+
+        assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     }
 }

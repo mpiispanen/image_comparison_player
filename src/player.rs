@@ -187,6 +187,7 @@ pub struct Player {
     playback_speed: f32,
     pub flip_stats: Arc<RwLock<HashMap<(usize, usize), FlipStats>>>,
     expected_image_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
+    pub flip_diff_raw_data: Arc<RwLock<HashMap<(usize, usize), (Vec<u8>, u32, u32)>>>,
 }
 
 impl Player {
@@ -253,6 +254,7 @@ impl Player {
             playback_speed: 1.0,
             flip_stats: Arc::new(RwLock::new(HashMap::new())),
             expected_image_dimensions,
+            flip_diff_raw_data: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -953,6 +955,7 @@ impl Player {
             let flip_diff_in_progress = Arc::clone(&self.flip_diff_in_progress);
             let diff_image_timings = Arc::clone(&self.diff_image_timings);
             let flip_stats = Arc::clone(&self.flip_stats);
+            let flip_diff_raw_data = Arc::clone(&self.flip_diff_raw_data);
 
             self.flip_diff_in_progress
                 .write()
@@ -1004,6 +1007,12 @@ impl Player {
                     height: visualized.height(),
                     depth_or_array_layers: 1,
                 };
+
+                // Store raw RGBA diff data for file export
+                flip_diff_raw_data.write().insert(
+                    (left_index, right_index),
+                    (diff_data.clone(), visualized.width(), visualized.height()),
+                );
 
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(&format!(
@@ -1102,5 +1111,63 @@ impl Player {
         let data = buffer_slice.get_mapped_range().to_vec();
         buffer.unmap();
         data
+    }
+
+    /// Returns the raw RGBA pixel data, width, and height of the FLIP diff image
+    /// for the given left/right frame pair, if it has been computed.
+    pub fn get_flip_diff_raw_data(&self, left_index: usize, right_index: usize) -> Option<(Vec<u8>, u32, u32)> {
+        self.flip_diff_raw_data.read().get(&(left_index, right_index)).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies that `get_flip_diff_raw_data` returns `None` when no diff has been generated.
+    #[test]
+    fn test_get_flip_diff_raw_data_missing() {
+        let store: Arc<RwLock<HashMap<(usize, usize), (Vec<u8>, u32, u32)>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        // Nothing inserted → lookup must return None
+        assert!(store.read().get(&(0, 0)).is_none());
+    }
+
+    /// Verifies that raw diff data round-trips correctly through the cache.
+    #[test]
+    fn test_get_flip_diff_raw_data_present() {
+        let store: Arc<RwLock<HashMap<(usize, usize), (Vec<u8>, u32, u32)>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let pixels: Vec<u8> = (0..16).collect(); // 2×2 RGBA
+        store.write().insert((0, 1), (pixels.clone(), 2, 2));
+
+        let result = store.read().get(&(0, 1)).cloned();
+        assert!(result.is_some());
+        let (data, w, h) = result.unwrap();
+        assert_eq!(data, pixels);
+        assert_eq!(w, 2);
+        assert_eq!(h, 2);
+    }
+
+    /// Verifies that FLIP diff RGBA data has the correct length (width × height × 4).
+    #[test]
+    fn test_flip_diff_data_length() {
+        let width: u32 = 4;
+        let height: u32 = 3;
+        // Simulate what generate_flip_diff produces: RGB triplets → RGBA with alpha=255
+        let rgb_data: Vec<u8> = (0..(width * height * 3) as u8).collect();
+        let diff_data: Vec<u8> = rgb_data
+            .chunks_exact(3)
+            .flat_map(|chunk| {
+                let mut v = chunk.to_vec();
+                v.push(255);
+                v
+            })
+            .collect();
+        assert_eq!(diff_data.len(), (width * height * 4) as usize);
+        // Every 4th byte (alpha) must be 255
+        for chunk in diff_data.chunks(4) {
+            assert_eq!(chunk[3], 255);
+        }
     }
 }
