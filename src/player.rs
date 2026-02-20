@@ -1008,11 +1008,20 @@ impl Player {
                     depth_or_array_layers: 1,
                 };
 
-                // Store raw RGBA diff data for file export
-                flip_diff_raw_data.write().insert(
-                    (left_index, right_index),
-                    (diff_data.clone(), visualized.width(), visualized.height()),
-                );
+                // Store raw RGBA diff data for file export with simple eviction to bound memory usage
+                {
+                    const MAX_FLIP_DIFF_CACHE_ENTRIES: usize = 128;
+                    let mut flip_diff_map = flip_diff_raw_data.write();
+                    if flip_diff_map.len() >= MAX_FLIP_DIFF_CACHE_ENTRIES {
+                        if let Some(first_key) = flip_diff_map.keys().next().cloned() {
+                            flip_diff_map.remove(&first_key);
+                        }
+                    }
+                    flip_diff_map.insert(
+                        (left_index, right_index),
+                        (diff_data.clone(), visualized.width(), visualized.height()),
+                    );
+                }
 
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(&format!(

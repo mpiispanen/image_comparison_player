@@ -1125,9 +1125,11 @@ impl AppState {
 
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        // Capture screenshot if requested
+        // Capture screenshot if requested.
+        // Note: this performs a synchronous GPU readback which may cause a brief frame stutter.
         if self.screenshot_requested {
             self.screenshot_requested = false;
+            info!("Capturing screenshot (may cause brief frame stutter)");
             let width = self.size.width;
             let height = self.size.height;
             // Align bytes_per_row to wgpu's required 256-byte alignment
@@ -1158,31 +1160,35 @@ impl AppState {
             let (tx, rx) = mpsc::channel();
             buffer_slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
             self.device.poll(wgpu::Maintain::Wait);
-            if rx.recv().unwrap().is_ok() {
-                let raw = buffer_slice.get_mapped_range().to_vec();
-                buffer.unmap();
-                // Remove row padding and handle BGRA→RGBA conversion
-                let is_bgra = matches!(
-                    self.config.format,
-                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-                );
-                let mut pixels: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
-                for row in 0..height as usize {
-                    let row_start = row * bytes_per_row as usize;
-                    let row_data = &raw[row_start..row_start + (width * 4) as usize];
-                    if is_bgra {
-                        for chunk in row_data.chunks(4) {
-                            pixels.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+            match rx.recv() {
+                Ok(Ok(_)) => {
+                    let raw = buffer_slice.get_mapped_range().to_vec();
+                    buffer.unmap();
+                    // Remove row padding and handle BGRA→RGBA conversion
+                    let is_bgra = matches!(
+                        self.config.format,
+                        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+                    );
+                    let mut pixels: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
+                    for row in 0..height as usize {
+                        let row_start = row * bytes_per_row as usize;
+                        let row_data = &raw[row_start..row_start + (width * 4) as usize];
+                        if is_bgra {
+                            for chunk in row_data.chunks(4) {
+                                pixels.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+                            }
+                        } else {
+                            pixels.extend_from_slice(row_data);
                         }
-                    } else {
-                        pixels.extend_from_slice(row_data);
+                    }
+                    let path = generate_output_filename("screenshot", "png");
+                    match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8) {
+                        Ok(_) => info!("Screenshot saved to {}", path),
+                        Err(e) => warn!("Failed to save screenshot: {}", e),
                     }
                 }
-                let path = generate_output_filename("screenshot", "png");
-                match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8) {
-                    Ok(_) => info!("Screenshot saved to {}", path),
-                    Err(e) => warn!("Failed to save screenshot: {}", e),
-                }
+                Ok(Err(e)) => warn!("GPU buffer mapping failed for screenshot: {}", e),
+                Err(e) => warn!("Screenshot channel receive failed: {}", e),
             }
         }
 
@@ -1624,11 +1630,10 @@ impl AppState {
 /// Generate a timestamped output file path in the current directory.
 fn generate_output_filename(prefix: &str, extension: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
+    let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{}_{}.{}", prefix, ts, extension)
+        .unwrap_or_default();
+    format!("{}_{}.{:03}.{}", prefix, d.as_secs(), d.subsec_millis(), extension)
 }
 
 #[cfg(test)]
@@ -1640,17 +1645,26 @@ mod tests {
         let name = generate_output_filename("screenshot", "png");
         assert!(name.starts_with("screenshot_"), "should start with prefix: {}", name);
         assert!(name.ends_with(".png"), "should end with .png: {}", name);
-        // Timestamp portion between prefix and extension must be numeric
+        // Format is screenshot_{secs}.{millis}.png — strip prefix and extension
         let inner = name
             .strip_prefix("screenshot_")
             .unwrap()
             .strip_suffix(".png")
             .unwrap();
+        // Inner should be "{secs}.{millis}" — exactly one dot
+        let parts: Vec<&str> = inner.splitn(2, '.').collect();
+        assert_eq!(parts.len(), 2, "expected secs.millis format: {}", inner);
         assert!(
-            inner.chars().all(|c| c.is_ascii_digit()),
-            "timestamp should be numeric digits: {}",
-            inner
+            parts[0].chars().all(|c| c.is_ascii_digit()),
+            "seconds should be numeric digits: {}",
+            parts[0]
         );
+        assert!(
+            parts[1].chars().all(|c| c.is_ascii_digit()),
+            "millis should be numeric digits: {}",
+            parts[1]
+        );
+        assert_eq!(parts[1].len(), 3, "millis should be zero-padded to 3 digits: {}", parts[1]);
     }
 
     #[test]
@@ -1658,6 +1672,14 @@ mod tests {
         let name = generate_output_filename("flip_diff", "png");
         assert!(name.starts_with("flip_diff_"), "should start with flip_diff_: {}", name);
         assert!(name.ends_with(".png"), "should end with .png: {}", name);
+        // Format is flip_diff_{secs}.{millis}.png
+        let inner = name
+            .strip_prefix("flip_diff_")
+            .unwrap()
+            .strip_suffix(".png")
+            .unwrap();
+        let parts: Vec<&str> = inner.splitn(2, '.').collect();
+        assert_eq!(parts.len(), 2, "expected secs.millis format: {}", inner);
     }
 
     #[test]
