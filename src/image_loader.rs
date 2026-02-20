@@ -182,6 +182,36 @@ mod tests {
         .unwrap();
     }
 
+    fn write_tmp_input_txt(dir: &std::path::Path, content: &str) {
+        let path = dir.join("input.txt");
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+    }
+
+    // ── load_from_input_txt ────────────────────────────────────────────────
+
+    #[test]
+    fn test_load_from_input_txt_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        // Note: We don't need real image files; load_from_input_txt only records paths and doesn't validate file existence.
+        let content = "\
+file 'a.png'\n\
+duration 33333us\n\
+file 'b.png'\n\
+duration 33333us\n";
+        write_tmp_input_txt(dir.path(), content);
+
+        let input = dir.path().join("input.txt");
+        let (images, count) = load_from_input_txt(&input, 30.0).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(images.len(), 2);
+        // Verify cumulative timing
+        assert_eq!(images[0].1, 0);
+        assert_eq!(images[0].2, 33333);
+        assert_eq!(images[1].1, 33333);
+        assert_eq!(images[1].2, 66666);
+    }
+
     // --- load_image_paths_from_files tests ---
 
     #[test]
