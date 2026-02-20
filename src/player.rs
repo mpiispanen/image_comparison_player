@@ -404,7 +404,7 @@ impl Player {
             let mut left_texture = self.left_texture.lock();
             if left_texture
                 .as_ref()
-                .map_or(true, |t| !Arc::ptr_eq(t, &new_left))
+                .is_none_or(|t| !Arc::ptr_eq(t, &new_left))
             {
                 *left_texture = Some(new_left);
                 textures_updated = true;
@@ -416,7 +416,7 @@ impl Player {
             let mut right_texture = self.right_texture.lock();
             if right_texture
                 .as_ref()
-                .map_or(true, |t| !Arc::ptr_eq(t, &new_right))
+                .is_none_or(|t| !Arc::ptr_eq(t, &new_right))
             {
                 *right_texture = Some(new_right);
                 textures_updated = true;

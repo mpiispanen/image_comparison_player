@@ -19,6 +19,7 @@ use std::process;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default, Debug)]
+#[allow(dead_code)]
 struct UniformData {
     cursor_x: f32,
     cursor_y: f32,
@@ -147,8 +148,8 @@ impl CacheDebugWindow {
                     + i as f32 * (scaled_button_size + scaled_spacing);
                 let y = window_pos[1] + cursor_pos[1];
 
-                if frame % 5 == 0 {
-                    draw_list.add_text([x, y - 15.0], [1.0, 1.0, 1.0, 1.0], &frame.to_string());
+                if frame.is_multiple_of(5) {
+                    draw_list.add_text([x, y - 15.0], [1.0, 1.0, 1.0, 1.0], frame.to_string());
                 }
 
                 let y = y + 5.0;
@@ -292,11 +293,11 @@ impl CacheDebugWindow {
                     + i as f32 * (scaled_button_size + scaled_spacing);
                 let y = window_pos[1] + cursor_pos[1];
 
-                if left_frame % 5 == 0 {
+                if left_frame.is_multiple_of(5) {
                     draw_list.add_text(
                         [x, y - 15.0],
                         [1.0, 1.0, 1.0, 1.0],
-                        &left_frame.to_string(),
+                        left_frame.to_string(),
                     );
                 }
 
@@ -1415,7 +1416,7 @@ impl AppState {
             }
         };
 
-        let new_zoom_level = (self.zoom_level * zoom_factor).max(1.0).min(10.0);
+        let new_zoom_level = (self.zoom_level * zoom_factor).clamp(1.0, 10.0);
 
         // Calculate the mouse position relative to the image
         let image_width = self.size.width as f32;
