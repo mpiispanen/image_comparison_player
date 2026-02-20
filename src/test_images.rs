@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const TEST_FRAME_COUNT: usize = 30;
 pub const TEST_IMAGE_WIDTH: u32 = 640;
@@ -7,16 +8,27 @@ pub const TEST_IMAGE_HEIGHT: u32 = 480;
 const BAND_HEIGHT: u32 = 20;
 const BAND_OFFSET: usize = 10;
 
-/// Generates two sets of synthetic test images in temporary directories so that image
-/// sequence playback, image comparison and diff generation can be exercised without
-/// requiring real image files.
+/// Monotonically increasing counter so each call to `generate_test_images()`
+/// gets its own unique subdirectory, even within the same process.
+static INVOCATION_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Generates two sets of synthetic test images in a **unique** temporary directory
+/// so that image sequence playback, image comparison and diff generation can be
+/// exercised without requiring real image files.
+///
+/// Each call creates a fresh subdirectory under `$TMPDIR/image_comparison_player_test/<pid>_<n>/`
+/// (where `<n>` is a per-process monotonic counter), so concurrent calls and parallel
+/// unit tests never share or corrupt each other's files.
 ///
 /// Returns `(dir1_path, dir2_path)` where:
 /// * `dir1` contains frames with a red horizontal band moving down on a warm gradient.
 /// * `dir2` contains the same frames but the band is blue and offset by a few pixels,
 ///   so every frame produces a visible FLIP diff.
 pub fn generate_test_images() -> Result<(PathBuf, PathBuf)> {
-    let base = std::env::temp_dir().join("image_comparison_player_test");
+    let n = INVOCATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let base = std::env::temp_dir()
+        .join("image_comparison_player_test")
+        .join(format!("{}_{}", std::process::id(), n));
     let dir1 = base.join("dir1");
     let dir2 = base.join("dir2");
 

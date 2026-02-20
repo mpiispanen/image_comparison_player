@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::new("test_mode")
                 .long("test-mode")
                 .action(ArgAction::SetTrue)
+                .conflicts_with_all(["dir1", "dir2"])
                 .help("Run in testing mode with synthetically generated images (no real image files required)"),
         )
         .arg(
