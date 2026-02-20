@@ -1,5 +1,6 @@
 use clap::{Arg, ArgAction, Command};
 use log::{error, info};
+use std::time::{Duration, Instant};
 use winit::{
     event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -267,8 +268,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut initialized = false;
 
+    // Target ~60 fps. The event loop wakes on any window event (e.g. mouse
+    // movement) so the split line responds immediately, while sleeping between
+    // frames when idle to avoid burning CPU/GPU with an unthrottled busy loop.
+    let target_frame_time = Duration::from_secs_f32(1.0 / 60.0);
+    let mut next_frame_time = Instant::now();
+
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
+        *control_flow = ControlFlow::WaitUntil(next_frame_time);
 
         if initialized {
             app_state.handle_event(&window, &event);
@@ -294,6 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::RedrawRequested(_) => {
                 app_state.update();
                 initialized = true;
+                next_frame_time = Instant::now() + target_frame_time;
                 match app_state.render(&window) {
                     Ok(_) => {}
                     Err(e) => error!("Render error: {}", e),
