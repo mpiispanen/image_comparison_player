@@ -1126,10 +1126,12 @@ impl AppState {
         self.queue.submit(std::iter::once(encoder.finish()));
 
         // Capture screenshot if requested.
-        // Note: this performs a synchronous GPU readback which may cause a brief frame stutter.
+        // The GPU readback (copy + poll) must complete before output.present(), but the
+        // slow pixel-format conversion and PNG file-write are offloaded to a background
+        // thread so the render loop is unblocked as quickly as possible.
         if self.screenshot_requested {
             self.screenshot_requested = false;
-            info!("Capturing screenshot (may cause brief frame stutter)");
+            info!("Saving screenshot...");
             let width = self.size.width;
             let height = self.size.height;
             // Align bytes_per_row to wgpu's required 256-byte alignment
@@ -1159,33 +1161,38 @@ impl AppState {
             let buffer_slice = buffer.slice(..);
             let (tx, rx) = mpsc::channel();
             buffer_slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+            // Poll until the GPU has finished writing into the buffer.
             self.device.poll(wgpu::Maintain::Wait);
             match rx.recv() {
                 Ok(Ok(_)) => {
+                    // Copy the raw bytes out so the GPU buffer can be unmapped immediately.
                     let raw = buffer_slice.get_mapped_range().to_vec();
                     buffer.unmap();
-                    // Remove row padding and handle BGRA→RGBA conversion
                     let is_bgra = matches!(
                         self.config.format,
                         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
                     );
-                    let mut pixels: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
-                    for row in 0..height as usize {
-                        let row_start = row * bytes_per_row as usize;
-                        let row_data = &raw[row_start..row_start + (width * 4) as usize];
-                        if is_bgra {
-                            for chunk in row_data.chunks(4) {
-                                pixels.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
-                            }
-                        } else {
-                            pixels.extend_from_slice(row_data);
-                        }
-                    }
                     let path = generate_output_filename("screenshot", "png");
-                    match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8) {
-                        Ok(_) => info!("Screenshot saved to {}", path),
-                        Err(e) => warn!("Failed to save screenshot: {}", e),
-                    }
+                    // Pixel-format conversion and file I/O happen on a background thread
+                    // so the render loop can continue without further blocking.
+                    std::thread::spawn(move || {
+                        let mut pixels: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
+                        for row in 0..height as usize {
+                            let row_start = row * bytes_per_row as usize;
+                            let row_data = &raw[row_start..row_start + (width * 4) as usize];
+                            if is_bgra {
+                                for chunk in row_data.chunks(4) {
+                                    pixels.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+                                }
+                            } else {
+                                pixels.extend_from_slice(row_data);
+                            }
+                        }
+                        match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8) {
+                            Ok(_) => info!("Screenshot saved to {}", path),
+                            Err(e) => warn!("Failed to save screenshot: {}", e),
+                        }
+                    });
                 }
                 Ok(Err(e)) => warn!("GPU buffer mapping failed for screenshot: {}", e),
                 Err(e) => warn!("Screenshot channel receive failed: {}", e),
