@@ -313,16 +313,7 @@ impl Player {
     }
 
     fn get_current_index(&self, image_data: &[(String, u64, u64)], current_time: u64) -> usize {
-        // Binary search: find the last frame whose start time <= current_time.
-        // image_data is sorted by start time, so partition_point gives us the
-        // first index where start > current_time, meaning the frame we want is
-        // one before that (clamped to the last frame).
-        let pos = image_data.partition_point(|(_, start, _)| *start <= current_time);
-        if pos == 0 {
-            0
-        } else {
-            pos - 1
-        }
+        current_index_for_time(image_data, current_time)
     }
 
     pub fn toggle_play_pause(&self) {
@@ -368,27 +359,10 @@ impl Player {
     }
 
     fn find_next_time_point(&self, current_time: u64, direction: i64) -> u64 {
-        let sorted_times = &self.sorted_time_points;
-        let total_duration = *sorted_times.last().unwrap_or(&0);
-
         if direction > 0 {
-            // Find the first time point strictly greater than current_time
-            let pos = sorted_times.partition_point(|&t| t <= current_time);
-            if pos < sorted_times.len() {
-                sorted_times[pos]
-            } else {
-                // Wrap around to the beginning
-                sorted_times.first().cloned().unwrap_or(0)
-            }
+            next_time_point_forward(&self.sorted_time_points, current_time)
         } else {
-            // Find the last time point strictly less than current_time
-            let pos = sorted_times.partition_point(|&t| t < current_time);
-            if pos > 0 {
-                sorted_times[pos - 1]
-            } else {
-                // Wrap around to the end
-                sorted_times.last().cloned().unwrap_or(total_duration)
-            }
+            next_time_point_backward(&self.sorted_time_points, current_time)
         }
     }
 
@@ -1257,6 +1231,7 @@ mod tests {
 /// Convert an RGBA byte slice to an RGB byte vec, dropping the alpha channel.
 /// Pre-allocates the output buffer to avoid repeated reallocations.
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(rgba.len() % 4, 0, "RGBA buffer length must be a multiple of 4");
     let pixel_count = rgba.len() / 4;
     let mut rgb = Vec::with_capacity(pixel_count * 3);
     for chunk in rgba.chunks_exact(4) {
@@ -1270,6 +1245,7 @@ fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
 /// Convert an RGB byte vec to an RGBA byte vec, inserting 255 for the alpha channel.
 /// Pre-allocates the output buffer to avoid repeated reallocations.
 fn rgb_to_rgba(rgb: Vec<u8>) -> Vec<u8> {
+    debug_assert_eq!(rgb.len() % 3, 0, "RGB buffer length must be a multiple of 3");
     let pixel_count = rgb.len() / 3;
     let mut rgba = Vec::with_capacity(pixel_count * 4);
     for chunk in rgb.chunks_exact(3) {
@@ -1279,6 +1255,40 @@ fn rgb_to_rgba(rgb: Vec<u8>) -> Vec<u8> {
         rgba.push(255);
     }
     rgba
+}
+
+/// Binary-search into a sorted image-data slice and return the index of the
+/// frame that covers `current_time`.  `image_data` must be sorted by start time.
+fn current_index_for_time(image_data: &[(String, u64, u64)], current_time: u64) -> usize {
+    let pos = image_data.partition_point(|(_, start, _)| *start <= current_time);
+    if pos == 0 {
+        0
+    } else {
+        pos - 1
+    }
+}
+
+/// Return the first time point strictly after `current_time` in a sorted,
+/// deduplicated `sorted_times` slice, wrapping to the first entry when past the end.
+fn next_time_point_forward(sorted_times: &[u64], current_time: u64) -> u64 {
+    let pos = sorted_times.partition_point(|&t| t <= current_time);
+    if pos < sorted_times.len() {
+        sorted_times[pos]
+    } else {
+        sorted_times.first().cloned().unwrap_or(0)
+    }
+}
+
+/// Return the last time point strictly before `current_time` in a sorted,
+/// deduplicated `sorted_times` slice, wrapping to the last entry when at the start.
+fn next_time_point_backward(sorted_times: &[u64], current_time: u64) -> u64 {
+    let total_duration = *sorted_times.last().unwrap_or(&0);
+    let pos = sorted_times.partition_point(|&t| t < current_time);
+    if pos > 0 {
+        sorted_times[pos - 1]
+    } else {
+        sorted_times.last().cloned().unwrap_or(total_duration)
+    }
 }
 
 #[cfg(test)]
@@ -1348,90 +1358,62 @@ mod tests {
         assert_eq!(rgba_out.len(), pixel_count * 4);
     }
 
-    // ── get_current_index (via image_data binary search) ───────────────────
-
-    fn get_current_index_impl(image_data: &[(String, u64, u64)], current_time: u64) -> usize {
-        let pos = image_data.partition_point(|(_, start, _)| *start <= current_time);
-        if pos == 0 {
-            0
-        } else {
-            pos - 1
-        }
-    }
+    // ── get_current_index ──────────────────────────────────────────────────
 
     #[test]
     fn test_get_current_index_first_frame() {
         let data = make_image_data(&[100, 100, 100]);
-        assert_eq!(get_current_index_impl(&data, 0), 0);
-        assert_eq!(get_current_index_impl(&data, 50), 0);
-        assert_eq!(get_current_index_impl(&data, 99), 0);
+        assert_eq!(current_index_for_time(&data, 0), 0);
+        assert_eq!(current_index_for_time(&data, 50), 0);
+        assert_eq!(current_index_for_time(&data, 99), 0);
     }
 
     #[test]
     fn test_get_current_index_middle_frame() {
         let data = make_image_data(&[100, 100, 100]);
-        assert_eq!(get_current_index_impl(&data, 100), 1);
-        assert_eq!(get_current_index_impl(&data, 150), 1);
-        assert_eq!(get_current_index_impl(&data, 199), 1);
+        assert_eq!(current_index_for_time(&data, 100), 1);
+        assert_eq!(current_index_for_time(&data, 150), 1);
+        assert_eq!(current_index_for_time(&data, 199), 1);
     }
 
     #[test]
     fn test_get_current_index_last_frame() {
         let data = make_image_data(&[100, 100, 100]);
-        assert_eq!(get_current_index_impl(&data, 200), 2);
-        assert_eq!(get_current_index_impl(&data, 250), 2);
+        assert_eq!(current_index_for_time(&data, 200), 2);
+        assert_eq!(current_index_for_time(&data, 250), 2);
         // At or past the end, returns last frame
-        assert_eq!(get_current_index_impl(&data, 300), 2);
+        assert_eq!(current_index_for_time(&data, 300), 2);
     }
 
-    // ── find_next_time_point (via sorted_time_points binary search) ─────────
-
-    fn next_time_forward(sorted_times: &[u64], current_time: u64) -> u64 {
-        let pos = sorted_times.partition_point(|&t| t <= current_time);
-        if pos < sorted_times.len() {
-            sorted_times[pos]
-        } else {
-            sorted_times.first().cloned().unwrap_or(0)
-        }
-    }
-
-    fn next_time_backward(sorted_times: &[u64], current_time: u64) -> u64 {
-        let total_duration = *sorted_times.last().unwrap_or(&0);
-        let pos = sorted_times.partition_point(|&t| t < current_time);
-        if pos > 0 {
-            sorted_times[pos - 1]
-        } else {
-            sorted_times.last().cloned().unwrap_or(total_duration)
-        }
-    }
+    // ── find_next_time_point ───────────────────────────────────────────────
 
     #[test]
     fn test_find_next_forward_wraps_at_end() {
         let times = vec![0u64, 100, 200];
         // Past the last point → wraps to start
-        assert_eq!(next_time_forward(&times, 200), 0);
+        assert_eq!(next_time_point_forward(&times, 200), 0);
     }
 
     #[test]
     fn test_find_next_forward_basic() {
         let times = vec![0u64, 100, 200];
-        assert_eq!(next_time_forward(&times, 0), 100);
-        assert_eq!(next_time_forward(&times, 50), 100);
-        assert_eq!(next_time_forward(&times, 100), 200);
+        assert_eq!(next_time_point_forward(&times, 0), 100);
+        assert_eq!(next_time_point_forward(&times, 50), 100);
+        assert_eq!(next_time_point_forward(&times, 100), 200);
     }
 
     #[test]
     fn test_find_next_backward_wraps_at_start() {
         let times = vec![0u64, 100, 200];
         // At or before start → wraps to end
-        assert_eq!(next_time_backward(&times, 0), 200);
+        assert_eq!(next_time_point_backward(&times, 0), 200);
     }
 
     #[test]
     fn test_find_next_backward_basic() {
         let times = vec![0u64, 100, 200];
-        assert_eq!(next_time_backward(&times, 200), 100);
-        assert_eq!(next_time_backward(&times, 150), 100);
-        assert_eq!(next_time_backward(&times, 100), 0);
+        assert_eq!(next_time_point_backward(&times, 200), 100);
+        assert_eq!(next_time_point_backward(&times, 150), 100);
+        assert_eq!(next_time_point_backward(&times, 100), 0);
     }
 }
