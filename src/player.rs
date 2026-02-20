@@ -1104,3 +1104,71 @@ impl Player {
         data
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{PriorityTextureLoadQueue, TextureLoadRequest};
+
+    #[test]
+    fn test_priority_queue_push_and_pop() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+
+        let popped = queue.pop();
+        assert!(popped.is_some());
+        let req = popped.unwrap();
+        assert_eq!(req.index, 0);
+        assert!(req.is_left);
+    }
+
+    #[test]
+    fn test_priority_queue_empty_pop_returns_none() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_priority_queue_deduplication() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+
+        assert!(queue.pop().is_some());
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_priority_queue_left_and_right_are_distinct_keys() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, false));
+
+        assert!(queue.pop().is_some());
+        assert!(queue.pop().is_some());
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_priority_queue_contains() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        assert!(!queue.contains(&(0, true)));
+
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        assert!(queue.contains(&(0, true)));
+
+        queue.pop();
+        assert!(!queue.contains(&(0, true)));
+    }
+
+    #[test]
+    fn test_priority_queue_maintains_fifo_order() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        queue.push(TextureLoadRequest::new("frame_002.png".to_string(), 1, true));
+        queue.push(TextureLoadRequest::new("frame_003.png".to_string(), 2, true));
+
+        assert_eq!(queue.pop().unwrap().index, 0);
+        assert_eq!(queue.pop().unwrap().index, 1);
+        assert_eq!(queue.pop().unwrap().index, 2);
+    }
+}
