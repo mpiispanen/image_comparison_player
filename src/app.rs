@@ -472,7 +472,7 @@ impl AppState {
             let raw = app_config.dir1.as_deref()
                 .ok_or("dir1 is missing: provide --dir1 or --images1")?;
             let dir = std::fs::canonicalize(raw)?;
-            image_loader::load_image_paths(dir.to_str().unwrap(), app_config.fps)?
+            image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
         };
         let (images2, image_len2) = if let Some(files) = &app_config.images2 {
             image_loader::load_image_paths_from_files(files, app_config.fps)?
@@ -480,7 +480,7 @@ impl AppState {
             let raw = app_config.dir2.as_deref()
                 .ok_or("dir2 is missing: provide --dir2 or --images2")?;
             let dir = std::fs::canonicalize(raw)?;
-            image_loader::load_image_paths(dir.to_str().unwrap(), app_config.fps)?
+            image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
         };
         debug!(
             "Loaded {} images from input1 and {} images from input2",
