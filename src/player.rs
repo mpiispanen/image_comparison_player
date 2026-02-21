@@ -1179,11 +1179,6 @@ mod tests {
             assert_eq!(chunk[3], 255);
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PriorityTextureLoadQueue, TextureLoadRequest};
 
     #[test]
     fn test_priority_queue_push_and_pop() {
