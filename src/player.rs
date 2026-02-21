@@ -119,6 +119,7 @@ type TextureHolder = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
 
 type FlipDiffCache = Arc<RwLock<HashMap<(usize, usize), Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
 type FlipDiffInProgress = Arc<RwLock<HashSet<(usize, usize)>>>;
+type FlipDiffRawData = Arc<RwLock<HashMap<(usize, usize), (Vec<u8>, u32, u32)>>>;
 
 pub struct PlayerConfig {
     pub image_data1: Vec<(String, u64, u64)>,
@@ -187,7 +188,7 @@ pub struct Player {
     playback_speed: f32,
     pub flip_stats: Arc<RwLock<HashMap<(usize, usize), FlipStats>>>,
     expected_image_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
-    pub flip_diff_raw_data: Arc<RwLock<HashMap<(usize, usize), (Vec<u8>, u32, u32)>>>,
+    pub flip_diff_raw_data: FlipDiffRawData,
 }
 
 impl Player {
@@ -1136,8 +1137,7 @@ mod tests {
     /// Verifies that `get_flip_diff_raw_data` returns `None` when no diff has been generated.
     #[test]
     fn test_get_flip_diff_raw_data_missing() {
-        let store: Arc<RwLock<HashMap<(usize, usize), (Vec<u8>, u32, u32)>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let store: FlipDiffRawData = Arc::new(RwLock::new(HashMap::new()));
         // Nothing inserted → lookup must return None
         assert!(store.read().get(&(0, 0)).is_none());
     }
@@ -1145,8 +1145,7 @@ mod tests {
     /// Verifies that raw diff data round-trips correctly through the cache.
     #[test]
     fn test_get_flip_diff_raw_data_present() {
-        let store: Arc<RwLock<HashMap<(usize, usize), (Vec<u8>, u32, u32)>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let store: FlipDiffRawData = Arc::new(RwLock::new(HashMap::new()));
         let pixels: Vec<u8> = (0..16).collect(); // 2×2 RGBA
         store.write().insert((0, 1), (pixels.clone(), 2, 2));
 
