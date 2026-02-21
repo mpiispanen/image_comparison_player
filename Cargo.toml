@@ -2,6 +2,7 @@
 name = "image_comparison_player"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 
 [dependencies]
 wgpu = "0.17"
@@ -29,3 +30,10 @@ regex = "1.10.6"
 [[bin]]
 name = "image_comparison_player"
 path = "src/main.rs"
+
+# Patch freetype-rs 0.26.0 to fix a null-pointer panic in Bitmap::buffer()
+# that is caught by Rust 1.81+ UB checks (slice::from_raw_parts requires
+# a non-null pointer even for zero-length slices).
+# Dependency chain: winit -> sctk-adwaita -> crossfont -> freetype-rs
+[patch.crates-io]
+freetype-rs = { path = "vendor/freetype-rs" }

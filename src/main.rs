@@ -266,3 +266,33 @@ fn parse_window_size(size: &str) -> Result<(f32, f32), String> {
     let height = parts[1].parse::<f32>().map_err(|_| "Invalid height")?;
     Ok((width, height))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_window_size;
+
+    #[test]
+    fn test_parse_window_size_valid() {
+        assert_eq!(parse_window_size("1920x1080"), Ok((1920.0, 1080.0)));
+        assert_eq!(parse_window_size("800x600"), Ok((800.0, 600.0)));
+        assert_eq!(parse_window_size("3840x2160"), Ok((3840.0, 2160.0)));
+    }
+
+    #[test]
+    fn test_parse_window_size_missing_separator() {
+        assert!(parse_window_size("1920").is_err());
+        assert!(parse_window_size("1920 1080").is_err());
+    }
+
+    #[test]
+    fn test_parse_window_size_missing_dimension() {
+        assert!(parse_window_size("x1080").is_err());
+        assert!(parse_window_size("1920x").is_err());
+    }
+
+    #[test]
+    fn test_parse_window_size_non_numeric() {
+        assert!(parse_window_size("WIDTHxHEIGHT").is_err());
+        assert!(parse_window_size("1920xabc").is_err());
+    }
+}
