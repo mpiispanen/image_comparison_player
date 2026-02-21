@@ -404,7 +404,7 @@ impl Player {
             let mut left_texture = self.left_texture.lock();
             if left_texture
                 .as_ref()
-                .map_or(true, |t| !Arc::ptr_eq(t, &new_left))
+                .is_none_or(|t| !Arc::ptr_eq(t, &new_left))
             {
                 *left_texture = Some(new_left);
                 textures_updated = true;
@@ -416,7 +416,7 @@ impl Player {
             let mut right_texture = self.right_texture.lock();
             if right_texture
                 .as_ref()
-                .map_or(true, |t| !Arc::ptr_eq(t, &new_right))
+                .is_none_or(|t| !Arc::ptr_eq(t, &new_right))
             {
                 *right_texture = Some(new_right);
                 textures_updated = true;
@@ -1102,5 +1102,73 @@ impl Player {
         let data = buffer_slice.get_mapped_range().to_vec();
         buffer.unmap();
         data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PriorityTextureLoadQueue, TextureLoadRequest};
+
+    #[test]
+    fn test_priority_queue_push_and_pop() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+
+        let popped = queue.pop();
+        assert!(popped.is_some());
+        let req = popped.unwrap();
+        assert_eq!(req.index, 0);
+        assert!(req.is_left);
+    }
+
+    #[test]
+    fn test_priority_queue_empty_pop_returns_none() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_priority_queue_deduplication() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+
+        assert!(queue.pop().is_some());
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_priority_queue_left_and_right_are_distinct_keys() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, false));
+
+        assert!(queue.pop().is_some());
+        assert!(queue.pop().is_some());
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_priority_queue_contains() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        assert!(!queue.contains(&(0, true)));
+
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        assert!(queue.contains(&(0, true)));
+
+        queue.pop();
+        assert!(!queue.contains(&(0, true)));
+    }
+
+    #[test]
+    fn test_priority_queue_maintains_fifo_order() {
+        let queue = PriorityTextureLoadQueue::new(10, 10);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        queue.push(TextureLoadRequest::new("frame_002.png".to_string(), 1, true));
+        queue.push(TextureLoadRequest::new("frame_003.png".to_string(), 2, true));
+
+        assert_eq!(queue.pop().unwrap().index, 0);
+        assert_eq!(queue.pop().unwrap().index, 1);
+        assert_eq!(queue.pop().unwrap().index, 2);
     }
 }
