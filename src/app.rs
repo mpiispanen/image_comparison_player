@@ -17,8 +17,9 @@ use winit::window::Window as WinitWindow;
 use winit::event::TouchPhase;
 use std::process;
 
+#[allow(dead_code)]
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug)]
 struct UniformData {
     cursor_x: f32,
     cursor_y: f32,
@@ -30,6 +31,12 @@ struct UniformData {
     zoom_center: [f32; 2],
     window_size: [f32; 2],
 }
+
+// SAFETY: UniformData is #[repr(C)] and all fields are f32 or [f32; N].
+// Every field has 4-byte size and 4-byte alignment, so #[repr(C)] introduces
+// no padding bytes between fields, making the struct valid for Pod.
+unsafe impl bytemuck::Zeroable for UniformData {}
+unsafe impl bytemuck::Pod for UniformData {}
 
 struct CacheDebugWindow {
     is_open: bool,
@@ -147,8 +154,8 @@ impl CacheDebugWindow {
                     + i as f32 * (scaled_button_size + scaled_spacing);
                 let y = window_pos[1] + cursor_pos[1];
 
-                if frame % 5 == 0 {
-                    draw_list.add_text([x, y - 15.0], [1.0, 1.0, 1.0, 1.0], &frame.to_string());
+                if frame.is_multiple_of(5) {
+                    draw_list.add_text([x, y - 15.0], [1.0, 1.0, 1.0, 1.0], frame.to_string());
                 }
 
                 let y = y + 5.0;
@@ -292,11 +299,11 @@ impl CacheDebugWindow {
                     + i as f32 * (scaled_button_size + scaled_spacing);
                 let y = window_pos[1] + cursor_pos[1];
 
-                if left_frame % 5 == 0 {
+                if left_frame.is_multiple_of(5) {
                     draw_list.add_text(
                         [x, y - 15.0],
                         [1.0, 1.0, 1.0, 1.0],
-                        &left_frame.to_string(),
+                        left_frame.to_string(),
                     );
                 }
 
@@ -1497,7 +1504,7 @@ impl AppState {
             }
         };
 
-        let new_zoom_level = (self.zoom_level * zoom_factor).max(1.0).min(10.0);
+        let new_zoom_level = (self.zoom_level * zoom_factor).clamp(1.0, 10.0);
 
         // Calculate the mouse position relative to the image
         let image_width = self.size.width as f32;
