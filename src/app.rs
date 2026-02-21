@@ -19,7 +19,7 @@ use std::process;
 
 #[allow(dead_code)]
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug)]
 struct UniformData {
     cursor_x: f32,
     cursor_y: f32,
@@ -31,6 +31,12 @@ struct UniformData {
     zoom_center: [f32; 2],
     window_size: [f32; 2],
 }
+
+// SAFETY: UniformData is #[repr(C)] and all fields are f32 or [f32; N].
+// Every field has 4-byte size and 4-byte alignment, so #[repr(C)] introduces
+// no padding bytes between fields, making the struct valid for Pod.
+unsafe impl bytemuck::Zeroable for UniformData {}
+unsafe impl bytemuck::Pod for UniformData {}
 
 struct CacheDebugWindow {
     is_open: bool,
