@@ -3,7 +3,7 @@ use crate::player::Player;
 use crate::player::PlayerConfig;
 use imgui::Condition;
 use imgui::Ui;
-use log::{debug, info}; // Add error to the import list
+use log::{debug, info, warn}; // Add error to the import list
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
 use winit::event::WindowEvent;
@@ -500,8 +500,9 @@ impl AppState {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width,
-            height: size.height,
+            // Round to even to satisfy Wayland buffer_scale requirements on HiDPI displays
+            width: (size.width + 1) & !1,
+            height: (size.height + 1) & !1,
             present_mode: surface_caps.present_modes[0],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -827,9 +828,16 @@ impl AppState {
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
+            // Keep the real window size for coordinate math and event handling.
             self.size = new_size;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
+            // Round each dimension up to the nearest even number so that the
+            // surface size is always a valid integer multiple of the HiDPI
+            // buffer_scale (typically 2 on high-DPI Wayland compositors).
+            // An odd physical size causes wl_surface protocol error 2 from
+            // sctk-adwaita decorations, which loses the Vulkan surface and
+            // makes wgpu's Surface::configure panic.
+            self.config.width = (new_size.width + 1) & !1;
+            self.config.height = (new_size.height + 1) & !1;
             self.surface.configure(&self.device, &self.config);
         }
     }
@@ -881,7 +889,17 @@ impl AppState {
         debug!("Left texture: {:?}", left_texture.size());
         debug!("Right texture: {:?}", right_texture.size());
 
-        let output = self.surface.get_current_texture()?;
+        let output = match self.surface.get_current_texture() {
+            Ok(tex) => tex,
+            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
+                // Surface lost (e.g. due to a Wayland compositor error on resize).
+                // Reconfigure and skip this frame; the next frame will succeed.
+                warn!("Surface lost/outdated, reconfiguring and skipping frame");
+                self.surface.configure(&self.device, &self.config);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
