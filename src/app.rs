@@ -17,9 +17,9 @@ use winit::window::Window as WinitWindow;
 use winit::event::TouchPhase;
 use std::process;
 
+#[allow(dead_code)]
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default, Debug)]
-#[allow(dead_code)]
 struct UniformData {
     cursor_x: f32,
     cursor_y: f32,
