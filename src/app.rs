@@ -108,9 +108,61 @@ impl CacheDebugWindow {
                         available_width: desired_width,
                     },
                 );
+                ui.dummy([0.0, 10.0]);
+                self.draw_cache_metrics(ui, player);
 
                 self.size = ui.window_size();
             });
+    }
+
+    fn draw_cache_metrics(&self, ui: &Ui, player: &Player) {
+        use std::sync::atomic::Ordering;
+        let fmt_rate = |hits: u64, misses: u64| -> String {
+            let total = hits + misses;
+            if total == 0 {
+                "N/A".to_string()
+            } else {
+                format!("{:.1}%", 100.0 * hits as f64 / total as f64)
+            }
+        };
+
+        let lm = &player.texture_cache_left.metrics;
+        let rm = &player.texture_cache_right.metrics;
+        let dm = &player.flip_diff_cache_metrics;
+
+        let l_hits = lm.hits.load(Ordering::Relaxed);
+        let l_misses = lm.misses.load(Ordering::Relaxed);
+        let l_evictions = lm.evictions.load(Ordering::Relaxed);
+
+        let r_hits = rm.hits.load(Ordering::Relaxed);
+        let r_misses = rm.misses.load(Ordering::Relaxed);
+        let r_evictions = rm.evictions.load(Ordering::Relaxed);
+
+        let d_hits = dm.hits.load(Ordering::Relaxed);
+        let d_misses = dm.misses.load(Ordering::Relaxed);
+        let d_evictions = dm.evictions.load(Ordering::Relaxed);
+
+        ui.text(format!(
+            "L: hit rate={} hits={} misses={} evictions={}",
+            fmt_rate(l_hits, l_misses),
+            l_hits,
+            l_misses,
+            l_evictions
+        ));
+        ui.text(format!(
+            "R: hit rate={} hits={} misses={} evictions={}",
+            fmt_rate(r_hits, r_misses),
+            r_hits,
+            r_misses,
+            r_evictions
+        ));
+        ui.text(format!(
+            "D: hit rate={} hits={} misses={} evictions={}",
+            fmt_rate(d_hits, d_misses),
+            d_hits,
+            d_misses,
+            d_evictions
+        ));
     }
 
     fn draw_cache_row(
@@ -167,7 +219,7 @@ impl CacheDebugWindow {
 
                 let y = y + 5.0;
 
-                let color = if cache.read().contains_key(&frame) {
+                let color = if cache.contains(frame) {
                     [0.0, 1.0, 0.0, 1.0]
                 } else if player.texture_load_queue.lock().contains(&(frame, is_left)) {
                     [1.0, 1.0, 0.0, 1.0]
