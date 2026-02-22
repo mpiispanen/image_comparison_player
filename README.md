@@ -71,6 +71,29 @@ Mouse controls:
 
 ## Input Options
 
+## Supported Image Formats
+
+The application uses the [image](https://crates.io/crates/image) crate for decoding images, and supports all formats it enables by default:
+
+| Extension(s)       | Format            |
+|--------------------|-------------------|
+| `.png`             | PNG               |
+| `.jpg`, `.jpeg`    | JPEG              |
+| `.bmp`             | BMP               |
+| `.gif`             | GIF               |
+| `.tiff`, `.tif`    | TIFF              |
+| `.webp`            | WebP              |
+| `.ico`             | ICO               |
+| `.hdr`             | Radiance HDR      |
+| `.ppm`, `.pbm`, `.pgm`, `.pam` | PNM (Netpbm) |
+| `.tga`             | TGA (Targa)       |
+| `.ff`              | Farbfeld          |
+| `.exr`             | OpenEXR           |
+| `.qoi`             | QOI               |
+| `.dds`             | DDS               |
+
+## Input File Options
+
 The application supports three methods of specifying input images:
 
 1. Directory of Images:

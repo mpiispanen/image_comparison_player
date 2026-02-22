@@ -134,7 +134,14 @@ fn is_image_file(path: &Path) -> bool {
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     matches!(
         extension.to_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "bmp"
+        // Common formats
+        "jpg" | "jpeg" | "png" | "bmp" | "gif" | "webp"
+            // TIFF
+            | "tiff" | "tif"
+            // PNM / Netpbm
+            | "ppm" | "pbm" | "pgm" | "pam"
+            // Other formats supported by the image crate
+            | "dds" | "exr" | "ff" | "hdr" | "ico" | "qoi" | "tga"
     )
 }
 
@@ -281,13 +288,27 @@ duration 33333us\n";
         assert!(is_image_file(Path::new("image.jpeg")));
         assert!(is_image_file(Path::new("image.png")));
         assert!(is_image_file(Path::new("image.bmp")));
+        assert!(is_image_file(Path::new("image.gif")));
+        assert!(is_image_file(Path::new("image.tiff")));
+        assert!(is_image_file(Path::new("image.tif")));
+        assert!(is_image_file(Path::new("image.webp")));
+        assert!(is_image_file(Path::new("image.ico")));
+        assert!(is_image_file(Path::new("image.hdr")));
+        assert!(is_image_file(Path::new("image.ppm")));
+        assert!(is_image_file(Path::new("image.pbm")));
+        assert!(is_image_file(Path::new("image.pgm")));
+        assert!(is_image_file(Path::new("image.pam")));
+        assert!(is_image_file(Path::new("image.tga")));
+        assert!(is_image_file(Path::new("image.ff")));
+        assert!(is_image_file(Path::new("image.exr")));
+        assert!(is_image_file(Path::new("image.qoi")));
+        assert!(is_image_file(Path::new("image.dds")));
     }
 
     #[test]
     fn test_is_image_file_invalid_extensions() {
         assert!(!is_image_file(Path::new("image.txt")));
         assert!(!is_image_file(Path::new("image.mp4")));
-        assert!(!is_image_file(Path::new("image.gif")));
         assert!(!is_image_file(Path::new("image")));
     }
 
@@ -297,6 +318,8 @@ duration 33333us\n";
         assert!(is_image_file(Path::new("image.PNG")));
         assert!(is_image_file(Path::new("image.JPEG")));
         assert!(is_image_file(Path::new("image.BMP")));
+        assert!(is_image_file(Path::new("image.PPM")));
+        assert!(is_image_file(Path::new("image.TIFF")));
     }
 
     // --- load_from_directory tests ---
