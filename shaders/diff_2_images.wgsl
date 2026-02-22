@@ -20,6 +20,8 @@ struct Uniforms {
     zoom_level: f32,
     zoom_center: vec2<f32>,
     window_size: vec2<f32>,
+    show_image1: f32,
+    show_image2: f32,
 }
 
 @group(1) @binding(0)
@@ -68,16 +70,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let color1 = textureSample(t_diffuse1, s_diffuse1, clamped_tex_coords);
     let color2 = textureSample(t_diffuse2, s_diffuse2, clamped_tex_coords);
-    
-    let t = step(uniforms.cursor_x, in.tex_coords.x);
-    let mixed_color = mix(color1, color2, t);
+
+    // Determine split factor based on which images are enabled
+    let both_shown = uniforms.show_image1 * uniforms.show_image2;
+    let only_image2 = (1.0 - uniforms.show_image1) * uniforms.show_image2;
+    let t = both_shown * step(uniforms.cursor_x, in.tex_coords.x) + only_image2;
+
+    let mixed_color = mix(color1 * uniforms.show_image1, color2 * uniforms.show_image2, t);
 
     // Calculate alpha based on whether the zoomed coordinates are within bounds
     let alpha = 1.0 - step(1.0, max(abs(zoomed_tex_coords.x - 0.5), abs(zoomed_tex_coords.y - 0.5)) * 2.0);
 
-    // Add a narrow white line at the border
+    // Add a narrow white line at the border (only when both images are shown)
     let line_width = 0.0002; // Adjust this value to change the line width
-    if (abs(in.tex_coords.x - uniforms.cursor_x) < line_width) {
+    if (both_shown > 0.5 && abs(in.tex_coords.x - uniforms.cursor_x) < line_width) {
         return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the line
     }
 
