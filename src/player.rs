@@ -658,8 +658,8 @@ impl Player {
 
         // Preload behind
         for i in 1..=self.config.preload_behind {
-            let preload_index1 = (index1 + frame_count1 - i) % frame_count1;
-            let preload_index2 = (index2 + frame_count2 - i) % frame_count2;
+            let preload_index1 = (index1 + frame_count1 - i % frame_count1) % frame_count1;
+            let preload_index2 = (index2 + frame_count2 - i % frame_count2) % frame_count2;
             self.ensure_texture_loaded(preload_index1, true);
             self.ensure_texture_loaded(preload_index2, false);
         }
@@ -683,8 +683,8 @@ impl Player {
 
         // Preload behind
         for i in 1..=self.config.diff_preload_behind {
-            let preload_index1 = (index1 + frame_count1 - i) % frame_count1;
-            let preload_index2 = (index2 + frame_count2 - i) % frame_count2;
+            let preload_index1 = (index1 + frame_count1 - i % frame_count1) % frame_count1;
+            let preload_index2 = (index2 + frame_count2 - i % frame_count2) % frame_count2;
             self.ensure_flip_diff_generated(preload_index1, preload_index2);
         }
     }
