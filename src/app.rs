@@ -3,7 +3,7 @@ use crate::player::Player;
 use crate::player::PlayerConfig;
 use imgui::Condition;
 use imgui::Ui;
-use log::{debug, info}; // Add error to the import list
+use log::{debug, info, warn}; // Add error to the import list
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
 use winit::event::WindowEvent;
@@ -41,6 +41,11 @@ unsafe impl bytemuck::Pod for UniformData {}
 struct CacheDebugWindow {
     is_open: bool,
     size: [f32; 2],
+}
+
+fn round_up_to_multiple(value: u32, multiple: u32) -> u32 {
+    let m = multiple.max(1);
+    value.div_ceil(m) * m
 }
 
 impl CacheDebugWindow {
@@ -449,6 +454,7 @@ pub struct AppState {
     config: wgpu::SurfaceConfiguration,
     zoom_center_offset: (f32, f32),
     zoom_move_speed: f32,
+    surface_scale: u32,
 }
 
 impl AppState {
@@ -461,6 +467,7 @@ impl AppState {
         let dir2 = std::fs::canonicalize(app_config.dir2)?;
 
         let size = window.inner_size();
+        let surface_scale = window.scale_factor().ceil() as u32;
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -500,8 +507,10 @@ impl AppState {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width,
-            height: size.height,
+            // Round up to the nearest multiple of the Wayland buffer_scale so that the
+            // surface size is always valid on HiDPI compositors (scale 2, 3, …).
+            width: round_up_to_multiple(size.width, surface_scale),
+            height: round_up_to_multiple(size.height, surface_scale),
             present_mode: surface_caps.present_modes[0],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -822,14 +831,19 @@ impl AppState {
             config,
             zoom_center_offset: (0.0, 0.0),
             zoom_move_speed: 0.01,
+            surface_scale,
         })
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
+            // Keep the real window size for coordinate math and event handling.
             self.size = new_size;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
+            // Round up to the nearest multiple of surface_scale so that the
+            // surface size is always a valid integer multiple of the Wayland
+            // buffer_scale on any HiDPI compositor (scale 2, 3, …).
+            self.config.width = round_up_to_multiple(new_size.width, self.surface_scale);
+            self.config.height = round_up_to_multiple(new_size.height, self.surface_scale);
             self.surface.configure(&self.device, &self.config);
         }
     }
@@ -881,7 +895,17 @@ impl AppState {
         debug!("Left texture: {:?}", left_texture.size());
         debug!("Right texture: {:?}", right_texture.size());
 
-        let output = self.surface.get_current_texture()?;
+        let output = match self.surface.get_current_texture() {
+            Ok(tex) => tex,
+            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
+                // Surface lost (e.g. due to a Wayland compositor error on resize).
+                // Reconfigure and skip this frame; the next frame will succeed.
+                warn!("Surface lost/outdated, reconfiguring and skipping frame");
+                self.surface.configure(&self.device, &self.config);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -901,12 +925,9 @@ impl AppState {
             (scaled_width, scaled_height)
         };
 
-        let x_offset = (window_size.width as f32 - render_width) / 2.0;
-        let y_offset = (window_size.height as f32 - render_height) / 2.0;
-
         let uniforms = UniformData {
-            cursor_x: (self.cursor_x - x_offset) / render_width,
-            cursor_y: (self.cursor_y - y_offset) / render_height,
+            cursor_x: self.cursor_x / render_width,
+            cursor_y: self.cursor_y / render_height,
             image1_size: [image_width, image_height],
             image2_size: [image_width, image_height],
             flip_diff_size: [image_width, image_height],
@@ -1103,7 +1124,7 @@ impl AppState {
                 ];
 
                 let uniforms = UniformData {
-                    cursor_x: self.cursor_x / self.size.width as f32,
+                    cursor_x: self.cursor_x / render_width,
                     cursor_y: mouse_y / window_height,
                     image1_size: [left_texture.width() as f32, left_texture.height() as f32],
                     image2_size: [right_texture.width() as f32, right_texture.height() as f32],
@@ -1296,6 +1317,15 @@ impl AppState {
         {
             self.resize(*size);
             debug!("Window resized to: {:?}", size);
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: winit::event::WindowEvent::ScaleFactorChanged { scale_factor, new_inner_size },
+            ..
+        } = event
+        {
+            self.surface_scale = scale_factor.ceil() as u32;
+            self.resize(**new_inner_size);
         }
 
         if let winit::event::Event::WindowEvent {
