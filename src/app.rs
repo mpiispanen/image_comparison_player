@@ -463,6 +463,7 @@ pub struct AppState {
     status_message: Option<(String, Instant)>,
     screenshot_result_rx: Arc<Mutex<mpsc::Receiver<String>>>,
     screenshot_result_tx: mpsc::Sender<String>,
+    single_image_mode: bool,
 }
 
 impl AppState {
@@ -482,12 +483,14 @@ impl AppState {
         };
         let (images2, image_len2) = if let Some(files) = &app_config.images2 {
             image_loader::load_image_paths_from_files(files, app_config.fps)?
-        } else {
-            let raw = app_config.dir2.as_deref()
-                .ok_or("dir2 is missing: provide --dir2 or --images2")?;
+        } else if let Some(raw) = app_config.dir2.as_deref() {
             let dir = std::fs::canonicalize(raw)?;
             image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
+        } else {
+            (images1.clone(), image_len1)
         };
+        let single_image_mode =
+            app_config.dir2.is_none() && app_config.images2.as_ref().is_none_or(|v| v.is_empty());
         debug!(
             "Loaded {} images from input1 and {} images from input2",
             image_len1, image_len2
@@ -786,6 +789,7 @@ impl AppState {
                 num_flip_diff_threads: app_config.num_flip_diff_threads,
                 diff_preload_ahead: app_config.diff_preload_ahead,
                 diff_preload_behind: app_config.diff_preload_behind,
+                single_image_mode,
             },
             Arc::clone(&queue),
             Arc::clone(&device),
@@ -867,6 +871,7 @@ impl AppState {
             status_message: None,
             screenshot_result_tx,
             screenshot_result_rx: Arc::new(Mutex::new(screenshot_result_rx)),
+            single_image_mode,
         })
     }
 
@@ -917,7 +922,11 @@ impl AppState {
         );
 
         let left_texture = player.get_left_texture();
-        let right_texture = player.get_right_texture();
+        let right_texture = if self.single_image_mode {
+            left_texture.clone()
+        } else {
+            player.get_right_texture()
+        };
 
         if left_texture.is_none() || right_texture.is_none() {
             debug!("Textures not ready yet, skipping render");
@@ -961,7 +970,7 @@ impl AppState {
         };
 
         let uniforms = UniformData {
-            cursor_x: self.cursor_x / render_width,
+            cursor_x: if self.single_image_mode { 1.0 } else { self.cursor_x / render_width },
             cursor_y: self.cursor_y / render_height,
             image1_size: [image_width, image_height],
             image2_size: [image_width, image_height],
@@ -1544,7 +1553,9 @@ impl AppState {
                     self.cache_debug_window.toggle();
                 }
                 VirtualKeyCode::F => {
-                    self.toggle_flip_diff();
+                    if !self.single_image_mode {
+                        self.toggle_flip_diff();
+                    }
                 }
                 VirtualKeyCode::Left | VirtualKeyCode::Right => {
                     if *keycode == VirtualKeyCode::Left {
@@ -1618,7 +1629,11 @@ impl AppState {
         let y_offset = (self.size.height as f32 - render_height) / 2.0;
 
         self.mouse_position = (x, y);
-        self.cursor_x = (x - x_offset).max(0.0).min(render_width);
+        self.cursor_x = if self.single_image_mode {
+            render_width
+        } else {
+            (x - x_offset).max(0.0).min(render_width)
+        };
         self.cursor_y = (y - y_offset).max(0.0).min(render_height);
         self.update_uniform_buffer();
     }
