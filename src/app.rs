@@ -456,6 +456,9 @@ pub struct AppState {
     zoom_move_speed: f32,
     screenshot_requested: bool,
     surface_scale: u32,
+    status_message: Option<(String, Instant)>,
+    screenshot_result_rx: Arc<Mutex<mpsc::Receiver<String>>>,
+    screenshot_result_tx: mpsc::Sender<String>,
 }
 
 impl AppState {
@@ -799,6 +802,7 @@ impl AppState {
         let cache_debug_window = CacheDebugWindow::new();
 
         let mouse_position = (0.0, 0.0);
+        let (screenshot_result_tx, screenshot_result_rx) = mpsc::channel::<String>();
 
         info!("AppState initialized successfully");
         Ok(Self {
@@ -834,6 +838,9 @@ impl AppState {
             zoom_move_speed: 0.01,
             screenshot_requested: false,
             surface_scale,
+            status_message: None,
+            screenshot_result_tx,
+            screenshot_result_rx: Arc::new(Mutex::new(screenshot_result_rx)),
         })
     }
 
@@ -1008,20 +1015,56 @@ impl AppState {
 
         let mut should_render_imgui = false;
 
-        if self.cache_debug_window.is_open {
+        // Expire the status message after 3 seconds
+        if let Some((_, set_at)) = &self.status_message {
+            if set_at.elapsed().as_secs_f32() >= 3.0 {
+                self.status_message = None;
+            }
+        }
+
+        if self.cache_debug_window.is_open || self.status_message.is_some() {
             self.imgui_platform
                 .prepare_frame(self.imgui_context.io_mut(), window)
                 .expect("Failed to prepare ImGui frame");
 
             let ui = self.imgui_context.frame();
 
-            let player = self.player.read();
-            let mouse_pos = ui.io().mouse_pos;
-            let window_width = window.inner_size().width as f32;
-            self.cache_debug_window
-                .draw(ui, &player, mouse_pos[0], mouse_pos[1], window_width);
-            should_render_imgui = true;
+            if self.cache_debug_window.is_open {
+                let player = self.player.read();
+                let mouse_pos = ui.io().mouse_pos;
+                let window_width = window.inner_size().width as f32;
+                self.cache_debug_window
+                    .draw(ui, &player, mouse_pos[0], mouse_pos[1], window_width);
+            }
 
+            // Draw status-message toast in the bottom-left corner
+            if let Some((msg, set_at)) = &self.status_message {
+                let elapsed = set_at.elapsed().as_secs_f32();
+                let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
+                let win_size = window.inner_size();
+                let padding = 10.0_f32;
+                let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
+                if let Some(_win) = ui
+                    .window("##status_toast")
+                    .position(
+                        [padding, win_size.height as f32 - padding],
+                        imgui::Condition::Always,
+                    )
+                    .position_pivot([0.0, 1.0])
+                    .bg_alpha(alpha * 0.75)
+                    .no_decoration()
+                    .no_inputs()
+                    .movable(false)
+                    .no_nav()
+                    .focus_on_appearing(false)
+                    .always_auto_resize(true)
+                    .begin()
+                {
+                    ui.text_colored([1.0, 1.0, 1.0, alpha], msg.as_str());
+                }
+            }
+
+            should_render_imgui = true;
             self.imgui_platform.prepare_render(ui, window);
         }
 
@@ -1201,6 +1244,7 @@ impl AppState {
                         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
                     );
                     let path = generate_output_filename("screenshot", "png");
+                    let result_tx = self.screenshot_result_tx.clone();
                     // Pixel-format conversion and file I/O happen on a background thread
                     // so the render loop can continue without further blocking.
                     std::thread::spawn(move || {
@@ -1216,15 +1260,33 @@ impl AppState {
                                 pixels.extend_from_slice(row_data);
                             }
                         }
-                        match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8) {
-                            Ok(_) => info!("Screenshot saved to {}", path),
-                            Err(e) => warn!("Failed to save screenshot: {}", e),
-                        }
+                        let msg = match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8) {
+                            Ok(_) => {
+                                info!("Screenshot saved to {}", path);
+                                format!("Screenshot saved: {}", path)
+                            }
+                            Err(e) => {
+                                warn!("Failed to save screenshot: {}", e);
+                                format!("Failed to save screenshot: {}", e)
+                            }
+                        };
+                        let _ = result_tx.send(msg);
                     });
                 }
-                Ok(Err(e)) => warn!("GPU buffer mapping failed for screenshot: {}", e),
-                Err(e) => warn!("Screenshot channel receive failed: {}", e),
+                Ok(Err(e)) => {
+                    warn!("GPU buffer mapping failed for screenshot: {}", e);
+                    self.status_message = Some((format!("GPU error: {}", e), Instant::now()));
+                }
+                Err(e) => {
+                    warn!("Screenshot channel receive failed: {}", e);
+                    self.status_message = Some((format!("Screenshot failed: {}", e), Instant::now()));
+                }
             }
+        }
+
+        // Pick up any pending screenshot result from the background thread
+        while let Ok(msg) = self.screenshot_result_rx.lock().try_recv() {
+            self.status_message = Some((msg, Instant::now()));
         }
 
         debug!("Presenting output");
@@ -1647,21 +1709,30 @@ impl AppState {
     }
 
     /// Save the current FLIP diff image to a PNG file.
-    pub fn save_flip_diff_image(&self) {
+    pub fn save_flip_diff_image(&mut self) {
         let player = self.player.read();
         let (left_index, right_index) = player.current_images();
         match player.get_flip_diff_raw_data(left_index, right_index) {
             Some((data, width, height)) => {
                 let path = generate_output_filename("flip_diff", "png");
                 match image::save_buffer(&path, &data, width, height, image::ColorType::Rgba8) {
-                    Ok(_) => info!("FLIP diff image saved to {}", path),
-                    Err(e) => warn!("Failed to save FLIP diff image: {}", e),
+                    Ok(_) => {
+                        info!("FLIP diff image saved to {}", path);
+                        self.status_message = Some((format!("FLIP diff saved: {}", path), Instant::now()));
+                    }
+                    Err(e) => {
+                        warn!("Failed to save FLIP diff image: {}", e);
+                        self.status_message = Some((format!("Failed to save FLIP diff: {}", e), Instant::now()));
+                    }
                 }
             }
-            None => warn!(
-                "No FLIP diff image available for frames ({}, {}). Enable FLIP mode first.",
-                left_index, right_index
-            ),
+            None => {
+                warn!(
+                    "No FLIP diff image available for frames ({}, {}). Enable FLIP mode first.",
+                    left_index, right_index
+                );
+                self.status_message = Some(("No FLIP diff available. Press F to enable FLIP mode first.".to_string(), Instant::now()));
+            }
         }
     }
 
