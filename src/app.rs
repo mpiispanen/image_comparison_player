@@ -925,12 +925,9 @@ impl AppState {
             (scaled_width, scaled_height)
         };
 
-        let x_offset = (window_size.width as f32 - render_width) / 2.0;
-        let y_offset = (window_size.height as f32 - render_height) / 2.0;
-
         let uniforms = UniformData {
-            cursor_x: (self.cursor_x - x_offset) / render_width,
-            cursor_y: (self.cursor_y - y_offset) / render_height,
+            cursor_x: self.cursor_x / render_width,
+            cursor_y: self.cursor_y / render_height,
             image1_size: [image_width, image_height],
             image2_size: [image_width, image_height],
             flip_diff_size: [image_width, image_height],
@@ -1127,7 +1124,7 @@ impl AppState {
                 ];
 
                 let uniforms = UniformData {
-                    cursor_x: self.cursor_x / self.size.width as f32,
+                    cursor_x: self.cursor_x / render_width,
                     cursor_y: mouse_y / window_height,
                     image1_size: [left_texture.width() as f32, left_texture.height() as f32],
                     image2_size: [right_texture.width() as f32, right_texture.height() as f32],
