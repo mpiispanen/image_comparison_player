@@ -43,6 +43,11 @@ struct CacheDebugWindow {
     size: [f32; 2],
 }
 
+fn round_up_to_multiple(value: u32, multiple: u32) -> u32 {
+    let m = multiple.max(1);
+    value.div_ceil(m) * m
+}
+
 impl CacheDebugWindow {
     fn new() -> Self {
         Self {
@@ -449,6 +454,7 @@ pub struct AppState {
     config: wgpu::SurfaceConfiguration,
     zoom_center_offset: (f32, f32),
     zoom_move_speed: f32,
+    surface_scale: u32,
 }
 
 impl AppState {
@@ -461,6 +467,7 @@ impl AppState {
         let dir2 = std::fs::canonicalize(app_config.dir2)?;
 
         let size = window.inner_size();
+        let surface_scale = window.scale_factor().ceil() as u32;
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -500,9 +507,10 @@ impl AppState {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            // Round to even to satisfy Wayland buffer_scale requirements on HiDPI displays
-            width: (size.width + 1) & !1,
-            height: (size.height + 1) & !1,
+            // Round up to the nearest multiple of the Wayland buffer_scale so that the
+            // surface size is always valid on HiDPI compositors (scale 2, 3, …).
+            width: round_up_to_multiple(size.width, surface_scale),
+            height: round_up_to_multiple(size.height, surface_scale),
             present_mode: surface_caps.present_modes[0],
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -823,6 +831,7 @@ impl AppState {
             config,
             zoom_center_offset: (0.0, 0.0),
             zoom_move_speed: 0.01,
+            surface_scale,
         })
     }
 
@@ -830,14 +839,11 @@ impl AppState {
         if new_size.width > 0 && new_size.height > 0 {
             // Keep the real window size for coordinate math and event handling.
             self.size = new_size;
-            // Round each dimension up to the nearest even number so that the
-            // surface size is always a valid integer multiple of the HiDPI
-            // buffer_scale (typically 2 on high-DPI Wayland compositors).
-            // An odd physical size causes wl_surface protocol error 2 from
-            // sctk-adwaita decorations, which loses the Vulkan surface and
-            // makes wgpu's Surface::configure panic.
-            self.config.width = (new_size.width + 1) & !1;
-            self.config.height = (new_size.height + 1) & !1;
+            // Round up to the nearest multiple of surface_scale so that the
+            // surface size is always a valid integer multiple of the Wayland
+            // buffer_scale on any HiDPI compositor (scale 2, 3, …).
+            self.config.width = round_up_to_multiple(new_size.width, self.surface_scale);
+            self.config.height = round_up_to_multiple(new_size.height, self.surface_scale);
             self.surface.configure(&self.device, &self.config);
         }
     }
@@ -1314,6 +1320,15 @@ impl AppState {
         {
             self.resize(*size);
             debug!("Window resized to: {:?}", size);
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: winit::event::WindowEvent::ScaleFactorChanged { scale_factor, new_inner_size },
+            ..
+        } = event
+        {
+            self.surface_scale = scale_factor.ceil() as u32;
+            self.resize(**new_inner_size);
         }
 
         if let winit::event::Event::WindowEvent {

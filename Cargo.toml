@@ -37,3 +37,4 @@ path = "src/main.rs"
 # Dependency chain: winit -> sctk-adwaita -> crossfont -> freetype-rs
 [patch.crates-io]
 freetype-rs = { path = "vendor/freetype-rs" }
+sctk-adwaita = { path = "vendor/sctk-adwaita" }
