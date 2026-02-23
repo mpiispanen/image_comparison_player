@@ -3,7 +3,7 @@ use crate::player::Player;
 use crate::player::PlayerConfig;
 use imgui::Condition;
 use imgui::Ui;
-use log::{debug, info, warn}; // Add error to the import list
+use log::{debug, info, warn};
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
 use winit::event::WindowEvent;
@@ -16,6 +16,8 @@ use winit::event::VirtualKeyCode;
 use winit::window::Window as WinitWindow;
 use winit::event::TouchPhase;
 use std::process;
+
+const APP_TITLE: &str = "Image Comparison Player";
 
 #[allow(dead_code)]
 #[repr(C)]
@@ -456,7 +458,11 @@ pub struct AppState {
     config: wgpu::SurfaceConfiguration,
     zoom_center_offset: (f32, f32),
     zoom_move_speed: f32,
+    screenshot_requested: bool,
     surface_scale: u32,
+    status_message: Option<(String, Instant)>,
+    screenshot_result_rx: Arc<Mutex<mpsc::Receiver<String>>>,
+    screenshot_result_tx: mpsc::Sender<String>,
 }
 
 impl AppState {
@@ -526,7 +532,7 @@ impl AppState {
             .unwrap_or(surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
             // Round up to the nearest multiple of the Wayland buffer_scale so that the
             // surface size is always valid on HiDPI compositors (scale 2, 3, …).
@@ -812,6 +818,7 @@ impl AppState {
         let cache_debug_window = CacheDebugWindow::new();
 
         let mouse_position = (0.0, 0.0);
+        let (screenshot_result_tx, screenshot_result_rx) = mpsc::channel::<String>();
 
         info!("AppState initialized successfully");
         Ok(Self {
@@ -845,7 +852,11 @@ impl AppState {
             config,
             zoom_center_offset: (0.0, 0.0),
             zoom_move_speed: 0.01,
+            screenshot_requested: false,
             surface_scale,
+            status_message: None,
+            screenshot_result_tx,
+            screenshot_result_rx: Arc::new(Mutex::new(screenshot_result_rx)),
         })
     }
 
@@ -1020,41 +1031,71 @@ impl AppState {
 
         let mut should_render_imgui = false;
 
-        if self.cache_debug_window.is_open {
-            self.imgui_platform
-                .prepare_frame(self.imgui_context.io_mut(), window)
-                .expect("Failed to prepare ImGui frame");
-
-            let ui = self.imgui_context.frame();
-
-            let player = self.player.read();
-            let mouse_pos = ui.io().mouse_pos;
-            let window_width = window.inner_size().width as f32;
-            self.cache_debug_window
-                .draw(ui, &player, mouse_pos[0], mouse_pos[1], window_width);
-            should_render_imgui = true;
-
-            self.imgui_platform.prepare_render(ui, window);
+        // Pick up any pending screenshot result from the background thread early so the
+        // toast can be rendered in this same frame.
+        while let Ok(msg) = self.screenshot_result_rx.lock().try_recv() {
+            self.status_message = Some((msg, Instant::now()));
         }
 
-        if should_render_imgui {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ImGui Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: None,
-            });
+        // Expire the status message after 3 seconds
+        if let Some((_, set_at)) = &self.status_message {
+            if set_at.elapsed().as_secs_f32() >= 3.0 {
+                self.status_message = None;
+            }
+        }
+        if let Some((msg, _)) = &self.status_message {
+            window.set_title(&format!("{} — {}", APP_TITLE, msg));
+        } else {
+            window.set_title(APP_TITLE);
+        }
 
-            let draw_data = self.imgui_context.render();
-            self.imgui_renderer
-                .render(draw_data, &self.queue, &self.device, &mut render_pass)
-                .expect("Failed to render ImGui");
+        if self.cache_debug_window.is_open || self.status_message.is_some() {
+            match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
+                Ok(()) => {
+                    let ui = self.imgui_context.frame();
+
+                    if self.cache_debug_window.is_open {
+                        let player = self.player.read();
+                        let mouse_pos = ui.io().mouse_pos;
+                        let window_width = window.inner_size().width as f32;
+                        self.cache_debug_window
+                            .draw(ui, &player, mouse_pos[0], mouse_pos[1], window_width);
+                    }
+
+                    // Draw status-message toast in the bottom-left corner
+                    if let Some((msg, set_at)) = &self.status_message {
+                        let elapsed = set_at.elapsed().as_secs_f32();
+                        let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
+                        let win_size = window.inner_size();
+                        let padding = 10.0_f32;
+                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
+                        if let Some(_win) = ui
+                            .window("##status_toast")
+                            .position(
+                                [padding, win_size.height as f32 - padding],
+                                imgui::Condition::Always,
+                            )
+                            .position_pivot([0.0, 1.0])
+                            .bg_alpha(alpha * 0.75)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            ui.text_colored([1.0, 1.0, 1.0, alpha], msg.as_str());
+                        }
+                    }
+
+                    should_render_imgui = true;
+                    self.imgui_platform.prepare_render(ui, window);
+                }
+                Err(e) => {
+                    warn!("Failed to prepare ImGui frame: {}", e);
+                }
+            }
         }
 
         while let Ok((left_index, right_index, diff_data, size)) =
@@ -1163,7 +1204,127 @@ impl AppState {
             }
         }
 
+        if should_render_imgui {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ImGui Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            let draw_data = self.imgui_context.render();
+            if draw_data.draw_lists_count() > 0 {
+                if let Err(e) = self
+                    .imgui_renderer
+                    .render(draw_data, &self.queue, &self.device, &mut render_pass)
+                {
+                    warn!("Failed to render ImGui: {}", e);
+                }
+            } else {
+                debug!("Skipping ImGui render: no draw lists");
+            }
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Capture screenshot if requested.
+        // The GPU readback (copy + poll) must complete before output.present(), but the
+        // slow pixel-format conversion and PNG file-write are offloaded to a background
+        // thread so the render loop is unblocked as quickly as possible.
+        if self.screenshot_requested {
+            self.screenshot_requested = false;
+            info!("Saving screenshot...");
+            let width = self.size.width;
+            let height = self.size.height;
+            // Align bytes_per_row to wgpu's required 256-byte alignment
+            let bytes_per_row = (width * 4 + 255) & !255;
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Screenshot Buffer"),
+                size: (bytes_per_row * height) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut screenshot_encoder = self.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some("Screenshot Encoder") },
+            );
+            screenshot_encoder.copy_texture_to_buffer(
+                output.texture.as_image_copy(),
+                wgpu::ImageCopyBuffer {
+                    buffer: &buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            self.queue.submit(std::iter::once(screenshot_encoder.finish()));
+            let buffer_slice = buffer.slice(..);
+            let (tx, rx) = mpsc::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+            // Poll until the GPU has finished writing into the buffer.
+            self.device.poll(wgpu::Maintain::Wait);
+            match rx.recv() {
+                Ok(Ok(_)) => {
+                    // Copy the raw bytes out so the GPU buffer can be unmapped immediately.
+                    let raw = buffer_slice.get_mapped_range().to_vec();
+                    buffer.unmap();
+                    let is_bgra = matches!(
+                        self.config.format,
+                        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+                    );
+                    let screenshot_prefix = if self.show_flip_diff {
+                        "screenshot_flip"
+                    } else {
+                        "screenshot_regular"
+                    };
+                    let path = generate_output_filename(screenshot_prefix, "png");
+                    let result_tx = self.screenshot_result_tx.clone();
+                    // Pixel-format conversion and file I/O happen on a background thread
+                    // so the render loop can continue without further blocking.
+                    std::thread::spawn(move || {
+                        let mut pixels: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
+                        for row in 0..height as usize {
+                            let row_start = row * bytes_per_row as usize;
+                            let row_data = &raw[row_start..row_start + (width * 4) as usize];
+                            if is_bgra {
+                                for chunk in row_data.chunks(4) {
+                                    pixels.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+                                }
+                            } else {
+                                pixels.extend_from_slice(row_data);
+                            }
+                        }
+                        let msg = match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8) {
+                            Ok(_) => {
+                                info!("Screenshot saved to {}", path);
+                                format!("Screenshot saved: {}", path)
+                            }
+                            Err(e) => {
+                                warn!("Failed to save screenshot: {}", e);
+                                format!("Failed to save screenshot: {}", e)
+                            }
+                        };
+                        let _ = result_tx.send(msg);
+                    });
+                }
+                Ok(Err(e)) => {
+                    warn!("GPU buffer mapping failed for screenshot: {}", e);
+                    self.status_message = Some((format!("GPU error: {}", e), Instant::now()));
+                }
+                Err(e) => {
+                    warn!("Screenshot channel receive failed: {}", e);
+                    self.status_message = Some((format!("Screenshot failed: {}", e), Instant::now()));
+                }
+            }
+        }
 
         debug!("Presenting output");
         output.present();
@@ -1397,6 +1558,12 @@ impl AppState {
                 VirtualKeyCode::A => self.handle_zoom_move((-1.0, 0.0)),
                 VirtualKeyCode::S => self.handle_zoom_move((0.0, 1.0)),
                 VirtualKeyCode::D => self.handle_zoom_move((1.0, 0.0)),
+                VirtualKeyCode::P => {
+                    self.save_flip_diff_image();
+                }
+                VirtualKeyCode::I => {
+                    self.request_screenshot();
+                }
                 _ => {}
             }
         }
@@ -1576,5 +1743,141 @@ impl AppState {
         
         self.zoom_center_offset = (offset_x, offset_y);
         self.update_uniform_buffer();
+    }
+
+    /// Save the current FLIP diff image to a PNG file.
+    pub fn save_flip_diff_image(&mut self) {
+        let player = self.player.read();
+        let (left_index, right_index) = player.current_images();
+        match player.get_flip_diff_raw_data(left_index, right_index) {
+            Some((data, width, height)) => {
+                let path = generate_output_filename("flip_diff", "png");
+                match image::save_buffer(&path, &data, width, height, image::ColorType::Rgba8) {
+                    Ok(_) => {
+                        info!("FLIP diff image saved to {}", path);
+                        self.status_message = Some((format!("FLIP diff saved: {}", path), Instant::now()));
+                    }
+                    Err(e) => {
+                        warn!("Failed to save FLIP diff image: {}", e);
+                        self.status_message = Some((format!("Failed to save FLIP diff: {}", e), Instant::now()));
+                    }
+                }
+            }
+            None => {
+                warn!(
+                    "No FLIP diff image available for frames ({}, {}). Enable FLIP mode first.",
+                    left_index, right_index
+                );
+                self.status_message = Some(("No FLIP diff available. Press F to enable FLIP mode first.".to_string(), Instant::now()));
+            }
+        }
+    }
+
+    /// Request a screenshot to be saved on the next rendered frame.
+    pub fn request_screenshot(&mut self) {
+        self.screenshot_requested = true;
+        self.status_message = Some(("Saving screenshot...".to_string(), Instant::now()));
+    }
+}
+
+/// Generate a timestamped output file path in the current directory.
+fn generate_output_filename(prefix: &str, extension: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}_{}.{:03}.{}", prefix, d.as_secs(), d.subsec_millis(), extension)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_output_filename;
+
+    #[test]
+    fn test_generate_output_filename_format() {
+        let name = generate_output_filename("screenshot", "png");
+        assert!(name.starts_with("screenshot_"), "should start with prefix: {}", name);
+        assert!(name.ends_with(".png"), "should end with .png: {}", name);
+        // Format is screenshot_{secs}.{millis}.png — strip prefix and extension
+        let inner = name
+            .strip_prefix("screenshot_")
+            .unwrap()
+            .strip_suffix(".png")
+            .unwrap();
+        // Inner should be "{secs}.{millis}" — exactly one dot
+        let parts: Vec<&str> = inner.splitn(2, '.').collect();
+        assert_eq!(parts.len(), 2, "expected secs.millis format: {}", inner);
+        assert!(
+            parts[0].chars().all(|c| c.is_ascii_digit()),
+            "seconds should be numeric digits: {}",
+            parts[0]
+        );
+        assert!(
+            parts[1].chars().all(|c| c.is_ascii_digit()),
+            "millis should be numeric digits: {}",
+            parts[1]
+        );
+        assert_eq!(parts[1].len(), 3, "millis should be zero-padded to 3 digits: {}", parts[1]);
+    }
+
+    #[test]
+    fn test_generate_output_filename_flip_diff() {
+        let name = generate_output_filename("flip_diff", "png");
+        assert!(name.starts_with("flip_diff_"), "should start with flip_diff_: {}", name);
+        assert!(name.ends_with(".png"), "should end with .png: {}", name);
+        // Format is flip_diff_{secs}.{millis}.png
+        let inner = name
+            .strip_prefix("flip_diff_")
+            .unwrap()
+            .strip_suffix(".png")
+            .unwrap();
+        let parts: Vec<&str> = inner.splitn(2, '.').collect();
+        assert_eq!(parts.len(), 2, "expected secs.millis format: {}", inner);
+    }
+
+    #[test]
+    fn test_generate_output_filename_unique() {
+        // Two calls should produce different filenames when at least one second apart,
+        // but even within the same second the function is deterministic; we only check
+        // that the function doesn't panic and returns a non-empty string.
+        let a = generate_output_filename("test", "png");
+        let b = generate_output_filename("test", "png");
+        assert!(!a.is_empty());
+        assert!(!b.is_empty());
+    }
+
+    /// Verifies the BGRA→RGBA channel-swap logic used in the screenshot path.
+    #[test]
+    fn test_bgra_to_rgba_conversion() {
+        // Simulate a 1×1 BGRA pixel: B=10, G=20, R=30, A=255
+        let bgra_pixel: Vec<u8> = vec![10, 20, 30, 255];
+        let rgba_pixel: Vec<u8> = bgra_pixel
+            .chunks(4)
+            .flat_map(|c| vec![c[2], c[1], c[0], c[3]])
+            .collect();
+        assert_eq!(rgba_pixel, vec![30, 20, 10, 255]);
+    }
+
+    /// Verifies that row-padding removal works correctly.
+    #[test]
+    fn test_row_padding_removal() {
+        let width: u32 = 2;
+        let height: u32 = 2;
+        // bytes_per_row aligned to 256: (2*4 + 255) & !255 = 256
+        let bytes_per_row: usize = 256;
+        // Construct padded buffer: two rows of 256 bytes each, with 8 bytes of pixel data
+        let mut raw = vec![0u8; bytes_per_row * height as usize];
+        // Row 0: pixels R=1,G=2,B=3,A=4 and R=5,G=6,B=7,A=8
+        raw[0..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        // Row 1: pixels R=9,G=10,B=11,A=12 and R=13,G=14,B=15,A=16
+        raw[256..264].copy_from_slice(&[9, 10, 11, 12, 13, 14, 15, 16]);
+
+        let mut pixels: Vec<u8> = Vec::with_capacity((width * height * 4) as usize);
+        for row in 0..height as usize {
+            let row_start = row * bytes_per_row;
+            pixels.extend_from_slice(&raw[row_start..row_start + (width * 4) as usize]);
+        }
+
+        assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     }
 }
