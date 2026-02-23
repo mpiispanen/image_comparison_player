@@ -1579,6 +1579,8 @@ impl AppState {
                 }
                 VirtualKeyCode::Up => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0)),
                 VirtualKeyCode::Down => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0)),
+                VirtualKeyCode::Q => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0)),
+                VirtualKeyCode::E => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0)),
                 VirtualKeyCode::LBracket => {
                     self.player.write().decrease_playback_speed();
                 }
