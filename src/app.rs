@@ -1,4 +1,5 @@
 use crate::image_loader;
+use crate::player::FlipStats;
 use crate::player::Player;
 use crate::player::PlayerConfig;
 use imgui::Condition;
@@ -467,10 +468,222 @@ impl CacheDebugWindow {
     }
 }
 
+struct PixelInfoWindow {
+    is_open: bool,
+}
+
+impl PixelInfoWindow {
+    fn new() -> Self {
+        Self { is_open: false }
+    }
+
+    fn draw(
+        &self,
+        ui: &Ui,
+        left_color: [u8; 4],
+        right_color: [u8; 4],
+        flip_stats: Option<&FlipStats>,
+        single_image_mode: bool,
+    ) {
+        let swatch_size = 16.0;
+        let swatch_spacing = 4.0;
+        ui.window("Pixel Info")
+            .size([300.0, 200.0], Condition::FirstUseEver)
+            .position([10.0, 280.0], Condition::FirstUseEver)
+            .resizable(true)
+            .always_auto_resize(true)
+            .build(|| {
+                let draw_list = ui.get_window_draw_list();
+
+                // Left image pixel color
+                {
+                    let window_pos = ui.window_pos();
+                    let cursor_pos = ui.cursor_pos();
+                    let x = window_pos[0] + cursor_pos[0];
+                    let y = window_pos[1] + cursor_pos[1];
+                    let lc = [
+                        left_color[0] as f32 / 255.0,
+                        left_color[1] as f32 / 255.0,
+                        left_color[2] as f32 / 255.0,
+                        1.0,
+                    ];
+                    draw_list
+                        .add_rect([x, y], [x + swatch_size, y + swatch_size], lc)
+                        .filled(true)
+                        .build();
+                    draw_list
+                        .add_rect(
+                            [x, y],
+                            [x + swatch_size, y + swatch_size],
+                            [0.8, 0.8, 0.8, 0.6],
+                        )
+                        .build();
+                    ui.dummy([swatch_size + swatch_spacing, swatch_size]);
+                    ui.same_line();
+                    ui.text(format!(
+                        "L: #{:02X}{:02X}{:02X}  ({}, {}, {}, {})",
+                        left_color[0],
+                        left_color[1],
+                        left_color[2],
+                        left_color[0],
+                        left_color[1],
+                        left_color[2],
+                        left_color[3]
+                    ));
+                }
+
+                // Right image pixel color (only in two-image mode)
+                if !single_image_mode {
+                    let window_pos = ui.window_pos();
+                    let cursor_pos = ui.cursor_pos();
+                    let x = window_pos[0] + cursor_pos[0];
+                    let y = window_pos[1] + cursor_pos[1];
+                    let rc = [
+                        right_color[0] as f32 / 255.0,
+                        right_color[1] as f32 / 255.0,
+                        right_color[2] as f32 / 255.0,
+                        1.0,
+                    ];
+                    draw_list
+                        .add_rect([x, y], [x + swatch_size, y + swatch_size], rc)
+                        .filled(true)
+                        .build();
+                    draw_list
+                        .add_rect(
+                            [x, y],
+                            [x + swatch_size, y + swatch_size],
+                            [0.8, 0.8, 0.8, 0.6],
+                        )
+                        .build();
+                    ui.dummy([swatch_size + swatch_spacing, swatch_size]);
+                    ui.same_line();
+                    ui.text(format!(
+                        "R: #{:02X}{:02X}{:02X}  ({}, {}, {}, {})",
+                        right_color[0],
+                        right_color[1],
+                        right_color[2],
+                        right_color[0],
+                        right_color[1],
+                        right_color[2],
+                        right_color[3]
+                    ));
+                }
+
+                ui.separator();
+
+                // FLIP error metrics
+                if let Some(stats) = flip_stats {
+                    ui.text("FLIP Metrics:");
+                    ui.text(format!("  Mean: {:.4}", stats.mean));
+                    ui.text(format!("  Min:  {:.4}", stats.min));
+                    ui.text(format!("  Max:  {:.4}", stats.max));
+                    ui.text(format!("  P95:  {:.4}", stats.p95));
+                    ui.text(format!("  P99:  {:.4}", stats.p99));
+                } else if !single_image_mode {
+                    ui.text_disabled("FLIP: not computed (press F to enable)");
+                }
+            });
+    }
+
+    fn toggle(&mut self) {
+        self.is_open = !self.is_open;
+    }
+}
+
 struct CacheRowParams {
     frame_count: usize,
     mouse_pos: (f32, f32),
     available_width: f32,
+}
+
+/// Read one RGBA pixel from each of two GPU textures at the same (x, y) position.
+/// Both copies are submitted in a single command buffer so only one GPU round-trip
+/// (device.poll(Wait)) is needed instead of two. The returned bytes are in the
+/// textures' native encoding (sRGB for Rgba8UnormSrgb).
+/// Returns [[0,0,0,255]; 2] on any GPU error.
+///
+/// Note: `bytes_per_row` for copy_texture_to_buffer must be a multiple of 256
+/// (wgpu's COPY_BYTES_PER_ROW_ALIGNMENT). For a 1-pixel-wide 1-row copy, the minimum
+/// valid value is 256, which allocates 256 bytes of staging buffer per pixel. This is
+/// intentional — the extra bytes are padding required by the alignment constraint.
+fn read_two_texture_pixels(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    tex1: &wgpu::Texture,
+    tex2: &wgpu::Texture,
+    x: u32,
+    y: u32,
+) -> [[u8; 4]; 2] {
+    const BYTES_PER_ROW: u32 = 256; // wgpu COPY_BYTES_PER_ROW_ALIGNMENT
+    let make_buf = || {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Pixel Read Buffer"),
+            size: BYTES_PER_ROW as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    };
+    let buf1 = make_buf();
+    let buf2 = make_buf();
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Pixel Read Encoder"),
+    });
+
+    let copy = |encoder: &mut wgpu::CommandEncoder, tex: &wgpu::Texture, buf: &wgpu::Buffer| {
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: buf,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(BYTES_PER_ROW),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+    };
+    copy(&mut encoder, tex1, &buf1);
+    copy(&mut encoder, tex2, &buf2);
+
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let slice1 = buf1.slice(..);
+    let slice2 = buf2.slice(..);
+    let (tx1, rx1) = mpsc::channel();
+    let (tx2, rx2) = mpsc::channel();
+    slice1.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx1.send(r);
+    });
+    slice2.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx2.send(r);
+    });
+    // Single poll(Wait) covers both mappings.
+    device.poll(wgpu::Maintain::Wait);
+
+    let read = |rx: std::sync::mpsc::Receiver<_>, buf: &wgpu::Buffer, slice: wgpu::BufferSlice<'_>| {
+        match rx.recv() {
+            Ok(Ok(_)) => {
+                let data = slice.get_mapped_range();
+                let result = [data[0], data[1], data[2], data[3]];
+                drop(data);
+                buf.unmap();
+                result
+            }
+            _ => [0, 0, 0, 255],
+        }
+    };
+    [read(rx1, &buf1, slice1), read(rx2, &buf2, slice2)]
 }
 
 type FlipDiffReceiver = Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
@@ -531,6 +744,9 @@ pub struct AppState {
     screenshot_result_rx: Arc<Mutex<mpsc::Receiver<String>>>,
     screenshot_result_tx: mpsc::Sender<String>,
     single_image_mode: bool,
+    pixel_info_window: PixelInfoWindow,
+    left_pixel_color: [u8; 4],
+    right_pixel_color: [u8; 4],
 }
 
 impl AppState {
@@ -941,6 +1157,9 @@ impl AppState {
             screenshot_result_tx,
             screenshot_result_rx: Arc::new(Mutex::new(screenshot_result_rx)),
             single_image_mode,
+            pixel_info_window: PixelInfoWindow::new(),
+            left_pixel_color: [128, 128, 128, 255],
+            right_pixel_color: [128, 128, 128, 255],
         })
     }
 
@@ -1139,7 +1358,7 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.status_message.is_some() {
+        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1150,6 +1369,23 @@ impl AppState {
                         let window_width = window.inner_size().width as f32;
                         self.cache_debug_window
                             .draw(ui, &player, mouse_pos[0], mouse_pos[1], window_width);
+                    }
+
+                    if self.pixel_info_window.is_open {
+                        let player = self.player.read();
+                        let (left_index, right_index) = player.current_images();
+                        let flip_stats = player
+                            .flip_stats
+                            .read()
+                            .get(&(left_index, right_index))
+                            .cloned();
+                        self.pixel_info_window.draw(
+                            ui,
+                            self.left_pixel_color,
+                            self.right_pixel_color,
+                            flip_stats.as_ref(),
+                            self.single_image_mode,
+                        );
                     }
 
                     // Draw status-message toast in the bottom-left corner
@@ -1324,6 +1560,34 @@ impl AppState {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Update pixel colors for the pixel info window.
+        // Performed after the main submit so all write_texture calls are flushed.
+        // Both left and right pixels are read in a single GPU round-trip.
+        if self.pixel_info_window.is_open && render_width > 0.0 && render_height > 0.0 {
+            let cursor_u = self.cursor_x / render_width;
+            let cursor_v = self.cursor_y / render_height;
+            let zoom_center_x = self.fixed_zoom_center.0 + self.zoom_center_offset.0;
+            let zoom_center_y = self.fixed_zoom_center.1 + self.zoom_center_offset.1;
+            let zoomed_u = (zoom_center_x + (cursor_u - zoom_center_x) / self.zoom_level)
+                .clamp(0.0, 1.0);
+            let zoomed_v = (zoom_center_y + (cursor_v - zoom_center_y) / self.zoom_level)
+                .clamp(0.0, 1.0);
+            let px = ((zoomed_u * left_texture.width() as f32) as u32)
+                .min(left_texture.width().saturating_sub(1));
+            let py = ((zoomed_v * left_texture.height() as f32) as u32)
+                .min(left_texture.height().saturating_sub(1));
+            let [lc, rc] = read_two_texture_pixels(
+                &self.device,
+                &self.queue,
+                &left_texture,
+                &right_texture,
+                px,
+                py,
+            );
+            self.left_pixel_color = lc;
+            self.right_pixel_color = if self.single_image_mode { lc } else { rc };
+        }
 
         // Capture screenshot if requested.
         // The GPU readback (copy + poll) must complete before output.present(), but the
@@ -1663,6 +1927,9 @@ impl AppState {
                 }
                 VirtualKeyCode::Key2 => {
                     self.toggle_image_source(false);
+                }
+                VirtualKeyCode::V => {
+                    self.pixel_info_window.toggle();
                 }
                 _ => {}
             }
