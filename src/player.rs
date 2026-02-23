@@ -309,8 +309,13 @@ impl Player {
         let texture_process_pool = ThreadPool::new(config.num_process_threads);
 
         let cache_size = config.cache_size;
+        let min_cache_span = config.preload_ahead + config.preload_behind + 1;
+        let per_side_cache_size = cache_size.max(min_cache_span);
+        // Keep small headroom above the active diff preload window so asynchronous
+        // completions at the boundary do not immediately evict each other.
+        const FLIP_DIFF_CACHE_HEADROOM: usize = 2;
         let flip_diff_cache_capacity =
-            config.diff_preload_ahead + config.diff_preload_behind + 1;
+            config.diff_preload_ahead + config.diff_preload_behind + 1 + FLIP_DIFF_CACHE_HEADROOM;
 
         let flip_diff_pool = ThreadPool::new(config.num_flip_diff_threads);
         let (flip_diff_sender, flip_diff_receiver) = channel();
@@ -339,8 +344,8 @@ impl Player {
             device,
             current_frame1: AtomicUsize::new(0),
             current_frame2: AtomicUsize::new(0),
-            texture_cache_left: RingBufferTextureCache::new(cache_size / 2),
-            texture_cache_right: RingBufferTextureCache::new(cache_size / 2),
+            texture_cache_left: RingBufferTextureCache::new(per_side_cache_size),
+            texture_cache_right: RingBufferTextureCache::new(per_side_cache_size),
             texture_reuse_pool: Arc::new(Mutex::new(Vec::new())),
             frame_changed: Arc::new(AtomicBool::new(false)),
             texture_load_queue: Arc::new(Mutex::new(PriorityTextureLoadQueue::new(
@@ -745,6 +750,7 @@ impl Player {
 
         // Preload flip diffs (not applicable in single image mode)
         if !self.single_image_mode && show_flip_diff {
+            self.ensure_flip_diff_generated(index1, index2);
             self.preload_flip_diffs(index1, index2);
         }
     }
@@ -824,7 +830,8 @@ impl Player {
                 *self.current_frame_set_time.lock() = now;
 
                 if frame_changed && show_flip_diff {
-                    self.generate_flip_diff(current_left, current_right);
+                    let (new_left, new_right) = self.current_images();
+                    self.generate_flip_diff(new_left, new_right);
                 }
 
                 frame_changed

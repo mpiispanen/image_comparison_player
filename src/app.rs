@@ -59,14 +59,19 @@ impl CacheDebugWindow {
     }
 
     fn draw(&mut self, ui: &Ui, player: &Player, mouse_x: f32, mouse_y: f32, window_width: f32) {
-        let visible_frames = player.config.preload_ahead + player.config.preload_behind + 1;
+        let visible_frames = usize::max(
+            player.config.preload_ahead + player.config.preload_behind + 1,
+            player.config.diff_preload_ahead + player.config.diff_preload_behind + 1,
+        );
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
-        let desired_width = total_width.min(window_width - 20.0);
+        let desired_width = total_width.min(window_width - 20.0).max(260.0);
+        let min_height = 260.0;
+        let desired_height = self.size[1].max(min_height);
 
         ui.window("Cache Debug")
-            .size([desired_width, self.size[1]], Condition::Always)
+            .size([desired_width, desired_height], Condition::Always)
             .position([10.0, 10.0], Condition::FirstUseEver)
             .resizable(true)
             .build(|| {
@@ -112,6 +117,7 @@ impl CacheDebugWindow {
                 self.draw_cache_metrics(ui, player);
 
                 self.size = ui.window_size();
+                self.size[1] = self.size[1].max(min_height);
             });
     }
 
@@ -188,11 +194,14 @@ impl CacheDebugWindow {
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
         let scale_factor =
-            (params.available_width - ui.calc_text_size(label)[0] - spacing) / total_width;
+            ((params.available_width - ui.calc_text_size(label)[0] - spacing) / total_width)
+                .min(1.0);
         let scaled_button_size = button_size * scale_factor;
         let scaled_spacing = spacing * scale_factor;
 
         ui.group(|| {
+            let window_pos = ui.window_pos();
+            let cursor_pos = ui.cursor_pos();
             ui.set_next_item_width(params.available_width - ui.calc_text_size(label)[0] - spacing);
             ui.dummy([
                 params.available_width - ui.calc_text_size(label)[0] - spacing,
@@ -200,8 +209,6 @@ impl CacheDebugWindow {
             ]);
 
             let draw_list = ui.get_window_draw_list();
-            let window_pos = ui.window_pos();
-            let cursor_pos = ui.cursor_pos();
 
             let half_visible = visible_frames / 2;
 
@@ -211,7 +218,7 @@ impl CacheDebugWindow {
                 let x = window_pos[0]
                     + cursor_pos[0]
                     + i as f32 * (scaled_button_size + scaled_spacing);
-                let y = window_pos[1] + cursor_pos[1];
+                let y = window_pos[1] + cursor_pos[1] + 10.0;
 
                 if frame.is_multiple_of(5) {
                     draw_list.add_text([x, y - 15.0], [1.0, 1.0, 1.0, 1.0], frame.to_string());
@@ -324,16 +331,22 @@ impl CacheDebugWindow {
         ui.text("D:");
         ui.same_line();
 
-        let visible_frames = player.config.preload_ahead + player.config.preload_behind + 1;
+        let visible_frames = usize::max(
+            player.config.preload_ahead + player.config.preload_behind + 1,
+            player.config.diff_preload_ahead + player.config.diff_preload_behind + 1,
+        );
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
         let scale_factor =
-            (params.available_width - ui.calc_text_size("D:")[0] - spacing) / total_width;
+            ((params.available_width - ui.calc_text_size("D:")[0] - spacing) / total_width)
+                .min(1.0);
         let scaled_button_size = button_size * scale_factor;
         let scaled_spacing = spacing * scale_factor;
 
         ui.group(|| {
+            let window_pos = ui.window_pos();
+            let cursor_pos = ui.cursor_pos();
             ui.set_next_item_width(params.available_width - ui.calc_text_size("D:")[0] - spacing);
             ui.dummy([
                 params.available_width - ui.calc_text_size("D:")[0] - spacing,
@@ -341,8 +354,6 @@ impl CacheDebugWindow {
             ]);
 
             let draw_list = ui.get_window_draw_list();
-            let window_pos = ui.window_pos();
-            let cursor_pos = ui.cursor_pos();
 
             let half_visible = visible_frames / 2;
 
@@ -356,7 +367,7 @@ impl CacheDebugWindow {
                 let x = window_pos[0]
                     + cursor_pos[0]
                     + i as f32 * (scaled_button_size + scaled_spacing);
-                let y = window_pos[1] + cursor_pos[1];
+                let y = window_pos[1] + cursor_pos[1] + 10.0;
 
                 if left_frame.is_multiple_of(5) {
                     draw_list.add_text(
