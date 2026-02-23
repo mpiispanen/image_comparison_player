@@ -27,19 +27,23 @@ The application loads images from two specified directories and displays them si
 The application accepts the following command-line arguments:
 
 ```
---dir1 <DIR>                First directory containing images (required)
---dir2 <DIR>                Second directory containing images (required)
+--dir1 <DIR>                  First directory containing images (use instead of --images1)
+--dir2 <DIR>                  Second directory containing images (use instead of --images2)
+--images1 <FILE>...           One or more image files for the left side (use instead of --dir1)
+--images2 <FILE>...           One or more image files for the right side (use instead of --dir2)
 --window-size <WIDTHxHEIGHT> Window size (default: 1920x1080)
---cache-size <SIZE>         Size of the image cache (default: 50)
---preload-ahead <COUNT>     Number of images to preload ahead (default: 6)
---preload-behind <COUNT>    Number of images to preload behind (default: 0)
---num-load-threads <COUNT>  Number of threads for loading images (default: 6)
+--cache-size <SIZE>           Size of the image cache (default: 50)
+--preload-ahead <COUNT>       Number of images to preload ahead (default: 6)
+--preload-behind <COUNT>      Number of images to preload behind (default: 0)
+--num-load-threads <COUNT>    Number of threads for loading images (default: 6)
 --num-process-threads <COUNT> Number of threads for processing images (default: 6)
 --num-flip-diff-threads <COUNT> Number of threads for generating flip diffs (default: 4)
---diff-preload-ahead <COUNT> Number of diff images to preload ahead (default: 4)
+--diff-preload-ahead <COUNT>  Number of diff images to preload ahead (default: 4)
 --diff-preload-behind <COUNT> Number of diff images to preload behind (default: 0)
---fps <FPS>                 Frames per second (default: 30)
+--fps <FPS>                   Frames per second (default: 30)
 ```
+
+Each side requires either `--dir1`/`--dir2` (directory) or `--images1`/`--images2` (explicit file list), but not both.
 
 ## User Interface Controls
 
@@ -63,15 +67,25 @@ Mouse controls:
 - Move the cursor vertically in flip difference mode to switch between normal and difference views
 - Scroll to zoom in/out
 
-## Input File Options
+## Input Options
 
-The application supports two methods of specifying input images:
+The application supports three methods of specifying input images:
 
 1. Directory of Images:
-   - Place images in the specified directories (--dir1 and --dir2)
+   - Place images in the specified directories (`--dir1` and `--dir2`)
    - Images should have matching names or sequential numbering
 
-2. Input.txt File:
+2. Explicit File List:
+   - Provide one or more image file paths directly with `--images1` and `--images2`
+   - Useful for comparing arbitrary images without organizing them into directories
+   - Example:
+     ```
+     ./target/release/image_comparison_player \
+       --images1 /path/to/img_a1.png /path/to/img_a2.png \
+       --images2 /path/to/img_b1.png /path/to/img_b2.png
+     ```
+
+3. Input.txt File:
    - Create an `input.txt` file in the specified directory
    - Each line should alternate between file path and duration
    - Example:
@@ -90,7 +104,13 @@ The application supports two methods of specifying input images:
 4. Run `cargo build --release` to build the application
 5. Execute the application with the required arguments:
    ```
+   # Using directories
    ./target/release/image_comparison_player --dir1 /path/to/first/directory --dir2 /path/to/second/directory
+
+   # Using explicit image files
+   ./target/release/image_comparison_player \
+     --images1 /path/to/img1.png /path/to/img2.png \
+     --images2 /path/to/ref1.png /path/to/ref2.png
    ```
 
 ## Dependencies

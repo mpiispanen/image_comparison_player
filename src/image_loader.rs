@@ -7,6 +7,33 @@ use std::path::Path;
 
 type ImageInfo = (String, u64, u64);
 
+pub fn load_image_paths_from_files(files: &[String], fps: f32) -> Result<(Vec<ImageInfo>, usize)> {
+    info!("Loading image paths from file list ({} files)", files.len());
+    let frame_duration = (1_000_000.0 / fps) as u64;
+    let mut images = Vec::new();
+    let mut cumulative_duration = 0u64;
+
+    for file in files {
+        let path = std::fs::canonicalize(file)
+            .with_context(|| format!("Failed to resolve path '{}'", file))?;
+        if !path.is_file() {
+            return Err(anyhow::anyhow!("Path is not a file: {}", file));
+        }
+        if !is_image_file(&path) {
+            return Err(anyhow::anyhow!("Not a supported image file: {}", file));
+        }
+        cumulative_duration += frame_duration;
+        images.push((
+            path.to_string_lossy().into_owned(),
+            cumulative_duration - frame_duration,
+            cumulative_duration,
+        ));
+    }
+
+    let frame_count = images.len();
+    Ok((images, frame_count))
+}
+
 pub fn load_image_paths(dir: &str, fps: f32) -> Result<(Vec<ImageInfo>, usize)> {
     info!("Loading image paths from directory: {}", dir);
     let absolute_dir = std::fs::canonicalize(dir)?;
@@ -115,6 +142,7 @@ fn is_image_file(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
 
     struct TempDir(std::path::PathBuf);
 
@@ -135,6 +163,84 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn create_test_image(path: &std::path::Path) {
+        let mut f = fs::File::create(path).unwrap();
+        // Minimal valid 1x1 PNG
+        f.write_all(&[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR length + type
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, // 8-bit RGB, CRC
+            0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, // IDAT length + type
+            0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, // IDAT data
+            0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC, // CRC
+            0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, // IEND length + type
+            0x44, 0xAE, 0x42, 0x60, 0x82, // IEND CRC
+        ])
+        .unwrap();
+    }
+
+    // --- load_image_paths_from_files tests ---
+
+    #[test]
+    fn test_load_image_paths_from_files_single() {
+        let dir = TempDir::new("from_files_single");
+        let path = dir.path().join("frame1.png");
+        create_test_image(&path);
+        let path_str = path.to_string_lossy().into_owned();
+        let (images, count) = load_image_paths_from_files(&[path_str], 30.0).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].1, 0); // start time
+        assert!(images[0].2 > 0); // end time
+    }
+
+    #[test]
+    fn test_load_image_paths_from_files_multiple() {
+        let dir = TempDir::new("from_files_multiple");
+        let p1 = dir.path().join("a.png");
+        let p2 = dir.path().join("b.png");
+        let p3 = dir.path().join("c.png");
+        create_test_image(&p1);
+        create_test_image(&p2);
+        create_test_image(&p3);
+        let files = vec![
+            p1.to_string_lossy().into_owned(),
+            p2.to_string_lossy().into_owned(),
+            p3.to_string_lossy().into_owned(),
+        ];
+        let (images, count) = load_image_paths_from_files(&files, 30.0).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(images.len(), 3);
+        // Verify timestamps are cumulative
+        assert_eq!(images[0].1, 0);
+        assert_eq!(images[0].2, images[1].1);
+        assert_eq!(images[1].2, images[2].1);
+    }
+
+    #[test]
+    fn test_load_image_paths_from_files_empty() {
+        let (images, count) = load_image_paths_from_files(&[], 30.0).unwrap();
+        assert_eq!(count, 0);
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn test_load_image_paths_from_files_non_existent() {
+        let result =
+            load_image_paths_from_files(&["/nonexistent/path/img.png".to_string()], 30.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_image_paths_from_files_non_image() {
+        let dir = TempDir::new("from_files_non_image");
+        let path = dir.path().join("file.txt");
+        fs::write(&path, "hello").unwrap();
+        let result = load_image_paths_from_files(&[path.to_string_lossy().into_owned()], 30.0);
+        assert!(result.is_err());
     }
 
     // --- is_image_file tests ---
