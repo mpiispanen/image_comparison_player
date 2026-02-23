@@ -17,6 +17,7 @@ struct Uniforms {
     show_flip_diff: f32,
     zoom_level: f32,
     zoom_center: vec2<f32>,
+    window_size: vec2<f32>,
 }
 
 @group(1) @binding(0)
@@ -26,7 +27,16 @@ var<uniform> uniforms: Uniforms;
 fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.tex_coords = model.tex_coords;
-    out.clip_position = vec4<f32>(model.position, 1.0);
+
+    // Match regular pipeline behavior: preserve source image aspect ratio with letterboxing.
+    let window_aspect_ratio = uniforms.window_size.x / uniforms.window_size.y;
+    let image_aspect_ratio = uniforms.image1_size.x / uniforms.image1_size.y;
+    let scale_x = select(1.0, image_aspect_ratio / window_aspect_ratio, window_aspect_ratio > image_aspect_ratio);
+    let scale_y = select(window_aspect_ratio / image_aspect_ratio, 1.0, window_aspect_ratio > image_aspect_ratio);
+    let scale = vec2<f32>(scale_x, scale_y);
+    let scaled_position = model.position.xy * scale;
+
+    out.clip_position = vec4<f32>(scaled_position, 0.0, 1.0);
     return out;
 }
 

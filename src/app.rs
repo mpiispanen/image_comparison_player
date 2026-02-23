@@ -17,6 +17,8 @@ use winit::window::Window as WinitWindow;
 use winit::event::TouchPhase;
 use std::process;
 
+const APP_TITLE: &str = "Image Comparison Player";
+
 #[allow(dead_code)]
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
@@ -1015,77 +1017,71 @@ impl AppState {
 
         let mut should_render_imgui = false;
 
+        // Pick up any pending screenshot result from the background thread early so the
+        // toast can be rendered in this same frame.
+        while let Ok(msg) = self.screenshot_result_rx.lock().try_recv() {
+            self.status_message = Some((msg, Instant::now()));
+        }
+
         // Expire the status message after 3 seconds
         if let Some((_, set_at)) = &self.status_message {
             if set_at.elapsed().as_secs_f32() >= 3.0 {
                 self.status_message = None;
             }
         }
-
-        if self.cache_debug_window.is_open || self.status_message.is_some() {
-            self.imgui_platform
-                .prepare_frame(self.imgui_context.io_mut(), window)
-                .expect("Failed to prepare ImGui frame");
-
-            let ui = self.imgui_context.frame();
-
-            if self.cache_debug_window.is_open {
-                let player = self.player.read();
-                let mouse_pos = ui.io().mouse_pos;
-                let window_width = window.inner_size().width as f32;
-                self.cache_debug_window
-                    .draw(ui, &player, mouse_pos[0], mouse_pos[1], window_width);
-            }
-
-            // Draw status-message toast in the bottom-left corner
-            if let Some((msg, set_at)) = &self.status_message {
-                let elapsed = set_at.elapsed().as_secs_f32();
-                let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
-                let win_size = window.inner_size();
-                let padding = 10.0_f32;
-                let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
-                if let Some(_win) = ui
-                    .window("##status_toast")
-                    .position(
-                        [padding, win_size.height as f32 - padding],
-                        imgui::Condition::Always,
-                    )
-                    .position_pivot([0.0, 1.0])
-                    .bg_alpha(alpha * 0.75)
-                    .no_decoration()
-                    .no_inputs()
-                    .movable(false)
-                    .no_nav()
-                    .focus_on_appearing(false)
-                    .always_auto_resize(true)
-                    .begin()
-                {
-                    ui.text_colored([1.0, 1.0, 1.0, alpha], msg.as_str());
-                }
-            }
-
-            should_render_imgui = true;
-            self.imgui_platform.prepare_render(ui, window);
+        if let Some((msg, _)) = &self.status_message {
+            window.set_title(&format!("{} — {}", APP_TITLE, msg));
+        } else {
+            window.set_title(APP_TITLE);
         }
 
-        if should_render_imgui {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ImGui Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: None,
-            });
+        if self.cache_debug_window.is_open || self.status_message.is_some() {
+            match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
+                Ok(()) => {
+                    let ui = self.imgui_context.frame();
 
-            let draw_data = self.imgui_context.render();
-            self.imgui_renderer
-                .render(draw_data, &self.queue, &self.device, &mut render_pass)
-                .expect("Failed to render ImGui");
+                    if self.cache_debug_window.is_open {
+                        let player = self.player.read();
+                        let mouse_pos = ui.io().mouse_pos;
+                        let window_width = window.inner_size().width as f32;
+                        self.cache_debug_window
+                            .draw(ui, &player, mouse_pos[0], mouse_pos[1], window_width);
+                    }
+
+                    // Draw status-message toast in the bottom-left corner
+                    if let Some((msg, set_at)) = &self.status_message {
+                        let elapsed = set_at.elapsed().as_secs_f32();
+                        let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
+                        let win_size = window.inner_size();
+                        let padding = 10.0_f32;
+                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
+                        if let Some(_win) = ui
+                            .window("##status_toast")
+                            .position(
+                                [padding, win_size.height as f32 - padding],
+                                imgui::Condition::Always,
+                            )
+                            .position_pivot([0.0, 1.0])
+                            .bg_alpha(alpha * 0.75)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            ui.text_colored([1.0, 1.0, 1.0, alpha], msg.as_str());
+                        }
+                    }
+
+                    should_render_imgui = true;
+                    self.imgui_platform.prepare_render(ui, window);
+                }
+                Err(e) => {
+                    warn!("Failed to prepare ImGui frame: {}", e);
+                }
+            }
         }
 
         while let Ok((left_index, right_index, diff_data, size)) =
@@ -1194,6 +1190,33 @@ impl AppState {
             }
         }
 
+        if should_render_imgui {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ImGui Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            let draw_data = self.imgui_context.render();
+            if draw_data.draw_lists_count() > 0 {
+                if let Err(e) = self
+                    .imgui_renderer
+                    .render(draw_data, &self.queue, &self.device, &mut render_pass)
+                {
+                    warn!("Failed to render ImGui: {}", e);
+                }
+            } else {
+                debug!("Skipping ImGui render: no draw lists");
+            }
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
 
         // Capture screenshot if requested.
@@ -1243,7 +1266,12 @@ impl AppState {
                         self.config.format,
                         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
                     );
-                    let path = generate_output_filename("screenshot", "png");
+                    let screenshot_prefix = if self.show_flip_diff {
+                        "screenshot_flip"
+                    } else {
+                        "screenshot_regular"
+                    };
+                    let path = generate_output_filename(screenshot_prefix, "png");
                     let result_tx = self.screenshot_result_tx.clone();
                     // Pixel-format conversion and file I/O happen on a background thread
                     // so the render loop can continue without further blocking.
@@ -1282,11 +1310,6 @@ impl AppState {
                     self.status_message = Some((format!("Screenshot failed: {}", e), Instant::now()));
                 }
             }
-        }
-
-        // Pick up any pending screenshot result from the background thread
-        while let Ok(msg) = self.screenshot_result_rx.lock().try_recv() {
-            self.status_message = Some((msg, Instant::now()));
         }
 
         debug!("Presenting output");
@@ -1739,6 +1762,7 @@ impl AppState {
     /// Request a screenshot to be saved on the next rendered frame.
     pub fn request_screenshot(&mut self) {
         self.screenshot_requested = true;
+        self.status_message = Some(("Saving screenshot...".to_string(), Instant::now()));
     }
 }
 
