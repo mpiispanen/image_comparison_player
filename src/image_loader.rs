@@ -189,6 +189,10 @@ mod tests {
         .unwrap();
     }
 
+    fn create_test_ppm(path: &std::path::Path) {
+        fs::write(path, b"P3\n1 1\n255\n255 0 0\n").unwrap();
+    }
+
     fn write_tmp_input_txt(dir: &std::path::Path, content: &str) {
         let path = dir.join("input.txt");
         let mut f = fs::File::create(&path).unwrap();
@@ -255,6 +259,23 @@ duration 33333us\n";
         assert_eq!(images[0].1, 0);
         assert_eq!(images[0].2, images[1].1);
         assert_eq!(images[1].2, images[2].1);
+    }
+
+    #[test]
+    fn test_load_image_paths_from_files_accepts_ppm_and_pgm() {
+        let dir = TempDir::new("from_files_ppm_pgm");
+        let ppm = dir.path().join("a.ppm");
+        let pgm = dir.path().join("b.pgm");
+        create_test_ppm(&ppm);
+        fs::write(&pgm, b"P2\n1 1\n255\n127\n").unwrap();
+
+        let files = vec![
+            ppm.to_string_lossy().into_owned(),
+            pgm.to_string_lossy().into_owned(),
+        ];
+        let (images, count) = load_image_paths_from_files(&files, 30.0).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(images.len(), 2);
     }
 
     #[test]

@@ -1293,6 +1293,7 @@ fn next_time_point_backward(sorted_times: &[u64], current_time: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn make_image_data(frame_durations_us: &[u64]) -> Vec<(String, u64, u64)> {
         let mut data = Vec::new();
@@ -1302,6 +1303,34 @@ mod tests {
             t += d;
         }
         data
+    }
+
+    #[test]
+    fn test_load_image_data_from_path_ppm() {
+        let dir = std::env::temp_dir().join("icp_tests").join("player_load_ppm");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pixel.ppm");
+        fs::write(&path, b"P3\n1 1\n255\n255 0 0\n").unwrap();
+
+        let (rgba, size) = Player::load_image_data_from_path(path.to_str().unwrap(), None).unwrap();
+        assert_eq!(size.width, 1);
+        assert_eq!(size.height, 1);
+        assert_eq!(rgba, vec![255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn test_load_image_data_from_path_pgm() {
+        let dir = std::env::temp_dir().join("icp_tests").join("player_load_pgm");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pixel.pgm");
+        fs::write(&path, b"P2\n1 1\n255\n127\n").unwrap();
+
+        let (rgba, size) = Player::load_image_data_from_path(path.to_str().unwrap(), None).unwrap();
+        assert_eq!(size.width, 1);
+        assert_eq!(size.height, 1);
+        assert_eq!(rgba, vec![127, 127, 127, 255]);
     }
 
     // ── compute_sorted_time_points ──────────────────────────────────────────
