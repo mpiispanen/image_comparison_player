@@ -13,6 +13,109 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use threadpool::ThreadPool;
 
+/// Metrics tracking cache efficiency.
+pub struct CacheMetrics {
+    pub hits: AtomicU64,
+    pub misses: AtomicU64,
+    pub evictions: AtomicU64,
+}
+
+impl Default for CacheMetrics {
+    fn default() -> Self {
+        Self {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Returns the index (from `keys`) that is farthest from `current_frame` in circular distance.
+/// Returns `None` if `keys` is empty.
+fn select_eviction_candidate(
+    keys: &[usize],
+    current_frame: usize,
+    frame_count: usize,
+) -> Option<usize> {
+    keys.iter().cloned().max_by_key(|&k| {
+        let fwd = (k + frame_count - current_frame) % frame_count;
+        let bwd = (current_frame + frame_count - k) % frame_count;
+        std::cmp::min(fwd, bwd)
+    })
+}
+
+/// A fixed-capacity ring-buffer-style texture cache that evicts the frame farthest from
+/// the current playback position when capacity is exceeded.
+pub struct RingBufferTextureCache {
+    entries: Arc<RwLock<HashMap<usize, Arc<wgpu::Texture>>>>,
+    capacity: usize,
+    pub metrics: Arc<CacheMetrics>,
+}
+
+impl RingBufferTextureCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: Arc::new(RwLock::new(HashMap::with_capacity(capacity))),
+            capacity,
+            metrics: Arc::new(CacheMetrics::default()),
+        }
+    }
+
+    pub fn contains(&self, index: usize) -> bool {
+        self.entries.read().contains_key(&index)
+    }
+
+    fn get(&self, index: usize) -> Option<Arc<wgpu::Texture>> {
+        self.entries.read().get(&index).cloned()
+    }
+
+    /// Insert a texture into the cache. If the cache is at capacity, the frame farthest from
+    /// `current_frame` is evicted first. Returns any evicted textures so the caller can return
+    /// them to a reuse pool.
+    fn insert(
+        &self,
+        index: usize,
+        texture: Arc<wgpu::Texture>,
+        current_frame: usize,
+        frame_count: usize,
+    ) -> Vec<Arc<wgpu::Texture>> {
+        let mut entries = self.entries.write();
+        let mut evicted = Vec::new();
+
+        // Replace an existing entry without counting as an eviction.
+        if let Some(old) = entries.insert(index, texture) {
+            evicted.push(old);
+            return evicted;
+        }
+
+        // Evict the farthest frame(s) until we are within capacity.
+        while entries.len() > self.capacity {
+            let keys: Vec<usize> = entries.keys().cloned().filter(|&k| k != index).collect();
+            match select_eviction_candidate(&keys, current_frame, frame_count) {
+                Some(farthest) => {
+                    if let Some(old) = entries.remove(&farthest) {
+                        evicted.push(old);
+                        self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                None => break,
+            }
+        }
+
+        evicted
+    }
+}
+
+impl Clone for RingBufferTextureCache {
+    fn clone(&self) -> Self {
+        Self {
+            entries: Arc::clone(&self.entries),
+            capacity: self.capacity,
+            metrics: Arc::clone(&self.metrics),
+        }
+    }
+}
+
 pub struct TextureLoadRequest {
     path: String,
     index: usize,
@@ -111,8 +214,6 @@ impl PriorityTextureLoadQueue {
     }
 }
 
-type TextureCache = Arc<RwLock<HashMap<usize, Arc<Mutex<(Option<Arc<wgpu::Texture>>, Vec<u8>)>>>>>;
-
 type TextureProcessSender = Sender<(usize, bool, Vec<u8>, wgpu::Extent3d)>;
 type TextureProcessReceiver = Arc<Mutex<Receiver<(usize, bool, Vec<u8>, wgpu::Extent3d)>>>;
 type TextureHolder = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
@@ -163,8 +264,8 @@ pub struct Player {
     device: Arc<wgpu::Device>,
     current_frame1: AtomicUsize,
     current_frame2: AtomicUsize,
-    pub texture_cache_left: TextureCache,
-    pub texture_cache_right: TextureCache,
+    pub texture_cache_left: RingBufferTextureCache,
+    pub texture_cache_right: RingBufferTextureCache,
     texture_reuse_pool: Arc<Mutex<Vec<Arc<wgpu::Texture>>>>,
     frame_changed: Arc<AtomicBool>,
     pub texture_load_queue: Arc<Mutex<PriorityTextureLoadQueue>>,
@@ -193,6 +294,8 @@ pub struct Player {
     pub single_image_mode: bool,
     /// Pre-computed sorted unique time points for O(log N) frame navigation
     sorted_time_points: Vec<u64>,
+    pub flip_diff_cache_metrics: Arc<CacheMetrics>,
+    flip_diff_cache_capacity: usize,
 }
 
 impl Player {
@@ -206,6 +309,13 @@ impl Player {
         let texture_process_pool = ThreadPool::new(config.num_process_threads);
 
         let cache_size = config.cache_size;
+        let min_cache_span = config.preload_ahead + config.preload_behind + 1;
+        let per_side_cache_size = cache_size.max(min_cache_span);
+        // Keep small headroom above the active diff preload window so asynchronous
+        // completions at the boundary do not immediately evict each other.
+        const FLIP_DIFF_CACHE_HEADROOM: usize = 2;
+        let flip_diff_cache_capacity =
+            config.diff_preload_ahead + config.diff_preload_behind + 1 + FLIP_DIFF_CACHE_HEADROOM;
 
         let flip_diff_pool = ThreadPool::new(config.num_flip_diff_threads);
         let (flip_diff_sender, flip_diff_receiver) = channel();
@@ -234,8 +344,8 @@ impl Player {
             device,
             current_frame1: AtomicUsize::new(0),
             current_frame2: AtomicUsize::new(0),
-            texture_cache_left: Arc::new(RwLock::new(HashMap::with_capacity(cache_size / 2))),
-            texture_cache_right: Arc::new(RwLock::new(HashMap::with_capacity(cache_size / 2))),
+            texture_cache_left: RingBufferTextureCache::new(per_side_cache_size),
+            texture_cache_right: RingBufferTextureCache::new(per_side_cache_size),
             texture_reuse_pool: Arc::new(Mutex::new(Vec::new())),
             frame_changed: Arc::new(AtomicBool::new(false)),
             texture_load_queue: Arc::new(Mutex::new(PriorityTextureLoadQueue::new(
@@ -265,6 +375,8 @@ impl Player {
             flip_diff_raw_data: Arc::new(RwLock::new(HashMap::new())),
             single_image_mode,
             sorted_time_points,
+            flip_diff_cache_metrics: Arc::new(CacheMetrics::default()),
+            flip_diff_cache_capacity,
         }
     }
 
@@ -308,11 +420,7 @@ impl Player {
         } else {
             &self.texture_cache_right
         };
-
-        let cache_read = cache.read();
-        cache_read
-            .get(&index)
-            .and_then(|texture_holder| texture_holder.lock().0.as_ref().cloned())
+        cache.get(index)
     }
 
     fn get_current_index(&self, image_data: &[(String, u64, u64)], current_time: u64) -> usize {
@@ -439,26 +547,29 @@ impl Player {
             &self.texture_cache_right
         };
 
-        let cache_read = cache.read();
-        if !cache_read.contains_key(&index) {
-            drop(cache_read);
-            let path = if is_left {
-                &self.config.image_data1[index].0
-            } else {
-                &self.config.image_data2[index].0
-            };
+        if cache.contains(index) {
+            cache.metrics.hits.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
 
-            // Check if the image is already being processed
-            let mut processing_textures = self.processing_textures.lock();
-            if !processing_textures.contains(&(index, is_left)) {
-                processing_textures.insert((index, is_left));
-                drop(processing_textures);
+        cache.metrics.misses.fetch_add(1, Ordering::Relaxed);
 
-                // Add the request to the queue
-                let queue = self.texture_load_queue.lock();
-                if !queue.contains(&(index, is_left)) {
-                    queue.push(TextureLoadRequest::new(path.to_string(), index, is_left));
-                }
+        let path = if is_left {
+            &self.config.image_data1[index].0
+        } else {
+            &self.config.image_data2[index].0
+        };
+
+        // Check if the image is already being processed
+        let mut processing_textures = self.processing_textures.lock();
+        if !processing_textures.contains(&(index, is_left)) {
+            processing_textures.insert((index, is_left));
+            drop(processing_textures);
+
+            // Add the request to the queue
+            let queue = self.texture_load_queue.lock();
+            if !queue.contains(&(index, is_left)) {
+                queue.push(TextureLoadRequest::new(path.to_string(), index, is_left));
             }
         }
     }
@@ -525,11 +636,10 @@ impl Player {
             let queue = Arc::clone(&self.queue);
             let texture_reuse_pool = Arc::clone(&self.texture_reuse_pool);
             let cache = if is_left {
-                Arc::clone(&self.texture_cache_left)
+                self.texture_cache_left.clone()
             } else {
-                Arc::clone(&self.texture_cache_right)
+                self.texture_cache_right.clone()
             };
-            let cache_size = self.config.cache_size;
             let frame_changed = Arc::clone(&self.frame_changed);
             let texture_timings = Arc::clone(&self.texture_timings);
             let texture_available_times = Arc::clone(&self.texture_available_times);
@@ -585,44 +695,10 @@ impl Player {
                     size,
                 );
 
-                let texture_arc = Arc::clone(&texture);
-                let mut cache_write = cache.write();
-                if let Some(old_entry) =
-                    cache_write.insert(index, Arc::new(Mutex::new((Some(texture_arc), image_data))))
-                {
-                    if let Some(old_texture) = old_entry.lock().0.take() {
-                        texture_reuse_pool.lock().push(old_texture);
-                    }
-                }
-
-                // Evict old textures if cache size exceeds limit
-                if cache_write.len() > cache_size / 2 {
-                    let keys_to_evict: Vec<usize> = cache_write.keys().cloned().collect();
-
-                    let mut keys_with_distance: Vec<(usize, usize)> = keys_to_evict
-                        .iter()
-                        .map(|&key| {
-                            let forward_distance =
-                                (key + frame_count - current_frame) % frame_count;
-                            let backward_distance =
-                                (current_frame + frame_count - key) % frame_count;
-                            let min_distance = std::cmp::min(forward_distance, backward_distance);
-                            (key, min_distance)
-                        })
-                        .collect();
-
-                    keys_with_distance.sort_by_key(|&(_, distance)| std::cmp::Reverse(distance));
-
-                    for (key, _) in keys_with_distance
-                        .iter()
-                        .take(cache_write.len() - cache_size / 2)
-                    {
-                        if let Some(old_entry) = cache_write.remove(key) {
-                            if let Some(old_texture) = old_entry.lock().0.take() {
-                                texture_reuse_pool.lock().push(old_texture);
-                            }
-                        }
-                    }
+                // Insert into the ring-buffer cache; evicted textures go back to the reuse pool.
+                let evicted = cache.insert(index, texture, current_frame, frame_count);
+                for old_texture in evicted {
+                    texture_reuse_pool.lock().push(old_texture);
                 }
 
                 frame_changed.store(true, Ordering::Relaxed);
@@ -674,6 +750,7 @@ impl Player {
 
         // Preload flip diffs (not applicable in single image mode)
         if !self.single_image_mode && show_flip_diff {
+            self.ensure_flip_diff_generated(index1, index2);
             self.preload_flip_diffs(index1, index2);
         }
     }
@@ -701,9 +778,17 @@ impl Player {
         let flip_diff_cache = self.flip_diff_cache.read();
         let flip_diff_in_progress = self.flip_diff_in_progress.read();
 
-        if !flip_diff_cache.contains_key(&(left_index, right_index))
-            && !flip_diff_in_progress.contains(&(left_index, right_index))
-        {
+        if flip_diff_cache.contains_key(&(left_index, right_index)) {
+            self.flip_diff_cache_metrics
+                .hits
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
+        if !flip_diff_in_progress.contains(&(left_index, right_index)) {
+            self.flip_diff_cache_metrics
+                .misses
+                .fetch_add(1, Ordering::Relaxed);
             drop(flip_diff_cache);
             drop(flip_diff_in_progress);
             self.generate_flip_diff(left_index, right_index);
@@ -745,7 +830,8 @@ impl Player {
                 *self.current_frame_set_time.lock() = now;
 
                 if frame_changed && show_flip_diff {
-                    self.generate_flip_diff(current_left, current_right);
+                    let (new_left, new_right) = self.current_images();
+                    self.generate_flip_diff(new_left, new_right);
                 }
 
                 frame_changed
@@ -962,6 +1048,10 @@ impl Player {
             let diff_image_timings = Arc::clone(&self.diff_image_timings);
             let flip_stats = Arc::clone(&self.flip_stats);
             let flip_diff_raw_data = Arc::clone(&self.flip_diff_raw_data);
+            let flip_diff_cache_metrics = Arc::clone(&self.flip_diff_cache_metrics);
+            let flip_diff_cache_capacity = self.flip_diff_cache_capacity;
+            let current_frame_left = self.current_frame1.load(Ordering::Relaxed);
+            let frame_count1 = self.frame_count1;
 
             self.flip_diff_in_progress
                 .write()
@@ -1049,10 +1139,44 @@ impl Player {
                 );
 
                 let texture_arc = Arc::new(texture);
-                flip_diff_cache.write().insert(
-                    (left_index, right_index),
-                    Arc::new(Mutex::new(Some(texture_arc.clone()))),
-                );
+                {
+                    let mut cache_write = flip_diff_cache.write();
+                    cache_write.insert(
+                        (left_index, right_index),
+                        Arc::new(Mutex::new(Some(texture_arc.clone()))),
+                    );
+
+                    // Evict the entry with the left frame farthest from the current frame
+                    // when the cache exceeds its capacity.
+                    while cache_write.len() > flip_diff_cache_capacity {
+                        let candidate_left_keys: Vec<usize> = cache_write
+                            .keys()
+                            .filter(|&&(l, r)| !(l == left_index && r == right_index))
+                            .map(|&(l, _r)| l)
+                            .collect();
+                        match select_eviction_candidate(
+                            &candidate_left_keys,
+                            current_frame_left,
+                            frame_count1,
+                        ) {
+                            Some(evict_left) => {
+                                let evict_key = cache_write
+                                    .keys()
+                                    .find(|&&(l, _r)| l == evict_left)
+                                    .cloned();
+                                if let Some(key) = evict_key {
+                                    cache_write.remove(&key);
+                                    flip_diff_cache_metrics
+                                        .evictions
+                                        .fetch_add(1, Ordering::Relaxed);
+                                } else {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
                 flip_diff_in_progress
                     .write()
                     .remove(&(left_index, right_index));
@@ -1234,6 +1358,47 @@ mod performance_tests {
         assert_eq!(queue.pop().unwrap().index, 0);
         assert_eq!(queue.pop().unwrap().index, 1);
         assert_eq!(queue.pop().unwrap().index, 2);
+    }
+
+    // --- select_eviction_candidate tests ---
+
+    #[test]
+    fn test_select_eviction_candidate_empty() {
+        assert_eq!(select_eviction_candidate(&[], 5, 10), None);
+    }
+
+    #[test]
+    fn test_select_eviction_candidate_single() {
+        assert_eq!(select_eviction_candidate(&[3], 5, 10), Some(3));
+    }
+
+    #[test]
+    fn test_select_eviction_candidate_picks_farthest_linear() {
+        // current = 5, frame_count = 10
+        // frame 6: min_dist = 1  (nearest)
+        // frame 0: min_dist = 5  (farthest)
+        // frame 9: min_dist = 4
+        let result = select_eviction_candidate(&[6, 0, 9], 5, 10);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn test_select_eviction_candidate_wraps_correctly() {
+        // current = 0, frame_count = 10
+        // frame 9: fwd=9, bwd=1, min=1 (near because of wrap)
+        // frame 5: fwd=5, bwd=5, min=5 (farthest)
+        let result = select_eviction_candidate(&[9, 5], 0, 10);
+        assert_eq!(result, Some(5));
+    }
+
+    #[test]
+    fn test_select_eviction_candidate_symmetry() {
+        // current = 5, frame_count = 10
+        // frame 0: fwd=(0+10-5)%10=5, bwd=(5+10-0)%10=5, min_dist=5 (farthest)
+        // frame 1: fwd=(1+10-5)%10=6, bwd=(5+10-1)%10=4, min_dist=4
+        // frame 4: fwd=(4+10-5)%10=9, bwd=(5+10-4)%10=1, min_dist=1 (nearest)
+        let result = select_eviction_candidate(&[0, 1, 4], 5, 10);
+        assert_eq!(result, Some(0));
     }
 }
 
