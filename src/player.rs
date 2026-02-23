@@ -261,7 +261,6 @@ impl Player {
             expected_image_dimensions,
             flip_diff_raw_data: Arc::new(RwLock::new(HashMap::new())),
             sorted_time_points,
-            flip_diff_raw_data: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1116,7 +1115,7 @@ impl Player {
 }
 
 #[cfg(test)]
-mod tests {
+mod performance_tests {
     use super::*;
 
     /// Verifies that `get_flip_diff_raw_data` returns `None` when no diff has been generated.
