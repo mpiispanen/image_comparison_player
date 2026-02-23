@@ -1,6 +1,6 @@
 # Image Comparison Player
 
-The Image Comparison Player is a Rust-based application designed to compare images from two directories. It provides a visual interface for side-by-side comparison, flip difference visualization, and playback control of image sequences.
+The Image Comparison Player is a Rust-based application designed to view and compare images from one or two directories. It provides a visual interface for side-by-side comparison, flip difference visualization, and playback control of image sequences.
 
 <p align="center">
   <img src="https://github.com/mpiispanen/image_comparison_player/blob/main/gif/output1.gif" />
@@ -14,13 +14,14 @@ The Image Comparison Player is a Rust-based application designed to compare imag
 ## Purpose
 
 This application is useful for:
+- Viewing a single image sequence
 - Comparing two sets of image sequences
 - Analyzing differences between image sequences
 - Reviewing visual changes in rendered outputs
 
 ## How It Works
 
-The application loads images from two specified directories and displays them side-by-side. Users can navigate through the images, play them as a sequence, and use various comparison tools to analyze differences.
+The application loads images from one or two specified directories. When two directories are provided, images are displayed side-by-side with comparison tools. When only one directory is given, the single image stream fills the entire window (single image mode).
 
 ## Arguments
 
@@ -43,7 +44,8 @@ The application accepts the following command-line arguments:
 --fps <FPS>                   Frames per second (default: 30)
 ```
 
-Each side requires either `--dir1`/`--dir2` (directory) or `--images1`/`--images2` (explicit file list), but not both.
+Left side requires either `--dir1` (directory) or `--images1` (explicit file list), but not both.
+Right side is optional; when omitted (no `--dir2` and no `--images2`), the app runs in single image mode.
 
 ## User Interface Controls
 
@@ -106,8 +108,12 @@ The application supports three methods of specifying input images:
 4. Run `cargo build --release` to build the application
 5. Execute the application with the required arguments:
    ```
-   # Using directories
-   ./target/release/image_comparison_player --dir1 /path/to/first/directory --dir2 /path/to/second/directory
+    # Using directories
+    # Single image mode (view one image sequence):
+    ./target/release/image_comparison_player --dir1 /path/to/directory
+
+    # Comparison mode (compare two image sequences side-by-side):
+    ./target/release/image_comparison_player --dir1 /path/to/first/directory --dir2 /path/to/second/directory
 
    # Using explicit image files
    ./target/release/image_comparison_player \

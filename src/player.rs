@@ -132,6 +132,7 @@ pub struct PlayerConfig {
     pub num_flip_diff_threads: usize,
     pub diff_preload_ahead: usize,
     pub diff_preload_behind: usize,
+    pub single_image_mode: bool,
 }
 
 type FlipDiffSender = Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>;
@@ -189,6 +190,7 @@ pub struct Player {
     pub flip_stats: Arc<RwLock<HashMap<(usize, usize), FlipStats>>>,
     expected_image_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
     pub flip_diff_raw_data: FlipDiffRawData,
+    pub single_image_mode: bool,
     /// Pre-computed sorted unique time points for O(log N) frame navigation
     sorted_time_points: Vec<u64>,
 }
@@ -213,6 +215,7 @@ impl Player {
             Self::determine_expected_dimensions(&config.image_data1[0].0).unwrap_or((0, 0));
         let expected_image_dimensions = Arc::new(Mutex::new(Some(expected_dimensions)));
 
+        let single_image_mode = config.single_image_mode;
         let sorted_time_points = Self::compute_sorted_time_points(&config.image_data1, &config.image_data2);
 
         Self {
@@ -260,6 +263,7 @@ impl Player {
             flip_stats: Arc::new(RwLock::new(HashMap::new())),
             expected_image_dimensions,
             flip_diff_raw_data: Arc::new(RwLock::new(HashMap::new())),
+            single_image_mode,
             sorted_time_points,
         }
     }
@@ -641,7 +645,9 @@ impl Player {
     pub fn preload_textures(&self, index1: usize, index2: usize, show_flip_diff: bool) {
         // Ensure current frames are loaded first
         self.ensure_texture_loaded(index1, true);
-        self.ensure_texture_loaded(index2, false);
+        if !self.single_image_mode {
+            self.ensure_texture_loaded(index2, false);
+        }
 
         let frame_count1 = self.frame_count1;
         let frame_count2 = self.frame_count2;
@@ -649,21 +655,25 @@ impl Player {
         // Preload ahead
         for i in 1..=self.config.preload_ahead {
             let preload_index1 = (index1 + i) % frame_count1;
-            let preload_index2 = (index2 + i) % frame_count2;
             self.ensure_texture_loaded(preload_index1, true);
-            self.ensure_texture_loaded(preload_index2, false);
+            if !self.single_image_mode {
+                let preload_index2 = (index2 + i) % frame_count2;
+                self.ensure_texture_loaded(preload_index2, false);
+            }
         }
 
         // Preload behind
         for i in 1..=self.config.preload_behind {
             let preload_index1 = (index1 + frame_count1 - i % frame_count1) % frame_count1;
-            let preload_index2 = (index2 + frame_count2 - i % frame_count2) % frame_count2;
             self.ensure_texture_loaded(preload_index1, true);
-            self.ensure_texture_loaded(preload_index2, false);
+            if !self.single_image_mode {
+                let preload_index2 = (index2 + frame_count2 - i % frame_count2) % frame_count2;
+                self.ensure_texture_loaded(preload_index2, false);
+            }
         }
 
-        // Preload flip diffs
-        if show_flip_diff {
+        // Preload flip diffs (not applicable in single image mode)
+        if !self.single_image_mode && show_flip_diff {
             self.preload_flip_diffs(index1, index2);
         }
     }
@@ -727,7 +737,7 @@ impl Player {
             let elapsed = now.duration_since(*self.current_frame_set_time.lock());
 
             if self.get_texture(current_left, true).is_some()
-                && self.get_texture(current_right, false).is_some()
+                && (self.single_image_mode || self.get_texture(current_right, false).is_some())
             {
                 debug!("Frame displayed after {:?} delay", elapsed);
                 let scaled_delta = delta.mul_f32(self.playback_speed);
