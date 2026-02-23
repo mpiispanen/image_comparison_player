@@ -134,7 +134,14 @@ fn is_image_file(path: &Path) -> bool {
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     matches!(
         extension.to_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "bmp"
+        // Common formats
+        "jpg" | "jpeg" | "png" | "bmp" | "gif" | "webp"
+            // TIFF
+            | "tiff" | "tif"
+            // PNM / Netpbm
+            | "ppm" | "pbm" | "pgm" | "pam"
+            // Other formats supported by the image crate
+            | "dds" | "exr" | "ff" | "hdr" | "ico" | "qoi" | "tga"
     )
 }
 
@@ -180,6 +187,10 @@ mod tests {
             0x44, 0xAE, 0x42, 0x60, 0x82, // IEND CRC
         ])
         .unwrap();
+    }
+
+    fn create_test_ppm(path: &std::path::Path) {
+        fs::write(path, b"P3\n1 1\n255\n255 0 0\n").unwrap();
     }
 
     fn write_tmp_input_txt(dir: &std::path::Path, content: &str) {
@@ -251,6 +262,23 @@ duration 33333us\n";
     }
 
     #[test]
+    fn test_load_image_paths_from_files_accepts_ppm_and_pgm() {
+        let dir = TempDir::new("from_files_ppm_pgm");
+        let ppm = dir.path().join("a.ppm");
+        let pgm = dir.path().join("b.pgm");
+        create_test_ppm(&ppm);
+        fs::write(&pgm, b"P2\n1 1\n255\n127\n").unwrap();
+
+        let files = vec![
+            ppm.to_string_lossy().into_owned(),
+            pgm.to_string_lossy().into_owned(),
+        ];
+        let (images, count) = load_image_paths_from_files(&files, 30.0).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(images.len(), 2);
+    }
+
+    #[test]
     fn test_load_image_paths_from_files_empty() {
         let (images, count) = load_image_paths_from_files(&[], 30.0).unwrap();
         assert_eq!(count, 0);
@@ -281,13 +309,27 @@ duration 33333us\n";
         assert!(is_image_file(Path::new("image.jpeg")));
         assert!(is_image_file(Path::new("image.png")));
         assert!(is_image_file(Path::new("image.bmp")));
+        assert!(is_image_file(Path::new("image.gif")));
+        assert!(is_image_file(Path::new("image.tiff")));
+        assert!(is_image_file(Path::new("image.tif")));
+        assert!(is_image_file(Path::new("image.webp")));
+        assert!(is_image_file(Path::new("image.ico")));
+        assert!(is_image_file(Path::new("image.hdr")));
+        assert!(is_image_file(Path::new("image.ppm")));
+        assert!(is_image_file(Path::new("image.pbm")));
+        assert!(is_image_file(Path::new("image.pgm")));
+        assert!(is_image_file(Path::new("image.pam")));
+        assert!(is_image_file(Path::new("image.tga")));
+        assert!(is_image_file(Path::new("image.ff")));
+        assert!(is_image_file(Path::new("image.exr")));
+        assert!(is_image_file(Path::new("image.qoi")));
+        assert!(is_image_file(Path::new("image.dds")));
     }
 
     #[test]
     fn test_is_image_file_invalid_extensions() {
         assert!(!is_image_file(Path::new("image.txt")));
         assert!(!is_image_file(Path::new("image.mp4")));
-        assert!(!is_image_file(Path::new("image.gif")));
         assert!(!is_image_file(Path::new("image")));
     }
 
@@ -297,6 +339,8 @@ duration 33333us\n";
         assert!(is_image_file(Path::new("image.PNG")));
         assert!(is_image_file(Path::new("image.JPEG")));
         assert!(is_image_file(Path::new("image.BMP")));
+        assert!(is_image_file(Path::new("image.PPM")));
+        assert!(is_image_file(Path::new("image.TIFF")));
     }
 
     // --- load_from_directory tests ---
