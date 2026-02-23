@@ -1620,7 +1620,7 @@ impl AppState {
         debug!("Event handled");
     }
 
-    pub fn update_mouse_position(&mut self, x: f32, y: f32) {
+    fn compute_render_dimensions(&self) -> (f32, f32) {
         let player = self.player.read();
         let left_texture = player.get_left_texture();
 
@@ -1633,7 +1633,7 @@ impl AppState {
         let window_aspect_ratio = self.size.width as f32 / self.size.height as f32;
         let image_aspect_ratio = image_width / image_height;
 
-        let (render_width, render_height) = if window_aspect_ratio > image_aspect_ratio {
+        if window_aspect_ratio > image_aspect_ratio {
             let scaled_height = self.size.height as f32;
             let scaled_width = scaled_height * image_aspect_ratio;
             (scaled_width, scaled_height)
@@ -1641,7 +1641,11 @@ impl AppState {
             let scaled_width = self.size.width as f32;
             let scaled_height = scaled_width / image_aspect_ratio;
             (scaled_width, scaled_height)
-        };
+        }
+    }
+
+    pub fn update_mouse_position(&mut self, x: f32, y: f32) {
+        let (render_width, render_height) = self.compute_render_dimensions();
 
         let x_offset = (self.size.width as f32 - render_width) / 2.0;
         let y_offset = (self.size.height as f32 - render_height) / 2.0;
@@ -1687,30 +1691,42 @@ impl AppState {
 
         let new_zoom_level = (self.zoom_level * zoom_factor).clamp(1.0, 10.0);
 
-        // Calculate the mouse position relative to the image
-        let image_width = self.size.width as f32;
-        let image_height = self.size.height as f32;
-        let mouse_x = self.cursor_x / image_width;
-        let mouse_y = self.cursor_y / image_height;
+        // Convert cursor position to texture coordinates [0, 1] using render dimensions.
+        let (render_width, render_height) = self.compute_render_dimensions();
+        let mouse_x = self.cursor_x / render_width;
+        let mouse_y = self.cursor_y / render_height;
 
-        // Adjust the fixed zoom center based on the current zoom level and mouse position
-        let zoom_center_x = (mouse_x - 0.5) / self.zoom_level + 0.5;
-        let zoom_center_y = (mouse_y - 0.5) / self.zoom_level + 0.5;
+        // Incorporate any active pan offset into the effective zoom center.
+        let center_x = self.fixed_zoom_center.0 + self.zoom_center_offset.0;
+        let center_y = self.fixed_zoom_center.1 + self.zoom_center_offset.1;
 
-        // Calculate the maximum allowed offset based on the new zoom level
+        // Compute the new zoom center so the image pixel under the cursor stays fixed.
+        // The shader maps screen position `t` to image pixel `p`:
+        //   p = center + (t - center) / zoom_level
+        // For pixel `p` to remain at position `t` after zooming to new_zoom_level:
+        //   new_center = (p * new_zoom_level - t) / (new_zoom_level - 1)
+        let (new_center_x, new_center_y) = if new_zoom_level > 1.0 {
+            let pixel_x = center_x + (mouse_x - center_x) / self.zoom_level;
+            let pixel_y = center_y + (mouse_y - center_y) / self.zoom_level;
+            let cx = (pixel_x * new_zoom_level - mouse_x) / (new_zoom_level - 1.0);
+            let cy = (pixel_y * new_zoom_level - mouse_y) / (new_zoom_level - 1.0);
+            (cx, cy)
+        } else {
+            // At zoom level 1 there is no zoom; reset to center.
+            (0.5, 0.5)
+        };
+
+        // Clamp the zoom center to keep it within the image bounds.
         let max_offset_x = (1.0 - 1.0 / new_zoom_level) / 2.0;
         let max_offset_y = (1.0 - 1.0 / new_zoom_level) / 2.0;
+        let clamped_center_x = new_center_x.clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
+        let clamped_center_y = new_center_y.clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
 
-        // Clamp the zoom center to keep it within the image bounds
-        let clamped_zoom_center_x = zoom_center_x.clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
-        let clamped_zoom_center_y = zoom_center_y.clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
-
-        // Update the zoom level and fixed zoom center
+        // Update the zoom level and zoom center; reset the pan offset.
         self.zoom_level = new_zoom_level;
-        self.fixed_zoom_center = (clamped_zoom_center_x, clamped_zoom_center_y);
-        self.zoom_center_offset = (0.0, 0.0); // Reset the offset when zooming
+        self.fixed_zoom_center = (clamped_center_x, clamped_center_y);
+        self.zoom_center_offset = (0.0, 0.0);
 
-        // Update the uniform buffer
         self.update_uniform_buffer();
     }
 
