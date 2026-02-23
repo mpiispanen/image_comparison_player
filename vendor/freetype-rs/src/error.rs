@@ -204,6 +204,7 @@ impl From<i32> for Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        #[allow(deprecated)]
         f.write_str(error::Error::description(self))
     }
 }

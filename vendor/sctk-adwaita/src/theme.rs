@@ -17,7 +17,7 @@ pub struct ColorMap {
 }
 
 impl ColorMap {
-    pub(crate) fn headerbar_paint(&self) -> Paint {
+    pub(crate) fn headerbar_paint(&self) -> Paint<'_> {
         Paint {
             shader: Shader::SolidColor(self.headerbar),
             anti_alias: true,
@@ -25,7 +25,7 @@ impl ColorMap {
         }
     }
 
-    pub(crate) fn button_idle_paint(&self) -> Paint {
+    pub(crate) fn button_idle_paint(&self) -> Paint<'_> {
         Paint {
             shader: Shader::SolidColor(self.button_idle),
             anti_alias: true,
@@ -33,7 +33,7 @@ impl ColorMap {
         }
     }
 
-    pub(crate) fn button_hover_paint(&self) -> Paint {
+    pub(crate) fn button_hover_paint(&self) -> Paint<'_> {
         Paint {
             shader: Shader::SolidColor(self.button_hover),
             anti_alias: true,
@@ -41,14 +41,14 @@ impl ColorMap {
         }
     }
 
-    pub(crate) fn button_icon_paint(&self) -> Paint {
+    pub(crate) fn button_icon_paint(&self) -> Paint<'_> {
         Paint {
             shader: Shader::SolidColor(self.button_icon),
             ..Default::default()
         }
     }
 
-    pub(crate) fn border_paint(&self) -> Paint {
+    pub(crate) fn border_paint(&self) -> Paint<'_> {
         Paint {
             shader: Shader::SolidColor(self.border_color),
             ..Default::default()
