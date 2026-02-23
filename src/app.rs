@@ -32,6 +32,8 @@ struct UniformData {
     zoom_level: f32,
     zoom_center: [f32; 2],
     window_size: [f32; 2],
+    show_image1: f32,
+    show_image2: f32,
 }
 
 // SAFETY: UniformData is #[repr(C)] and all fields are f32 or [f32; N].
@@ -451,6 +453,8 @@ pub struct AppState {
     flip_diff_texture: FlipDiffTexture,
     flip_mode: bool,
     show_flip_diff: bool,
+    show_image1: bool,
+    show_image2: bool,
     zoom_level: f32,
     fixed_zoom_center: (f32, f32),
     swipe_start: Option<(f64, f64)>,
@@ -858,6 +862,8 @@ impl AppState {
             flip_diff_texture: Arc::new(Mutex::new(None)),
             flip_mode: false,
             show_flip_diff: false,
+            show_image1: true,
+            show_image2: true,
             flip_diff_receiver: Arc::new(Mutex::new(mpsc::channel().1)),
             zoom_level: 1.0,
             fixed_zoom_center: (0.5, 0.5),
@@ -982,6 +988,8 @@ impl AppState {
                 self.fixed_zoom_center.1 + self.zoom_center_offset.1
             ],
             window_size: [window_size.width as f32, window_size.height as f32],
+            show_image1: if self.show_image1 { 1.0 } else { 0.0 },
+            show_image2: if self.show_image2 { 1.0 } else { 0.0 },
         };
 
         debug!("Created texture view");
@@ -1210,6 +1218,8 @@ impl AppState {
                         self.fixed_zoom_center.1 + self.zoom_center_offset.1
                     ],
                     window_size: [window_size.width as f32, window_size.height as f32],
+                    show_image1: if self.show_image1 { 1.0 } else { 0.0 },
+                    show_image2: if self.show_image2 { 1.0 } else { 0.0 },
                 };
 
                 self.queue
@@ -1585,6 +1595,12 @@ impl AppState {
                 VirtualKeyCode::I => {
                     self.request_screenshot();
                 }
+                VirtualKeyCode::Key1 => {
+                    self.toggle_image_source(true);
+                }
+                VirtualKeyCode::Key2 => {
+                    self.toggle_image_source(false);
+                }
                 _ => {}
             }
         }
@@ -1646,6 +1662,15 @@ impl AppState {
                 .write()
                 .generate_flip_diff(current_left, current_right);
         }
+    }
+
+    pub fn toggle_image_source(&mut self, is_left: bool) {
+        if is_left {
+            self.show_image1 = !self.show_image1;
+        } else {
+            self.show_image2 = !self.show_image2;
+        }
+        self.update_uniform_buffer();
     }
 
     fn handle_zoom(&mut self, delta: &winit::event::MouseScrollDelta) {
@@ -1710,6 +1735,8 @@ impl AppState {
                 self.fixed_zoom_center.1 + self.zoom_center_offset.1
             ],
             window_size: [self.size.width as f32, self.size.height as f32],
+            show_image1: if self.show_image1 { 1.0 } else { 0.0 },
+            show_image2: if self.show_image2 { 1.0 } else { 0.0 },
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
