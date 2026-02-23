@@ -189,6 +189,8 @@ pub struct Player {
     pub flip_stats: Arc<RwLock<HashMap<(usize, usize), FlipStats>>>,
     expected_image_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
     pub flip_diff_raw_data: FlipDiffRawData,
+    /// Pre-computed sorted unique time points for O(log N) frame navigation
+    sorted_time_points: Vec<u64>,
 }
 
 impl Player {
@@ -210,6 +212,8 @@ impl Player {
         let expected_dimensions =
             Self::determine_expected_dimensions(&config.image_data1[0].0).unwrap_or((0, 0));
         let expected_image_dimensions = Arc::new(Mutex::new(Some(expected_dimensions)));
+
+        let sorted_time_points = Self::compute_sorted_time_points(&config.image_data1, &config.image_data2);
 
         Self {
             config,
@@ -256,6 +260,7 @@ impl Player {
             flip_stats: Arc::new(RwLock::new(HashMap::new())),
             expected_image_dimensions,
             flip_diff_raw_data: Arc::new(RwLock::new(HashMap::new())),
+            sorted_time_points,
         }
     }
 
@@ -268,6 +273,22 @@ impl Player {
             .with_guessed_format()?
             .into_dimensions()?;
         Ok(dimensions)
+    }
+
+    /// Pre-compute a sorted, deduplicated list of all time points from both sequences.
+    /// This is computed once at construction time to make `find_next_time_point` O(log N).
+    fn compute_sorted_time_points(
+        image_data1: &[(String, u64, u64)],
+        image_data2: &[(String, u64, u64)],
+    ) -> Vec<u64> {
+        let mut times: Vec<u64> = image_data1
+            .iter()
+            .chain(image_data2.iter())
+            .flat_map(|(_, start, end)| [*start, *end])
+            .collect();
+        times.sort_unstable();
+        times.dedup();
+        times
     }
 
     pub fn current_images(&self) -> (usize, usize) {
@@ -291,10 +312,7 @@ impl Player {
     }
 
     fn get_current_index(&self, image_data: &[(String, u64, u64)], current_time: u64) -> usize {
-        image_data
-            .iter()
-            .position(|(_, start, end)| *start <= current_time && current_time < *end)
-            .unwrap_or(image_data.len() - 1)
+        current_index_for_time(image_data, current_time)
     }
 
     pub fn toggle_play_pause(&self) {
@@ -340,33 +358,10 @@ impl Player {
     }
 
     fn find_next_time_point(&self, current_time: u64, direction: i64) -> u64 {
-        let all_time_points: Vec<u64> = self
-            .config
-            .image_data1
-            .iter()
-            .chain(self.config.image_data2.iter())
-            .flat_map(|(_, start, end)| vec![*start, *end])
-            .collect();
-
-        let mut sorted_times: Vec<u64> = all_time_points.into_iter().collect();
-        sorted_times.sort_unstable();
-        sorted_times.dedup();
-
-        let total_duration = *sorted_times.last().unwrap_or(&0);
-
         if direction > 0 {
-            sorted_times
-                .clone()
-                .into_iter()
-                .find(|&t| t > current_time)
-                .unwrap_or_else(|| sorted_times.first().cloned().unwrap_or(0))
+            next_time_point_forward(&self.sorted_time_points, current_time)
         } else {
-            sorted_times
-                .clone()
-                .into_iter()
-                .rev()
-                .find(|&t| t < current_time)
-                .unwrap_or_else(|| sorted_times.last().cloned().unwrap_or(total_duration))
+            next_time_point_backward(&self.sorted_time_points, current_time)
         }
     }
 
@@ -967,18 +962,12 @@ impl Player {
                 let left_image = FlipImageRgb8::with_data(
                     width,
                     height,
-                    &left_data
-                        .chunks(4)
-                        .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
-                        .collect::<Vec<u8>>(),
+                    &rgba_to_rgb(&left_data),
                 );
                 let right_image = FlipImageRgb8::with_data(
                     width,
                     height,
-                    &right_data
-                        .chunks(4)
-                        .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
-                        .collect::<Vec<u8>>(),
+                    &rgba_to_rgb(&right_data),
                 );
 
                 let error_map = flip(left_image, right_image, nv_flip::DEFAULT_PIXELS_PER_DEGREE);
@@ -997,12 +986,7 @@ impl Player {
                 // Store the flip stats
                 flip_stats.write().insert((left_index, right_index), stats);
 
-                let diff_data: Vec<u8> = visualized
-                    .to_vec()
-                    .chunks_exact(3)
-                    .flat_map(|chunk| chunk.iter().chain(std::iter::once(&255u8)))
-                    .copied()
-                    .collect();
+                let diff_data = rgb_to_rgba(visualized.to_vec());
                 let diff_size = wgpu::Extent3d {
                     width: visualized.width(),
                     height: visualized.height(),
@@ -1131,7 +1115,7 @@ impl Player {
 }
 
 #[cfg(test)]
-mod tests {
+mod performance_tests {
     use super::*;
 
     /// Verifies that `get_flip_diff_raw_data` returns `None` when no diff has been generated.
@@ -1240,5 +1224,195 @@ mod tests {
         assert_eq!(queue.pop().unwrap().index, 0);
         assert_eq!(queue.pop().unwrap().index, 1);
         assert_eq!(queue.pop().unwrap().index, 2);
+    }
+}
+
+/// Convert an RGBA byte slice to an RGB byte vec, dropping the alpha channel.
+/// Pre-allocates the output buffer to avoid repeated reallocations.
+fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(rgba.len() % 4, 0, "RGBA buffer length must be a multiple of 4");
+    let pixel_count = rgba.len() / 4;
+    let mut rgb = Vec::with_capacity(pixel_count * 3);
+    for chunk in rgba.chunks_exact(4) {
+        rgb.push(chunk[0]);
+        rgb.push(chunk[1]);
+        rgb.push(chunk[2]);
+    }
+    rgb
+}
+
+/// Convert an RGB byte vec to an RGBA byte vec, inserting 255 for the alpha channel.
+/// Pre-allocates the output buffer to avoid repeated reallocations.
+fn rgb_to_rgba(rgb: Vec<u8>) -> Vec<u8> {
+    debug_assert_eq!(rgb.len() % 3, 0, "RGB buffer length must be a multiple of 3");
+    let pixel_count = rgb.len() / 3;
+    let mut rgba = Vec::with_capacity(pixel_count * 4);
+    for chunk in rgb.chunks_exact(3) {
+        rgba.push(chunk[0]);
+        rgba.push(chunk[1]);
+        rgba.push(chunk[2]);
+        rgba.push(255);
+    }
+    rgba
+}
+
+/// Binary-search into a sorted image-data slice and return the index of the
+/// frame that covers `current_time`.  `image_data` must be sorted by start time.
+fn current_index_for_time(image_data: &[(String, u64, u64)], current_time: u64) -> usize {
+    let pos = image_data.partition_point(|(_, start, _)| *start <= current_time);
+    if pos == 0 {
+        0
+    } else {
+        pos - 1
+    }
+}
+
+/// Return the first time point strictly after `current_time` in a sorted,
+/// deduplicated `sorted_times` slice, wrapping to the first entry when past the end.
+fn next_time_point_forward(sorted_times: &[u64], current_time: u64) -> u64 {
+    let pos = sorted_times.partition_point(|&t| t <= current_time);
+    if pos < sorted_times.len() {
+        sorted_times[pos]
+    } else {
+        sorted_times.first().cloned().unwrap_or(0)
+    }
+}
+
+/// Return the last time point strictly before `current_time` in a sorted,
+/// deduplicated `sorted_times` slice, wrapping to the last entry when at the start.
+fn next_time_point_backward(sorted_times: &[u64], current_time: u64) -> u64 {
+    let total_duration = *sorted_times.last().unwrap_or(&0);
+    let pos = sorted_times.partition_point(|&t| t < current_time);
+    if pos > 0 {
+        sorted_times[pos - 1]
+    } else {
+        sorted_times.last().cloned().unwrap_or(total_duration)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_image_data(frame_durations_us: &[u64]) -> Vec<(String, u64, u64)> {
+        let mut data = Vec::new();
+        let mut t = 0u64;
+        for &d in frame_durations_us {
+            data.push(("dummy.png".to_string(), t, t + d));
+            t += d;
+        }
+        data
+    }
+
+    // ── compute_sorted_time_points ──────────────────────────────────────────
+
+    #[test]
+    fn test_compute_sorted_time_points_basic() {
+        let data1 = make_image_data(&[100, 100]);
+        let data2 = make_image_data(&[100, 100]);
+        let times = Player::compute_sorted_time_points(&data1, &data2);
+        assert_eq!(times, vec![0, 100, 200]);
+    }
+
+    #[test]
+    fn test_compute_sorted_time_points_dedup() {
+        // Both sequences share the same time points — result must be deduplicated.
+        let data1 = make_image_data(&[50, 50]);
+        let data2 = make_image_data(&[50, 50]);
+        let times = Player::compute_sorted_time_points(&data1, &data2);
+        assert_eq!(times, vec![0, 50, 100]);
+    }
+
+    #[test]
+    fn test_compute_sorted_time_points_unequal_sequences() {
+        let data1 = make_image_data(&[100]);
+        let data2 = make_image_data(&[50, 50]);
+        let times = Player::compute_sorted_time_points(&data1, &data2);
+        assert_eq!(times, vec![0, 50, 100]);
+    }
+
+    // ── rgba_to_rgb / rgb_to_rgba ───────────────────────────────────────────
+
+    #[test]
+    fn test_rgba_to_rgb_roundtrip() {
+        let rgba = vec![255u8, 128, 64, 200, 10, 20, 30, 40];
+        let rgb = rgba_to_rgb(&rgba);
+        assert_eq!(rgb, vec![255, 128, 64, 10, 20, 30]);
+    }
+
+    #[test]
+    fn test_rgb_to_rgba_inserts_alpha() {
+        let rgb = vec![255u8, 128, 64, 10, 20, 30];
+        let rgba = rgb_to_rgba(rgb);
+        assert_eq!(rgba, vec![255, 128, 64, 255, 10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn test_rgb_rgba_roundtrip_size() {
+        let pixel_count = 100usize;
+        let rgba_in: Vec<u8> = (0..pixel_count * 4).map(|i| (i % 256) as u8).collect();
+        let rgb = rgba_to_rgb(&rgba_in);
+        assert_eq!(rgb.len(), pixel_count * 3);
+        let rgba_out = rgb_to_rgba(rgb);
+        assert_eq!(rgba_out.len(), pixel_count * 4);
+    }
+
+    // ── get_current_index ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_current_index_first_frame() {
+        let data = make_image_data(&[100, 100, 100]);
+        assert_eq!(current_index_for_time(&data, 0), 0);
+        assert_eq!(current_index_for_time(&data, 50), 0);
+        assert_eq!(current_index_for_time(&data, 99), 0);
+    }
+
+    #[test]
+    fn test_get_current_index_middle_frame() {
+        let data = make_image_data(&[100, 100, 100]);
+        assert_eq!(current_index_for_time(&data, 100), 1);
+        assert_eq!(current_index_for_time(&data, 150), 1);
+        assert_eq!(current_index_for_time(&data, 199), 1);
+    }
+
+    #[test]
+    fn test_get_current_index_last_frame() {
+        let data = make_image_data(&[100, 100, 100]);
+        assert_eq!(current_index_for_time(&data, 200), 2);
+        assert_eq!(current_index_for_time(&data, 250), 2);
+        // At or past the end, returns last frame
+        assert_eq!(current_index_for_time(&data, 300), 2);
+    }
+
+    // ── find_next_time_point ───────────────────────────────────────────────
+
+    #[test]
+    fn test_find_next_forward_wraps_at_end() {
+        let times = vec![0u64, 100, 200];
+        // Past the last point → wraps to start
+        assert_eq!(next_time_point_forward(&times, 200), 0);
+    }
+
+    #[test]
+    fn test_find_next_forward_basic() {
+        let times = vec![0u64, 100, 200];
+        assert_eq!(next_time_point_forward(&times, 0), 100);
+        assert_eq!(next_time_point_forward(&times, 50), 100);
+        assert_eq!(next_time_point_forward(&times, 100), 200);
+    }
+
+    #[test]
+    fn test_find_next_backward_wraps_at_start() {
+        let times = vec![0u64, 100, 200];
+        // At or before start → wraps to end
+        assert_eq!(next_time_point_backward(&times, 0), 200);
+    }
+
+    #[test]
+    fn test_find_next_backward_basic() {
+        let times = vec![0u64, 100, 200];
+        assert_eq!(next_time_point_backward(&times, 200), 100);
+        assert_eq!(next_time_point_backward(&times, 150), 100);
+        assert_eq!(next_time_point_backward(&times, 100), 0);
     }
 }
