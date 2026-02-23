@@ -525,14 +525,24 @@ impl AppState {
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
 
+        // Prefer Mailbox (low latency, no tearing) over Immediate and Fifo to
+        // minimize the delay between mouse movement and the rendered split line.
+        let present_mode = if surface_caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else if surface_caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Immediate
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             // Round up to the nearest multiple of the Wayland buffer_scale so that the
-            // surface size is always valid on HiDPI compositors (scale 2, 3, …).
+            // surface size is always valid on HiDPI compositors (scale 2, 3, ...).
             width: round_up_to_multiple(size.width, surface_scale),
             height: round_up_to_multiple(size.height, surface_scale),
-            present_mode: surface_caps.present_modes[0],
+            present_mode,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
         };
