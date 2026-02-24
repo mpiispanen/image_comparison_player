@@ -699,6 +699,7 @@ fn read_two_texture_pixels(
 type FlipDiffReceiver = Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
 type FlipDiffTexture = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
 
+#[derive(Clone)]
 pub struct AppConfig {
     pub dir1: Option<String>,
     pub dir2: Option<String>,
@@ -758,6 +759,8 @@ pub struct AppState {
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
+    app_config: AppConfig,
+    pending_drop_paths: Vec<std::path::PathBuf>,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -809,6 +812,8 @@ impl AppState {
         app_config: AppConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         info!("Initializing AppState");
+
+        let stored_config = app_config.clone();
 
         let (images1, image_len1) = if let Some(files) = &app_config.images1 {
             image_loader::load_image_paths_from_files(files, app_config.fps)?
@@ -1215,6 +1220,8 @@ impl AppState {
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
+            app_config: stored_config,
+            pending_drop_paths: Vec::new(),
         })
     }
 
@@ -1232,6 +1239,12 @@ impl AppState {
     }
 
     pub fn update(&mut self) {
+        // Process any pending drag-and-drop paths accumulated since the last frame.
+        if !self.pending_drop_paths.is_empty() {
+            let paths = std::mem::take(&mut self.pending_drop_paths);
+            self.reload_from_dropped_paths(paths);
+        }
+
         let now = Instant::now();
         let delta = now.duration_since(self.last_update);
         self.last_update = now;
@@ -1897,6 +1910,136 @@ impl AppState {
         self.player.write().process_loaded_textures();
     }
 
+    /// Load images from a set of dropped paths and replace the current player.
+    ///
+    /// * 1 path → single-input mode (left side only)
+    /// * 2 paths → comparison mode (left and right sides)
+    /// * 0 or >2 paths → show an error status message and do nothing
+    fn reload_from_dropped_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        let fps = self.app_config.fps;
+
+        let count = paths.len();
+        if count == 0 || count > 2 {
+            if count > 2 {
+                self.status_message = Some((
+                    "Drop 1 or 2 paths to load images".to_string(),
+                    Instant::now(),
+                ));
+            }
+            return;
+        }
+
+        let load_path = |p: &std::path::PathBuf| -> Result<Vec<(String, u64, u64)>, String> {
+            if p.is_dir() {
+                image_loader::load_image_paths(&p.to_string_lossy(), fps)
+                    .map(|(imgs, _)| imgs)
+                    .map_err(|e| e.to_string())
+            } else if p.is_file() {
+                image_loader::load_image_paths_from_files(
+                    &[p.to_string_lossy().into_owned()],
+                    fps,
+                )
+                .map(|(imgs, _)| imgs)
+                .map_err(|e| e.to_string())
+            } else {
+                Err(format!("Path not found: {}", p.display()))
+            }
+        };
+
+        let images1 = match load_path(&paths[0]) {
+            Ok(imgs) if !imgs.is_empty() => imgs,
+            Ok(_) => {
+                self.status_message = Some((
+                    format!("No images found in: {}", paths[0].display()),
+                    Instant::now(),
+                ));
+                return;
+            }
+            Err(e) => {
+                self.status_message = Some((format!("Invalid drop: {}", e), Instant::now()));
+                return;
+            }
+        };
+
+        let (images2, single_image_mode) = if count == 2 {
+            match load_path(&paths[1]) {
+                Ok(imgs) if !imgs.is_empty() => (imgs, false),
+                Ok(_) => {
+                    self.status_message = Some((
+                        format!("No images found in: {}", paths[1].display()),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    self.status_message =
+                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    return;
+                }
+            }
+        } else {
+            (images1.clone(), true)
+        };
+
+        let new_player = Player::new(
+            PlayerConfig {
+                image_data1: images1,
+                image_data2: images2,
+                cache_size: self.app_config.cache_size,
+                preload_ahead: self.app_config.preload_ahead,
+                preload_behind: self.app_config.preload_behind,
+                num_load_threads: self.app_config.num_load_threads,
+                num_process_threads: self.app_config.num_process_threads,
+                num_flip_diff_threads: self.app_config.num_flip_diff_threads,
+                diff_preload_ahead: self.app_config.diff_preload_ahead,
+                diff_preload_behind: self.app_config.diff_preload_behind,
+                single_image_mode,
+            },
+            Arc::clone(&self.queue),
+            Arc::clone(&self.device),
+        );
+
+        if let Err(e) = new_player.load_initial_textures() {
+            self.status_message = Some((format!("Failed to load images: {}", e), Instant::now()));
+            return;
+        }
+
+        info!(
+            "Reloading player from dropped path(s): {}",
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        self.player = Arc::new(RwLock::new(new_player));
+        self.single_image_mode = single_image_mode;
+        self.show_flip_diff = false;
+        *self.flip_diff_texture.lock() = None;
+        self.zoom_level = 1.0;
+        self.fixed_zoom_center = (0.5, 0.5);
+        self.zoom_center_offset = (0.0, 0.0);
+
+        let path_display = |p: &std::path::PathBuf| -> String {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.to_string_lossy().into_owned())
+        };
+
+        let msg = if single_image_mode {
+            format!("Loaded: {}", path_display(&paths[0]))
+        } else {
+            format!(
+                "Loaded: {} | {}",
+                path_display(&paths[0]),
+                path_display(&paths[1])
+            )
+        };
+        self.status_message = Some((msg, Instant::now()));
+        self.load_and_update_textures();
+    }
+
     pub fn handle_event<T>(
         &mut self,
         window: &winit::window::Window,
@@ -2004,6 +2147,22 @@ impl AppState {
 
         if let winit::event::Event::WindowEvent { event: WindowEvent::Touch(touch), .. } = event {
             self.handle_touch(touch);
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::DroppedFile(path),
+            ..
+        } = event
+        {
+            self.pending_drop_paths.push(path.clone());
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::HoveredFileCancelled,
+            ..
+        } = event
+        {
+            self.pending_drop_paths.clear();
         }
 
         self.imgui_platform
@@ -2340,5 +2499,119 @@ mod tests {
         }
 
         assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    }
+
+    /// Tests for the drag-and-drop path loading helper used by reload_from_dropped_paths.
+    mod drop_tests {
+        use crate::image_loader;
+        use std::fs;
+
+        struct TempDir {
+            path: std::path::PathBuf,
+        }
+
+        impl TempDir {
+            fn new(name: &str) -> Self {
+                let path = std::env::temp_dir().join("icp_tests").join(name);
+                fs::create_dir_all(&path).unwrap();
+                Self { path }
+            }
+        }
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.path);
+            }
+        }
+
+        /// Loading a single image file via load_image_paths_from_files gives 1 entry.
+        #[test]
+        fn test_drop_single_image_file() {
+            let dir = TempDir::new("drop_single_image_file");
+            let img = image::RgbaImage::new(4, 4);
+            let img_path = dir.path.join("frame.png");
+            img.save(&img_path).unwrap();
+
+            let fps = 30.0;
+            let result = image_loader::load_image_paths_from_files(
+                &[img_path.to_string_lossy().into_owned()],
+                fps,
+            );
+            assert!(result.is_ok(), "should load single image file");
+            let (imgs, count) = result.unwrap();
+            assert_eq!(count, 1);
+            assert_eq!(imgs.len(), 1);
+        }
+
+        /// Loading a directory with images uses load_image_paths and returns entries.
+        #[test]
+        fn test_drop_directory_with_images() {
+            let dir = TempDir::new("drop_directory_with_images");
+            for i in 0..3u32 {
+                let img = image::RgbaImage::new(4, 4);
+                img.save(dir.path.join(format!("{}.png", i))).unwrap();
+            }
+
+            let fps = 30.0;
+            let result = image_loader::load_image_paths(&dir.path.to_string_lossy(), fps);
+            assert!(result.is_ok(), "should load from directory");
+            let (imgs, count) = result.unwrap();
+            assert_eq!(count, 3);
+            assert_eq!(imgs.len(), 3);
+        }
+
+        /// Dropping a non-existent path fails with a meaningful error.
+        #[test]
+        fn test_drop_nonexistent_path() {
+            let fps = 30.0;
+            let bad_path = std::path::PathBuf::from("/nonexistent/path/that/does/not/exist");
+            let result = if bad_path.is_dir() {
+                image_loader::load_image_paths(&bad_path.to_string_lossy(), fps)
+                    .map(|(v, _)| v)
+                    .map_err(|e| e.to_string())
+            } else if bad_path.is_file() {
+                image_loader::load_image_paths_from_files(
+                    &[bad_path.to_string_lossy().into_owned()],
+                    fps,
+                )
+                .map(|(v, _)| v)
+                .map_err(|e| e.to_string())
+            } else {
+                Err(format!("Path not found: {}", bad_path.display()))
+            };
+            assert!(result.is_err(), "should fail for nonexistent path");
+            assert!(
+                result.unwrap_err().contains("not found"),
+                "error message should mention 'not found'"
+            );
+        }
+
+        /// Dropping a non-image file fails with a meaningful error.
+        #[test]
+        fn test_drop_non_image_file() {
+            let dir = TempDir::new("drop_non_image_file");
+            let txt_path = dir.path.join("notes.txt");
+            fs::write(&txt_path, "not an image").unwrap();
+
+            let fps = 30.0;
+            let result = image_loader::load_image_paths_from_files(
+                &[txt_path.to_string_lossy().into_owned()],
+                fps,
+            );
+            assert!(result.is_err(), "should fail for non-image file");
+        }
+
+        /// An empty directory produces no images.
+        #[test]
+        fn test_drop_empty_directory() {
+            let dir = TempDir::new("drop_empty_directory");
+            let fps = 30.0;
+            let result = image_loader::load_image_paths(&dir.path.to_string_lossy(), fps);
+            // Should succeed but return 0 images
+            assert!(result.is_ok());
+            let (imgs, count) = result.unwrap();
+            assert_eq!(count, 0);
+            assert!(imgs.is_empty());
+        }
     }
 }
