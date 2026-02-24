@@ -68,6 +68,7 @@ The application supports the following keyboard controls:
 - D: Move zoom center right
 - P: Save the current FLIP diff image to a PNG file
 - I: Save a screenshot of the current window to a PNG file (`screenshot_regular_*` or `screenshot_flip_*` depending on FLIP mode)
+- X: Export the full playback sequence as an animated GIF (`review_export_*.gif`)
 - L: Toggle the split line between images on/off
 
 Mouse controls:
@@ -147,6 +148,30 @@ The application supports three methods of specifying input images:
      --images1 /path/to/img1.png /path/to/img2.png \
      --images2 /path/to/ref1.png /path/to/ref2.png
    ```
+
+## Video Export
+
+Press **X** to export the current playback as an animated GIF (`review_export_<timestamp>.gif` in the current directory).
+
+The export captures every frame exactly as displayed on screen — including the active compare mode (split-line position, FLIP diff overlay), zoom level, and pan offset.
+
+Progress is reported in the status bar and window title (e.g. `Exporting video (15/30)...`).  The application pauses playback automatically during export and resumes it afterwards.  A toast notification appears on completion (or on failure).
+
+### Output format
+
+| Property | Value |
+|---|---|
+| Container | GIF (`.gif`) |
+| Colour depth | 256 colours per frame (per-frame palette quantisation) |
+| Repeat | Infinite loop |
+| Frame delay | Derived from the source frame durations; minimum 20 ms |
+| Encoding speed | Speed 10 (good balance of quality vs. encode time, 1 = best, 30 = fastest) |
+
+> **Note:** GIF is limited to 256 colours per frame and does not support audio.  For higher quality output, record the exported frames with an external tool such as `ffmpeg`:
+> ```
+> ffmpeg -i review_export_<timestamp>.gif -c:v libx264 -pix_fmt yuv420p output.mp4
+> ```
+> To change the output format, replace the `run_gif_encoder` function in `src/app.rs` with an encoder that writes to a different container/codec.
 
 ## Dependencies
 

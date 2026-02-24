@@ -21,6 +21,40 @@ use winit::window::Window as WinitWindow;
 
 const APP_TITLE: &str = "Image Comparison Player";
 
+/// Minimum GIF frame delay in centiseconds (1/100 s). The GIF spec minimum is 2 cs.
+const GIF_MIN_DELAY_CS: u128 = 2;
+/// Maximum GIF frame delay in centiseconds (fits in a u16).
+const GIF_MAX_DELAY_CS: u128 = 65535;
+/// Default GIF frame delay used when per-frame duration is unavailable (~25 fps).
+const GIF_DEFAULT_DELAY_CS: u16 = 4;
+/// Color quantisation speed passed to the gif encoder (1 = best quality, 30 = fastest).
+const GIF_QUANTIZATION_SPEED: i32 = 10;
+
+/// A single captured frame destined for the animated-GIF encoder thread.
+struct FrameForExport {
+    /// Raw RGBA pixel data (width × height × 4 bytes, no row padding).
+    pixels: Vec<u8>,
+    /// Frame display duration in centiseconds (1/100 s); clamped to
+    /// [`GIF_MIN_DELAY_CS`]..=[`GIF_MAX_DELAY_CS`].
+    delay_centiseconds: u16,
+}
+
+/// State kept while a video export is in progress.
+struct VideoExportState {
+    /// Index of the next frame to render+capture (0-based).
+    frame_index: usize,
+    /// Total number of frames to export.
+    total_frames: usize,
+    /// Whether the player was playing before export started (so we can restore it).
+    was_playing: bool,
+    /// Channel to the background GIF-encoder thread.
+    /// Sending `None` signals the encoder to finalise the file.
+    frame_tx: mpsc::SyncSender<Option<FrameForExport>>,
+    /// Frame dimensions captured at export start.
+    width: u16,
+    height: u16,
+}
+
 #[allow(dead_code)]
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
@@ -655,6 +689,7 @@ impl HelpOverlay {
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
                 ui.separator();
                 ui.text("  I              Save screenshot");
+                ui.text("  X              Export playback as animated GIF");
                 ui.text("  Esc            Close overlay / Quit");
             });
     }
@@ -829,6 +864,7 @@ pub struct AppState {
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
+    video_export_state: Option<VideoExportState>,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1289,6 +1325,7 @@ impl AppState {
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
+            video_export_state: None,
         })
     }
 
@@ -1734,6 +1771,10 @@ impl AppState {
             };
         }
 
+        // Release the player read guard so we can take write locks below
+        // (screenshot and video-export paths both call into self.player.write()).
+        drop(player);
+
         // Capture screenshot if requested.
         // The GPU readback (copy + poll) must complete before output.present(), but the
         // slow pixel-format conversion and PNG file-write are offloaded to a background
@@ -1823,6 +1864,110 @@ impl AppState {
                 Err(e) => {
                     warn!("Screenshot channel receive failed: {}", e);
                     self.status_message = Some((format!("Screenshot failed: {}", e), Instant::now()));
+                }
+            }
+        }
+
+        // Capture the current frame into the GIF encoder if a video export is in progress.
+        if let Some(export_dims) = self.video_export_state.as_ref().map(|s| (s.width as u32, s.height as u32)) {
+            let (width, height) = export_dims;
+            if width > 0 && height > 0 {
+                let bytes_per_row = (width * 4 + 255) & !255;
+                let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Video Export Frame Buffer"),
+                    size: (bytes_per_row * height) as u64,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let mut export_encoder = self.device.create_command_encoder(
+                    &wgpu::CommandEncoderDescriptor { label: Some("Video Export Encoder") },
+                );
+                export_encoder.copy_texture_to_buffer(
+                    output.texture.as_image_copy(),
+                    wgpu::ImageCopyBuffer {
+                        buffer: &buffer,
+                        layout: wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(bytes_per_row),
+                            rows_per_image: Some(height),
+                        },
+                    },
+                    wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                );
+                self.queue.submit(std::iter::once(export_encoder.finish()));
+                let buffer_slice = buffer.slice(..);
+                let (tx, rx) = mpsc::channel();
+                buffer_slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+                self.device.poll(wgpu::Maintain::Wait);
+                if let Ok(Ok(_)) = rx.recv() {
+                    let raw = buffer_slice.get_mapped_range().to_vec();
+                    buffer.unmap();
+                    let is_bgra = matches!(
+                        self.config.format,
+                        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+                    );
+                    // Convert pixels to packed RGBA (strip row padding, fix channel order).
+                    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+                    for row in 0..height as usize {
+                        let row_start = row * bytes_per_row as usize;
+                        let row_data = &raw[row_start..row_start + (width * 4) as usize];
+                        if is_bgra {
+                            for chunk in row_data.chunks(4) {
+                                pixels.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+                            }
+                        } else {
+                            pixels.extend_from_slice(row_data);
+                        }
+                    }
+                    // Look up the display duration for the current frame.
+                    let delay_cs = {
+                        let player = self.player.read();
+                        let (left_index, _) = player.current_images();
+                        player
+                            .get_frame_duration(left_index, true)
+                            .map(|d| (d.as_millis() / 10).clamp(GIF_MIN_DELAY_CS, GIF_MAX_DELAY_CS) as u16)
+                            .unwrap_or(GIF_DEFAULT_DELAY_CS)
+                    };
+                    let frame_data = FrameForExport { pixels, delay_centiseconds: delay_cs };
+                    // Advance export state and decide what happens next.
+                    if let Some(export) = self.video_export_state.as_mut() {
+                        let send_ok = export.frame_tx.send(Some(frame_data)).is_ok();
+                        export.frame_index += 1;
+                        let next_index = export.frame_index;
+                        let total = export.total_frames;
+                        let was_playing = export.was_playing;
+                        let done = next_index >= total || !send_ok;
+                        if done {
+                            let _ = export.frame_tx.send(None); // tell encoder to finish
+                            self.video_export_state = None;
+                            if was_playing {
+                                self.player.write().toggle_play_pause();
+                            }
+                            if !send_ok {
+                                self.status_message = Some(("Video export failed (encoder error)".to_string(), Instant::now()));
+                            }
+                            // Success toast is delivered by the encoder thread via screenshot_result_rx.
+                        } else {
+                            // Advance the player to the next frame for the following render().
+                            self.player.write().next_frame(self.show_flip_diff);
+                            self.load_and_update_textures();
+                            self.status_message = Some((
+                                format!("Exporting video ({}/{})...", next_index, total),
+                                Instant::now(),
+                            ));
+                        }
+                    }
+                } else {
+                    warn!("GPU buffer mapping failed during video export");
+                    let was_playing = self.video_export_state.as_ref().map(|s| s.was_playing).unwrap_or(false);
+                    if let Some(ref s) = self.video_export_state {
+                        let _ = s.frame_tx.send(None);
+                    }
+                    self.video_export_state = None;
+                    if was_playing {
+                        self.player.write().toggle_play_pause();
+                    }
+                    self.status_message = Some(("Video export failed (GPU error)".to_string(), Instant::now()));
                 }
             }
         }
@@ -2093,6 +2238,9 @@ impl AppState {
                 VirtualKeyCode::I => {
                     self.request_screenshot();
                 }
+                VirtualKeyCode::X => {
+                    self.start_video_export();
+                }
                 VirtualKeyCode::Key1 => {
                     self.toggle_image_source(true);
                 }
@@ -2360,6 +2508,124 @@ impl AppState {
         self.screenshot_requested = true;
         self.status_message = Some(("Saving screenshot...".to_string(), Instant::now()));
     }
+
+    /// Start exporting the full playback sequence as an animated GIF.
+    ///
+    /// The export captures the view exactly as displayed on screen (including the
+    /// current compare mode, zoom, split-line position and FLIP diff overlay) by
+    /// performing a GPU readback after each rendered frame. Frames are encoded in
+    /// a background thread and the output file is written once all frames are done.
+    ///
+    /// Output format: animated GIF (Repeat::Infinite), one palette per frame.
+    /// Output codec/container: GIF (configurable only as to filename prefix).
+    pub fn start_video_export(&mut self) {
+        if self.video_export_state.is_some() {
+            self.status_message = Some(("Video export already in progress".to_string(), Instant::now()));
+            return;
+        }
+        let (total_frames, was_playing) = {
+            let player = self.player.read();
+            (player.frame_count1, player.is_playing())
+        };
+        if total_frames == 0 {
+            self.status_message = Some(("No frames to export".to_string(), Instant::now()));
+            return;
+        }
+        let width = self.size.width;
+        let height = self.size.height;
+        if width == 0 || height == 0 || width > 65535 || height > 65535 {
+            self.status_message = Some(("Video export failed: invalid window size".to_string(), Instant::now()));
+            return;
+        }
+
+        // Pause playback and rewind to the first frame.
+        if was_playing {
+            self.player.write().toggle_play_pause();
+        }
+        self.player.write().jump_to_frame_start();
+        self.load_and_update_textures();
+
+        let output_path = generate_output_filename("review_export", "gif");
+        // Bounded channel: 4 frames of look-ahead between capture and encoding.
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<Option<FrameForExport>>(4);
+        let result_tx = self.screenshot_result_tx.clone();
+        let path_clone = output_path.clone();
+        let w = width as u16;
+        let h = height as u16;
+        std::thread::spawn(move || {
+            run_gif_encoder(path_clone, w, h, frame_rx, result_tx);
+        });
+
+        self.video_export_state = Some(VideoExportState {
+            frame_index: 0,
+            total_frames,
+            was_playing,
+            frame_tx,
+            width: w,
+            height: h,
+        });
+        info!("Video export started: {} frames → {}", total_frames, output_path);
+        self.status_message = Some((
+            format!("Exporting video (0/{})...", total_frames),
+            Instant::now(),
+        ));
+    }
+}
+
+/// Background GIF encoder thread.
+///
+/// Receives RGBA frames from `frame_rx` and writes them to an animated GIF at
+/// `path`.  A `None` value on the channel signals the end of the sequence and
+/// causes the encoder to finalise and close the file.  The result (success
+/// message or error) is sent back on `result_tx` which feeds the normal
+/// status-toast infrastructure.
+///
+/// **Output format**: animated GIF, infinite repeat, per-frame 256-colour
+/// palette quantised at speed [`GIF_QUANTIZATION_SPEED`] (good balance of quality vs. encode time).
+/// To change the output format, replace this function with an encoder that
+/// writes to a different container/codec (e.g. MP4 via an ffmpeg binding).
+fn run_gif_encoder(
+    path: String,
+    width: u16,
+    height: u16,
+    frame_rx: mpsc::Receiver<Option<FrameForExport>>,
+    result_tx: mpsc::Sender<String>,
+) {
+    use gif::{Encoder, Frame, Repeat};
+    use std::fs::File;
+    use std::io::BufWriter;
+
+    let file = match File::create(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = result_tx.send(format!("Video export failed: {}", e));
+            return;
+        }
+    };
+    let writer = BufWriter::new(file);
+    let mut encoder = match Encoder::new(writer, width, height, &[]) {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = result_tx.send(format!("Video export failed: {}", e));
+            return;
+        }
+    };
+    if let Err(e) = encoder.set_repeat(Repeat::Infinite) {
+        let _ = result_tx.send(format!("Video export failed: {}", e));
+        return;
+    }
+
+    let mut frame_count = 0u32;
+    while let Ok(Some(mut frame_data)) = frame_rx.recv() {
+        let mut frame = Frame::from_rgba_speed(width, height, &mut frame_data.pixels, GIF_QUANTIZATION_SPEED);
+        frame.delay = frame_data.delay_centiseconds;
+        if let Err(e) = encoder.write_frame(&frame) {
+            let _ = result_tx.send(format!("Video export failed: {}", e));
+            return;
+        }
+        frame_count += 1;
+    }
+    let _ = result_tx.send(format!("Video exported: {} ({} frames)", path, frame_count));
 }
 
 /// Generate a timestamped output file path in the current directory.

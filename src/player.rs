@@ -438,6 +438,17 @@ impl Player {
         );
     }
 
+    /// Reset playback to the very first frame (time = 0).
+    pub fn jump_to_frame_start(&self) {
+        self.current_time.store(0, Ordering::Relaxed);
+        self.update_current_frames();
+    }
+
+    /// Return true if the player is currently playing.
+    pub fn is_playing(&self) -> bool {
+        self.is_playing.load(Ordering::Relaxed)
+    }
+
     pub fn next_frame(&self, show_flip_diff: bool) -> bool {
         let frame_changed = self.jump_to_next_time_point(1);
         if frame_changed && show_flip_diff {
