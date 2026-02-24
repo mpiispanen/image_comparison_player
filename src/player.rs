@@ -456,6 +456,29 @@ impl Player {
         frame_changed
     }
 
+    /// Seek directly to the frame at index `frame` in the left sequence.
+    /// Returns `true` when the current position changed.
+    pub fn seek_to_frame(&self, frame: usize, show_flip_diff: bool) -> bool {
+        let clamped = frame.min(self.frame_count1.saturating_sub(1));
+        let new_time = self
+            .config
+            .image_data1
+            .get(clamped)
+            .map(|(_, start, _)| *start)
+            .unwrap_or(0);
+        let old_time = self.current_time.swap(new_time, Ordering::Relaxed);
+        if new_time != old_time {
+            self.update_current_frames();
+            if show_flip_diff {
+                let (l, r) = self.current_images();
+                self.generate_flip_diff(l, r);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     fn jump_to_next_time_point(&self, direction: i64) -> bool {
         let current_time = self.current_time.load(Ordering::Relaxed);
         let new_time = self.find_next_time_point(current_time, direction);

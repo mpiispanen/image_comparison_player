@@ -1,3 +1,4 @@
+use crate::annotations::AnnotationStore;
 use crate::image_loader;
 use crate::player::FlipStats;
 use crate::player::Player;
@@ -650,6 +651,14 @@ impl HelpOverlay {
                 ui.text("  H              Toggle this help overlay");
                 ui.text("  C              Toggle cache debug window");
                 ui.text("  V              Toggle pixel info window");
+                ui.text("  N              Toggle annotations window");
+                ui.dummy([0.0, 4.0]);
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Annotations");
+                ui.separator();
+                ui.text("  M              Add / remove marker on current frame");
+                ui.text("  J / K          Previous / next marker");
+                ui.text("  X              Export annotations to JSON");
                 ui.dummy([0.0, 4.0]);
 
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
@@ -665,6 +674,195 @@ impl HelpOverlay {
 
     fn close(&mut self) {
         self.is_open = false;
+    }
+}
+
+// ── Annotation window ─────────────────────────────────────────────────────────
+
+enum AnnotationAction {
+    None,
+    GoToFrame(usize),
+    Export,
+    Import(String),
+}
+
+struct AnnotationWindow {
+    is_open: bool,
+    /// Edit buffer for the current frame's note text.
+    note_edit_buf: String,
+    /// Frame whose note is currently loaded into `note_edit_buf`.
+    note_edit_frame: usize,
+    /// Path buffer for the JSON import field.
+    import_path_buf: String,
+}
+
+impl AnnotationWindow {
+    fn new() -> Self {
+        Self {
+            is_open: false,
+            note_edit_buf: String::new(),
+            note_edit_frame: usize::MAX,
+            import_path_buf: String::new(),
+        }
+    }
+
+    /// Sync the note edit buffer with the annotation store when the frame changes.
+    fn sync_note_buf(&mut self, store: &mut AnnotationStore, current_frame: usize) {
+        if self.note_edit_frame != current_frame {
+            // Save the previous frame's note back to the store.
+            if store.has(self.note_edit_frame) {
+                store.set_note(self.note_edit_frame, self.note_edit_buf.clone());
+            }
+            // Load the new frame's note.
+            self.note_edit_buf = store
+                .get_note(current_frame)
+                .unwrap_or("")
+                .to_owned();
+            self.note_edit_frame = current_frame;
+        }
+    }
+
+    /// Refresh the note buffer from the store (needed after toggle/remove).
+    fn reload_note_buf(&mut self, store: &AnnotationStore, frame: usize) {
+        self.note_edit_buf = store.get_note(frame).unwrap_or("").to_owned();
+        self.note_edit_frame = frame;
+    }
+
+    fn draw(
+        &mut self,
+        ui: &imgui::Ui,
+        store: &mut AnnotationStore,
+        current_frame: usize,
+    ) -> AnnotationAction {
+        if !self.is_open {
+            return AnnotationAction::None;
+        }
+
+        self.sync_note_buf(store, current_frame);
+
+        let has_current = store.has(current_frame);
+        let annotation_count = store.annotations.len();
+        let all_frames: Vec<usize> = store.annotations.keys().copied().collect();
+
+        // Per-row actions collected inside the closure, applied after.
+        let mut remove_frame: Option<usize> = None;
+        let mut goto_frame: Option<usize> = None;
+        let mut do_toggle_current = false;
+        let mut do_export = false;
+        let mut do_import: Option<String> = None;
+
+        {
+            let note_buf = &mut self.note_edit_buf;
+            let import_buf = &mut self.import_path_buf;
+            let is_open_ref = &mut self.is_open;
+
+            ui.window("Annotations")
+                .size([400.0, 340.0], Condition::FirstUseEver)
+                .position([80.0, 80.0], Condition::FirstUseEver)
+                .resizable(true)
+                .opened(is_open_ref)
+                .build(|| {
+                    // ── Current frame ────────────────────────────────────────
+                    if has_current {
+                        ui.text_colored(
+                            [0.3, 1.0, 0.3, 1.0],
+                            format!("★  Frame {} is marked", current_frame),
+                        );
+                        ui.same_line();
+                        if ui.small_button("Remove##cur") {
+                            do_toggle_current = true;
+                        }
+                        ui.input_text_multiline("##note", note_buf, [0.0, 60.0])
+                            .build();
+                    } else {
+                        ui.text_disabled(format!("Frame {}  —  no marker", current_frame));
+                        if ui.button("Add Marker") {
+                            do_toggle_current = true;
+                        }
+                    }
+
+                    ui.separator();
+
+                    // ── Marker list ──────────────────────────────────────────
+                    ui.text(format!("All markers  ({})", annotation_count));
+                    ui.child_window("##ann_list")
+                        .size([0.0, 130.0])
+                        .build(|| {
+                            for &f in &all_frames {
+                                let star = if f == current_frame { "★" } else { "·" };
+                                let note_preview = store
+                                    .get_note(f)
+                                    .and_then(|n| n.lines().next())
+                                    .unwrap_or("");
+                                if note_preview.is_empty() {
+                                    ui.text(format!("{} Frame {}", star, f));
+                                } else {
+                                    ui.text(format!(
+                                        "{} Frame {}  {}",
+                                        star,
+                                        f,
+                                        note_preview.chars().take(40).collect::<String>()
+                                    ));
+                                }
+                                ui.same_line();
+                                if ui.small_button(format!("Go##g{}", f)) {
+                                    goto_frame = Some(f);
+                                }
+                                ui.same_line();
+                                if ui.small_button(format!("Del##d{}", f)) {
+                                    remove_frame = Some(f);
+                                }
+                            }
+                        });
+
+                    ui.separator();
+
+                    // ── Export / Import ──────────────────────────────────────
+                    if ui.button("Export JSON") {
+                        do_export = true;
+                    }
+                    ui.same_line();
+                    ui.set_next_item_width(160.0);
+                    ui.input_text("##ipath", import_buf).build();
+                    ui.same_line();
+                    if ui.button("Import") && !import_buf.is_empty() {
+                        do_import = Some(import_buf.clone());
+                    }
+                    ui.same_line();
+                    ui.text_disabled("← path");
+                });
+        }
+
+        // ── Apply actions ─────────────────────────────────────────────────────
+        if do_toggle_current {
+            store.toggle(current_frame);
+            self.reload_note_buf(store, current_frame);
+        }
+        if let Some(f) = remove_frame {
+            store.remove(f);
+            if f == current_frame {
+                self.reload_note_buf(store, current_frame);
+            }
+        }
+        // Always flush the edit buffer back to the store so it is not lost.
+        if store.has(current_frame) {
+            store.set_note(current_frame, self.note_edit_buf.clone());
+        }
+
+        if let Some(f) = goto_frame {
+            return AnnotationAction::GoToFrame(f);
+        }
+        if do_export {
+            return AnnotationAction::Export;
+        }
+        if let Some(path) = do_import {
+            return AnnotationAction::Import(path);
+        }
+        AnnotationAction::None
+    }
+
+    fn toggle(&mut self) {
+        self.is_open = !self.is_open;
     }
 }
 
@@ -781,6 +979,7 @@ pub struct AppConfig {
     pub diff_preload_ahead: usize,
     pub diff_preload_behind: usize,
     pub fps: f32,
+    pub annotations_file: Option<String>,
 }
 
 pub struct AppState {
@@ -826,6 +1025,8 @@ pub struct AppState {
     esc_key_down: bool,
     pixel_info_window: PixelInfoWindow,
     help_overlay: HelpOverlay,
+    annotation_store: AnnotationStore,
+    annotation_window: AnnotationWindow,
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
@@ -1242,6 +1443,15 @@ impl AppState {
         let mouse_position = (0.0, 0.0);
         let (screenshot_result_tx, screenshot_result_rx) = mpsc::channel::<String>();
 
+        // Load annotations from file if one was specified.
+        let mut annotation_store = AnnotationStore::new();
+        if let Some(ref path) = app_config.annotations_file {
+            match annotation_store.load_from_file(path) {
+                Ok(n) => info!("Loaded {} annotation(s) from '{}'", n, path),
+                Err(e) => warn!("Failed to load annotations from '{}': {}", path, e),
+            }
+        }
+
         info!("AppState initialized successfully");
         Ok(Self {
             surface,
@@ -1286,6 +1496,8 @@ impl AppState {
             esc_key_down: false,
             pixel_info_window: PixelInfoWindow::new(),
             help_overlay: HelpOverlay::new(),
+            annotation_store,
+            annotation_window: AnnotationWindow::new(),
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
@@ -1489,9 +1701,15 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
+        // Annotation actions collected during the ImGui frame are applied after
+        // the player read-guard is released (after the flip_diff while-loop).
+        let mut pending_ann_action = AnnotationAction::None;
+
         if self.cache_debug_window.is_open
             || self.pixel_info_window.is_open
             || self.help_overlay.is_open
+            || self.annotation_window.is_open
+            || self.annotation_store.has(left_index)
             || self.status_message.is_some()
         {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
@@ -1525,6 +1743,52 @@ impl AppState {
                     }
 
                     self.help_overlay.draw(ui, self.single_image_mode);
+
+                    // Draw the annotation window; collect the action for later application.
+                    pending_ann_action = self.annotation_window.draw(
+                        ui,
+                        &mut self.annotation_store,
+                        left_index,
+                    );
+
+                    // Draw a small HUD marker badge when the current frame is annotated.
+                    if self.annotation_store.has(left_index) {
+                        let win_size = window.inner_size();
+                        let padding = 10.0_f32;
+                        let note_preview = self
+                            .annotation_store
+                            .get_note(left_index)
+                            .and_then(|n| n.lines().next())
+                            .unwrap_or("")
+                            .chars()
+                            .take(50)
+                            .collect::<String>();
+                        let label = if note_preview.is_empty() {
+                            format!("★  Frame {}", left_index)
+                        } else {
+                            format!("★  Frame {}  {}", left_index, note_preview)
+                        };
+                        let _tok =
+                            ui.push_style_var(imgui::StyleVar::WindowPadding([6.0, 4.0]));
+                        if let Some(_win) = ui
+                            .window("##ann_hud")
+                            .position(
+                                [win_size.width as f32 - padding, padding],
+                                imgui::Condition::Always,
+                            )
+                            .position_pivot([1.0, 0.0])
+                            .bg_alpha(0.65)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            ui.text_colored([0.3, 1.0, 0.3, 1.0], &label);
+                        }
+                    }
 
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
@@ -1732,6 +1996,27 @@ impl AppState {
             } else {
                 sample_flip_error_at_pixel(&player, left_index, right_index, px, py)
             };
+        }
+
+        // Drop the player read-guard before applying annotation actions,
+        // since those methods need `&mut self`.
+        drop(player);
+
+        // Apply any pending annotation action collected during the ImGui frame.
+        match pending_ann_action {
+            AnnotationAction::GoToFrame(f) => {
+                let frame_changed = self.player.write().seek_to_frame(f, self.show_flip_diff);
+                if frame_changed {
+                    self.load_and_update_textures();
+                }
+            }
+            AnnotationAction::Export => {
+                self.export_annotations();
+            }
+            AnnotationAction::Import(path) => {
+                self.import_annotations(&path);
+            }
+            AnnotationAction::None => {}
         }
 
         // Capture screenshot if requested.
@@ -2108,6 +2393,40 @@ impl AppState {
                 VirtualKeyCode::H => {
                     self.help_overlay.toggle();
                 }
+                VirtualKeyCode::M => {
+                    // Toggle annotation marker on the current frame.
+                    let frame = self.player.read().current_images().0;
+                    self.annotation_store.toggle(frame);
+                    self.annotation_window.reload_note_buf(&self.annotation_store, frame);
+                }
+                VirtualKeyCode::N => {
+                    // Toggle the annotations window.
+                    self.annotation_window.toggle();
+                }
+                VirtualKeyCode::J => {
+                    // Navigate to the previous annotation marker.
+                    let frame = self.player.read().current_images().0;
+                    if let Some(target) = self.annotation_store.prev_marker(frame) {
+                        let changed = self.player.write().seek_to_frame(target, self.show_flip_diff);
+                        if changed {
+                            self.load_and_update_textures();
+                        }
+                    }
+                }
+                VirtualKeyCode::K => {
+                    // Navigate to the next annotation marker.
+                    let frame = self.player.read().current_images().0;
+                    if let Some(target) = self.annotation_store.next_marker(frame) {
+                        let changed = self.player.write().seek_to_frame(target, self.show_flip_diff);
+                        if changed {
+                            self.load_and_update_textures();
+                        }
+                    }
+                }
+                VirtualKeyCode::X => {
+                    // Export annotations to a JSON file.
+                    self.export_annotations();
+                }
                 _ => {}
             }
         }
@@ -2359,6 +2678,42 @@ impl AppState {
     pub fn request_screenshot(&mut self) {
         self.screenshot_requested = true;
         self.status_message = Some(("Saving screenshot...".to_string(), Instant::now()));
+    }
+
+    /// Export annotations to a timestamped JSON file.
+    pub fn export_annotations(&mut self) {
+        let path = generate_output_filename("annotations", "json");
+        match self.annotation_store.save_to_file(&path) {
+            Ok(()) => {
+                info!("Annotations exported to '{}'", path);
+                self.status_message =
+                    Some((format!("Annotations exported: {}", path), Instant::now()));
+            }
+            Err(e) => {
+                warn!("Failed to export annotations: {}", e);
+                self.status_message =
+                    Some((format!("Export failed: {}", e), Instant::now()));
+            }
+        }
+    }
+
+    /// Import annotations from the given JSON file path, merging them into the current store.
+    pub fn import_annotations(&mut self, path: &str) {
+        match self.annotation_store.load_from_file(path) {
+            Ok(n) => {
+                info!("Imported {} annotation(s) from '{}'", n, path);
+                self.status_message =
+                    Some((format!("Imported {} annotation(s)", n), Instant::now()));
+                // Refresh the edit buffer in case the current frame's note changed.
+                let frame = self.player.read().current_images().0;
+                self.annotation_window.reload_note_buf(&self.annotation_store, frame);
+            }
+            Err(e) => {
+                warn!("Failed to import annotations from '{}': {}", path, e);
+                self.status_message =
+                    Some((format!("Import failed: {}", e), Instant::now()));
+            }
+        }
     }
 }
 

@@ -7,6 +7,7 @@ use winit::{
     window::WindowBuilder,
 };
 mod app;
+mod annotations;
 mod image_loader;
 mod player;
 mod test_images;
@@ -146,6 +147,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Frames per second (overrides input.txt durations)")
                 .default_value("30"),
         )
+        .arg(
+            Arg::new("annotations")
+                .long("annotations")
+                .action(ArgAction::Set)
+                .value_name("FILE")
+                .help("JSON annotations file to load at startup")
+                .required(false),
+        )
         .get_matches();
 
     let test_mode = matches.get_flag("test_mode");
@@ -224,6 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .parse()
         .unwrap_or(30.0);
+    let annotations_file = matches.get_one::<String>("annotations").cloned();
 
     let (width, height) = parse_window_size(window_size)?;
 
@@ -257,6 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diff_preload_ahead,
         diff_preload_behind,
         fps,
+        annotations_file,
     };
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;
