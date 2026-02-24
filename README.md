@@ -67,6 +67,7 @@ The application supports the following keyboard controls:
 - D: Move zoom center right
 - P: Save the current FLIP diff image to a PNG file
 - I: Save a screenshot of the current window to a PNG file (`screenshot_regular_*` or `screenshot_flip_*` depending on FLIP mode)
+- L: Toggle the split line between images on/off
 
 Mouse controls:
 - Move the cursor horizontally to adjust the split between left and right images
