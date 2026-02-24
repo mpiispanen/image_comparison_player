@@ -54,7 +54,7 @@ impl Library {
         let mut raw = null_mut();
 
         let err = unsafe {
-            ffi::FT_New_Library(&mut MEMORY, &mut raw)
+            ffi::FT_New_Library(&raw mut MEMORY, &mut raw)
         };
         if err == ffi::FT_Err_Ok {
             unsafe {

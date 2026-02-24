@@ -98,7 +98,7 @@ impl GlyphSlot {
 
     /// In freetype, the `Outline` object is a scalable glyph. This method unpacks a glyph into
     /// this object, or returns `None` if the glyph has no `outline`
-    pub fn outline(&self) -> Option<Outline> {
+    pub fn outline(&self) -> Option<Outline<'_>> {
         let outline = unsafe { &(*self.raw).outline };
         let format = unsafe { (*self.raw).format };
 
