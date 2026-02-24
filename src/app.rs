@@ -37,11 +37,11 @@ struct UniformData {
     show_image1: f32,
     show_image2: f32,
     show_split_line: f32,
+    _padding: f32,
 }
 
-// SAFETY: UniformData is #[repr(C)] and all fields are f32 or [f32; N].
-// Every field has 4-byte size and 4-byte alignment, so #[repr(C)] introduces
-// no padding bytes between fields, making the struct valid for Pod.
+// SAFETY: UniformData is #[repr(C)] and all fields are plain f32 arrays/scalars.
+// `_padding` keeps the total size aligned with WGSL uniform layout expectations.
 unsafe impl bytemuck::Zeroable for UniformData {}
 unsafe impl bytemuck::Pod for UniformData {}
 
@@ -1331,6 +1331,7 @@ impl AppState {
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
+            _padding: 0.0,
         };
 
         debug!("Created texture view");
@@ -1580,6 +1581,7 @@ impl AppState {
                     show_image1: if self.show_image1 { 1.0 } else { 0.0 },
                     show_image2: if self.show_image2 { 1.0 } else { 0.0 },
                     show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
+                    _padding: 0.0,
                 };
 
                 self.queue
@@ -1998,6 +2000,7 @@ impl AppState {
                 }
                 VirtualKeyCode::L => {
                     self.toggle_split_line();
+                }
                 VirtualKeyCode::V => {
                     self.pixel_info_window.toggle();
                 }
@@ -2159,6 +2162,7 @@ impl AppState {
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
+            _padding: 0.0,
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
