@@ -1,6 +1,6 @@
 # Image Comparison Player
 
-The Image Comparison Player is a Rust-based application designed to view and compare images from one or two directories. It provides a visual interface for side-by-side comparison, flip difference visualization, and playback control of image sequences.
+The Image Comparison Player is a Rust-based application designed to view and compare images from one or more directories. It provides a visual interface for side-by-side comparison, flip difference visualization, and synchronized playback of up to four image sequences.
 
 <p align="center">
   <img src="https://github.com/mpiispanen/image_comparison_player/blob/main/gif/output1.gif" />
@@ -15,13 +15,18 @@ The Image Comparison Player is a Rust-based application designed to view and com
 
 This application is useful for:
 - Viewing a single image sequence
-- Comparing two sets of image sequences
+- Comparing two sets of image sequences (split-line mode)
+- **Comparing three or four sequences simultaneously** (multi-view mode)
 - Analyzing differences between image sequences
 - Reviewing visual changes in rendered outputs
 
 ## How It Works
 
-The application loads images from one or two specified directories. When two directories are provided, images are displayed side-by-side with comparison tools. When only one directory is given, the single image stream fills the entire window (single image mode).
+The application loads images from one to four specified directories or file lists.
+
+- **Single image mode** (only `--dir1`/`--images1` provided): fills the entire window.
+- **Two-input mode** (default): images are displayed side-by-side with a draggable split line and flip-difference tools.
+- **Multi-view mode** (three or four inputs): the window is divided into equal horizontal panels, one per sequence, all locked to the same playback time.
 
 ## Arguments
 
@@ -30,8 +35,12 @@ The application accepts the following command-line arguments:
 ```
 --dir1 <DIR>                  First directory containing images (use instead of --images1)
 --dir2 <DIR>                  Second directory containing images (use instead of --images2)
---images1 <FILE>...           One or more image files for the left side (use instead of --dir1)
---images2 <FILE>...           One or more image files for the right side (use instead of --dir2)
+--dir3 <DIR>                  Third directory for multi-view comparison (use instead of --images3)
+--dir4 <DIR>                  Fourth directory for multi-view comparison (use instead of --images4)
+--images1 <FILE>...           One or more image files for sequence 1 (use instead of --dir1)
+--images2 <FILE>...           One or more image files for sequence 2 (use instead of --dir2)
+--images3 <FILE>...           One or more image files for sequence 3 (use instead of --dir3)
+--images4 <FILE>...           One or more image files for sequence 4 (use instead of --dir4)
 --window-size <WIDTHxHEIGHT> Window size (default: 1920x1080)
 --cache-size <SIZE>           Size of the image cache (default: 50)
 --preload-ahead <COUNT>       Number of images to preload ahead (default: 6)
@@ -44,8 +53,21 @@ The application accepts the following command-line arguments:
 --fps <FPS>                   Frames per second (default: 30)
 ```
 
-Left side requires either `--dir1` (directory) or `--images1` (explicit file list), but not both.
-Right side is optional; when omitted (no `--dir2` and no `--images2`), the app runs in single image mode.
+Sequence 1 (`--dir1` or `--images1`) is required.  
+Sequence 2 is optional; when omitted the app runs in single image mode.  
+Sequences 3 and 4 are optional; when at least one is provided the app enters multi-view mode.
+
+### Multi-view example
+
+```sh
+image_comparison_player \
+  --dir1 /renders/baseline \
+  --dir2 /renders/variant_A \
+  --dir3 /renders/variant_B \
+  --dir4 /renders/variant_C
+```
+
+This opens four equal panels side by side, all synchronized to the same frame/time position.
 
 ## User Interface Controls
 
@@ -55,7 +77,7 @@ The application supports the following keyboard controls:
 - Right Arrow: Next frame
 - Space: Toggle play/pause
 - C: Toggle cache debug window
-- F: Toggle flip difference mode
+- F: Toggle flip difference mode (two-input mode only)
 - H: Toggle help overlay
 - Esc: Close help overlay (if open), otherwise exit the application
 - [ : Decrease playback speed
@@ -68,10 +90,10 @@ The application supports the following keyboard controls:
 - D: Move zoom center right
 - P: Save the current FLIP diff image to a PNG file
 - I: Save a screenshot of the current window to a PNG file (`screenshot_regular_*` or `screenshot_flip_*` depending on FLIP mode)
-- L: Toggle the split line between images on/off
+- L: Toggle the split line between images on/off (two-input mode only)
 
 Mouse controls:
-- Move the cursor horizontally to adjust the split between left and right images
+- Move the cursor horizontally to adjust the split between left and right images (two-input mode)
 - Move the cursor vertically in flip difference mode to switch between normal and difference views
 - Scroll to zoom in/out
 

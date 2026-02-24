@@ -1466,14 +1466,6 @@ impl AppState {
                     }
                 };
                 let panel_x = i as f32 * panel_w;
-                // Compute letterbox within the panel.
-                let panel_aspect = panel_w / panel_h;
-                let (pw, ph) = if panel_aspect > image_aspect_ratio {
-                    (panel_h * image_aspect_ratio, panel_h)
-                } else {
-                    (panel_w, panel_w / image_aspect_ratio)
-                };
-
                 // Create per-panel uniform buffer so each panel gets correct window_size.
                 let panel_uniforms = UniformData {
                     cursor_x: 1.0, // show only image1 in single-sequence tile view
@@ -1533,7 +1525,6 @@ impl AppState {
                     vp_w as u32,
                     vp_h as u32,
                 );
-                let _ = (pw, ph); // letterbox computed but viewport handles clipping
 
                 render_pass.set_pipeline(&self.render_pipeline);
                 render_pass.set_bind_group(0, &tex_bind_group, &[]);

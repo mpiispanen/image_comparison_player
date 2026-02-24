@@ -896,7 +896,7 @@ impl Player {
                 self.ensure_texture_loaded_seq((cur + i) % fc, seq_idx);
             }
             for i in 1..=self.config.preload_behind {
-                self.ensure_texture_loaded_seq((cur + fc - i % fc) % fc, seq_idx);
+                self.ensure_texture_loaded_seq((cur + fc - i) % fc, seq_idx);
             }
         }
 

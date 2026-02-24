@@ -222,9 +222,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             matches.get_one::<String>("dir3").cloned(),
             matches.get_one::<String>("dir4").cloned(),
         ]
-        .into_iter()
-        .take_while(|d| d.is_some() || matches.get_many::<String>("images3").is_some())
-        .collect()
     };
     let extra_images_3: Option<Vec<String>> = if test_mode {
         None
@@ -242,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         vec![extra_images_3, extra_images_4]
     };
-    // Trim trailing (None, None) pairs that provide no data.
+    // Trim trailing pairs that carry no data (both dir and images list are None).
     let num_extra = {
         let max_with_dir = extra_dirs.iter().rposition(|d| d.is_some()).map(|i| i + 1).unwrap_or(0);
         let max_with_imgs = extra_images.iter().rposition(|im| im.is_some()).map(|i| i + 1).unwrap_or(0);
