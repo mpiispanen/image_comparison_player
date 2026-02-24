@@ -22,6 +22,7 @@ struct Uniforms {
     window_size: vec2<f32>,
     show_image1: f32,
     show_image2: f32,
+    show_split_line: f32,
 }
 
 @group(1) @binding(0)
@@ -89,7 +90,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let render_width_fs = scale_x_fs * uniforms.window_size.x;
     let x_offset_fs = (uniforms.window_size.x - render_width_fs) / 2.0;
     let cursor_screen_x = x_offset_fs + uniforms.cursor_x * render_width_fs;
-    if (both_shown > 0.5 && abs(in.clip_position.x - cursor_screen_x) < 1.0) {
+    if (both_shown > 0.5 && uniforms.show_split_line > 0.5 && abs(in.clip_position.x - cursor_screen_x) < 1.0) {
         return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the line
     }
 

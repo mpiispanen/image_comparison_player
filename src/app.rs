@@ -36,11 +36,12 @@ struct UniformData {
     window_size: [f32; 2],
     show_image1: f32,
     show_image2: f32,
+    show_split_line: f32,
+    _padding: f32,
 }
 
-// SAFETY: UniformData is #[repr(C)] and all fields are f32 or [f32; N].
-// Every field has 4-byte size and 4-byte alignment, so #[repr(C)] introduces
-// no padding bytes between fields, making the struct valid for Pod.
+// SAFETY: UniformData is #[repr(C)] and all fields are plain f32 arrays/scalars.
+// `_padding` keeps the total size aligned with WGSL uniform layout expectations.
 unsafe impl bytemuck::Zeroable for UniformData {}
 unsafe impl bytemuck::Pod for UniformData {}
 
@@ -600,6 +601,75 @@ impl PixelInfoWindow {
     }
 }
 
+struct HelpOverlay {
+    is_open: bool,
+}
+
+impl HelpOverlay {
+    fn new() -> Self {
+        Self { is_open: false }
+    }
+
+    fn draw(&mut self, ui: &Ui, single_image_mode: bool) {
+        if !self.is_open {
+            return;
+        }
+        ui.window("Help - Keyboard & Mouse Controls")
+            .size([420.0, 380.0], Condition::FirstUseEver)
+            .position([60.0, 60.0], Condition::FirstUseEver)
+            .resizable(true)
+            .opened(&mut self.is_open)
+            .build(|| {
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Playback");
+                ui.separator();
+                ui.text("  Space          Play / Pause");
+                ui.text("  Left / Right   Previous / Next frame");
+                ui.text("  [  /  ]        Decrease / Increase playback speed");
+                ui.dummy([0.0, 4.0]);
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Zoom & Pan");
+                ui.separator();
+                ui.text("  Scroll wheel   Zoom in / out");
+                ui.text("  Up / Down      Zoom in / out");
+                ui.text("  Q / E          Zoom out / in");
+                ui.text("  W A S D        Pan up / left / down / right");
+                ui.dummy([0.0, 4.0]);
+
+                if !single_image_mode {
+                    ui.text_colored([1.0, 0.85, 0.3, 1.0], "Comparison");
+                    ui.separator();
+                    ui.text("  Mouse move     Move split-line divider");
+                    ui.text("  L              Toggle split-line divider");
+                    ui.text("  F              Toggle FLIP diff overlay");
+                    ui.text("  1 / 2          Show only left / right image");
+                    ui.text("  P              Save FLIP diff image");
+                    ui.dummy([0.0, 4.0]);
+                }
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Windows & Overlays");
+                ui.separator();
+                ui.text("  H              Toggle this help overlay");
+                ui.text("  O              Toggle HUD (frame/speed/zoom/mode)");
+                ui.text("  C              Toggle cache debug window");
+                ui.text("  V              Toggle pixel info window");
+                ui.dummy([0.0, 4.0]);
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
+                ui.separator();
+                ui.text("  I              Save screenshot");
+                ui.text("  Esc            Close overlay / Quit");
+            });
+    }
+
+    fn toggle(&mut self) {
+        self.is_open = !self.is_open;
+    }
+
+    fn close(&mut self) {
+        self.is_open = false;
+    }
+}
+
 struct CacheRowParams {
     frame_count: usize,
     mouse_pos: (f32, f32),
@@ -741,6 +811,7 @@ pub struct AppState {
     show_flip_diff: bool,
     show_image1: bool,
     show_image2: bool,
+    show_split_line: bool,
     zoom_level: f32,
     fixed_zoom_center: (f32, f32),
     swipe_start: Option<(f64, f64)>,
@@ -754,13 +825,13 @@ pub struct AppState {
     screenshot_result_rx: Arc<Mutex<mpsc::Receiver<String>>>,
     screenshot_result_tx: mpsc::Sender<String>,
     single_image_mode: bool,
+    esc_key_down: bool,
     pixel_info_window: PixelInfoWindow,
+    help_overlay: HelpOverlay,
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
     show_hud: bool,
-    show_help: bool,
-    esc_key_down: bool,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1200,6 +1271,7 @@ impl AppState {
             show_flip_diff: false,
             show_image1: true,
             show_image2: true,
+            show_split_line: true,
             flip_diff_receiver: Arc::new(Mutex::new(mpsc::channel().1)),
             zoom_level: 1.0,
             fixed_zoom_center: (0.5, 0.5),
@@ -1214,13 +1286,13 @@ impl AppState {
             screenshot_result_tx,
             screenshot_result_rx: Arc::new(Mutex::new(screenshot_result_rx)),
             single_image_mode,
+            esc_key_down: false,
             pixel_info_window: PixelInfoWindow::new(),
+            help_overlay: HelpOverlay::new(),
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
             show_hud: true,
-            show_help: false,
-            esc_key_down: false,
         })
     }
 
@@ -1333,6 +1405,8 @@ impl AppState {
             window_size: [window_size.width as f32, window_size.height as f32],
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+            show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
+            _padding: 0.0,
         };
 
         debug!("Created texture view");
@@ -1421,9 +1495,9 @@ impl AppState {
 
         if self.cache_debug_window.is_open
             || self.pixel_info_window.is_open
+            || self.help_overlay.is_open
             || self.status_message.is_some()
             || self.show_hud
-            || self.show_help
         {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
@@ -1455,6 +1529,8 @@ impl AppState {
                         );
                     }
 
+                    self.help_overlay.draw(ui, self.single_image_mode);
+
                     // Draw persistent HUD in the top-right corner
                     if self.show_hud {
                         let player = self.player.read();
@@ -1465,30 +1541,28 @@ impl AppState {
                         let playing = player.is_playing();
                         drop(player);
 
-                        let base_mode = if self.single_image_mode {
+                        let compare_mode = if self.single_image_mode {
                             "Single"
-                        } else if !self.show_image1 && !self.show_image2 {
-                            "Both hidden"
+                        } else if self.show_flip_diff {
+                            "FLIP diff"
                         } else if !self.show_image1 {
                             "Right only"
                         } else if !self.show_image2 {
                             "Left only"
                         } else {
-                            "Compare"
-                        };
-                        let mode_label = if self.single_image_mode {
-                            base_mode.to_string()
-                        } else if self.show_flip_diff {
-                            format!("FLIP diff + {}", base_mode)
-                        } else {
-                            base_mode.to_string()
+                            "Split"
                         };
 
+                        let win_size = window.inner_size();
                         let padding = 10.0_f32;
                         let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
                         if let Some(_win) = ui
                             .window("##hud")
-                            .position([padding, padding], imgui::Condition::Always)
+                            .position(
+                                [win_size.width as f32 - padding, padding],
+                                imgui::Condition::Always,
+                            )
+                            .position_pivot([1.0, 0.0])
                             .bg_alpha(0.6)
                             .no_decoration()
                             .no_inputs()
@@ -1498,37 +1572,37 @@ impl AppState {
                             .always_auto_resize(true)
                             .begin()
                         {
-                            let play_str = if playing { "Play" } else { "Pause" };
-                            ui.text(format!("Left frame: {}/{}", left_index + 1, left_total));
-                            ui.text(format!("Right frame: {}/{}", right_index + 1, right_total));
-                            if self.show_flip_diff || self.single_image_mode {
-                                ui.text(format!("Playback: {} {:.2}x", play_str, speed));
+                            let play_str = if playing { "▶" } else { "⏸" };
+                            if self.single_image_mode {
+                                ui.text_colored(
+                                    [1.0, 1.0, 1.0, 1.0],
+                                    format!(
+                                        "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                        left_index + 1,
+                                        left_total,
+                                        play_str,
+                                        speed,
+                                        self.zoom_level,
+                                        compare_mode,
+                                    ),
+                                );
+                            } else {
+                                ui.text_colored(
+                                    [1.0, 1.0, 1.0, 1.0],
+                                    format!(
+                                        "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                        left_index + 1,
+                                        left_total,
+                                        right_index + 1,
+                                        right_total,
+                                        play_str,
+                                        speed,
+                                        self.zoom_level,
+                                        compare_mode,
+                                    ),
+                                );
                             }
-                            ui.text(format!("Zoom: {:.1}x", self.zoom_level));
-                            ui.text(format!("Mode: {}", mode_label));
-                            ui.text("Hide HUD: O");
                         }
-                    }
-
-                    if self.show_help {
-                        ui.window("Help")
-                            .size([430.0, 300.0], Condition::FirstUseEver)
-                            .position([20.0, 130.0], Condition::FirstUseEver)
-                            .resizable(true)
-                            .always_auto_resize(true)
-                            .build(|| {
-                                ui.text("Controls");
-                                ui.separator();
-                                ui.bullet_text("H: Toggle help window");
-                                ui.bullet_text("O: Toggle HUD");
-                                ui.bullet_text("F: Toggle FLIP diff");
-                                ui.bullet_text("1 / 2: Show only left / right image");
-                                ui.bullet_text("Left / Right: Previous / next frame");
-                                ui.bullet_text("Space: Play / pause");
-                                ui.bullet_text("V: Toggle pixel info");
-                                ui.bullet_text("C: Toggle cache debug");
-                                ui.bullet_text("Esc: Close help (or exit when help is closed)");
-                            });
                     }
 
                     // Draw status-message toast in the bottom-left corner
@@ -1662,6 +1736,8 @@ impl AppState {
                     window_size: [window_size.width as f32, window_size.height as f32],
                     show_image1: if self.show_image1 { 1.0 } else { 0.0 },
                     show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+                    show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
+                    _padding: 0.0,
                 };
 
                 self.queue
@@ -2050,9 +2126,10 @@ impl AppState {
                 VirtualKeyCode::Escape => {
                     if !self.esc_key_down {
                         self.esc_key_down = true;
-                        if self.show_help {
-                            self.show_help = false;
+                        if self.help_overlay.is_open {
+                            self.help_overlay.close();
                         } else {
+                            // Exit the application when Esc is pressed
                             process::exit(0);
                         }
                     }
@@ -2101,11 +2178,14 @@ impl AppState {
                 VirtualKeyCode::Key2 => {
                     self.toggle_image_source(false);
                 }
+                VirtualKeyCode::L => {
+                    self.toggle_split_line();
+                }
                 VirtualKeyCode::V => {
                     self.pixel_info_window.toggle();
                 }
                 VirtualKeyCode::H => {
-                    self.show_help = !self.show_help;
+                    self.help_overlay.toggle();
                 }
                 VirtualKeyCode::O => {
                     self.show_hud = !self.show_hud;
@@ -2186,6 +2266,11 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
+    pub fn toggle_split_line(&mut self) {
+        self.show_split_line = !self.show_split_line;
+        self.update_uniform_buffer();
+    }
+
     fn handle_zoom(&mut self, delta: &winit::event::MouseScrollDelta) {
         let zoom_factor = match delta {
             winit::event::MouseScrollDelta::LineDelta(_, y) => {
@@ -2262,6 +2347,8 @@ impl AppState {
             window_size: [self.size.width as f32, self.size.height as f32],
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+            show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
+            _padding: 0.0,
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
