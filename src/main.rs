@@ -9,6 +9,7 @@ use winit::{
 mod app;
 mod image_loader;
 mod player;
+mod report;
 mod test_images;
 
 use crate::app::AppConfig;

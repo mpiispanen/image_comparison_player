@@ -2,6 +2,7 @@ use crate::image_loader;
 use crate::player::FlipStats;
 use crate::player::Player;
 use crate::player::PlayerConfig;
+use crate::report::{generate_report, ReportData, ReportFormat};
 use imgui::Condition;
 use imgui::Ui;
 use log::{debug, info, warn};
@@ -14,6 +15,7 @@ use std::time::Duration;
 use std::time::Instant;
 use std::process;
 use wgpu::util::DeviceExt;
+use winit::event::ModifiersState;
 use winit::event::TouchPhase;
 use winit::event::VirtualKeyCode;
 use winit::event::WindowEvent;
@@ -655,6 +657,8 @@ impl HelpOverlay {
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
                 ui.separator();
                 ui.text("  I              Save screenshot");
+                ui.text("  R              Export diff summary report (HTML)");
+                ui.text("  Shift+R        Export diff summary report (Markdown)");
                 ui.text("  Esc            Close overlay / Quit");
             });
     }
@@ -829,6 +833,7 @@ pub struct AppState {
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
+    modifiers: ModifiersState,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1289,6 +1294,7 @@ impl AppState {
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
+            modifiers: ModifiersState::empty(),
         })
     }
 
@@ -2108,8 +2114,24 @@ impl AppState {
                 VirtualKeyCode::H => {
                     self.help_overlay.toggle();
                 }
+                VirtualKeyCode::R => {
+                    let format = if self.modifiers.shift() {
+                        ReportFormat::Markdown
+                    } else {
+                        ReportFormat::Html
+                    };
+                    self.export_diff_report(format);
+                }
                 _ => {}
             }
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::ModifiersChanged(m),
+            ..
+        } = event
+        {
+            self.modifiers = *m;
         }
 
         if let winit::event::Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } = event {
@@ -2359,6 +2381,75 @@ impl AppState {
     pub fn request_screenshot(&mut self) {
         self.screenshot_requested = true;
         self.status_message = Some(("Saving screenshot...".to_string(), Instant::now()));
+    }
+
+    /// Generate and save a diff summary report (HTML or Markdown).
+    pub fn export_diff_report(&mut self, format: ReportFormat) {
+        let player = self.player.read();
+        let (left_index, right_index) = player.current_images();
+
+        // Collect all computed FLIP stats (owned copies, so we can drop the read lock).
+        let flip_stats = player.flip_stats.read().clone();
+        let flip_diff_image = player.get_flip_diff_raw_data(left_index, right_index);
+
+        let left_source = player
+            .config
+            .image_data1
+            .first()
+            .map(|(p, _, _)| {
+                std::path::Path::new(p)
+                    .parent()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.clone())
+            })
+            .unwrap_or_default();
+
+        let right_source = if self.single_image_mode {
+            left_source.clone()
+        } else {
+            player
+                .config
+                .image_data2
+                .first()
+                .map(|(p, _, _)| {
+                    std::path::Path::new(p)
+                        .parent()
+                        .map(|d| d.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.clone())
+                })
+                .unwrap_or_default()
+        };
+
+        let frame_count_left = player.frame_count1;
+        let frame_count_right = player.frame_count2;
+        drop(player);
+
+        let data = ReportData {
+            frame_count_left,
+            frame_count_right,
+            current_left: left_index,
+            current_right: right_index,
+            flip_stats,
+            flip_diff_image_rgba: flip_diff_image,
+            left_source,
+            right_source,
+        };
+
+        let ext = format.file_extension();
+        let output_path = generate_output_filename("diff_report", ext);
+
+        match generate_report(&data, format, &output_path) {
+            Ok(path) => {
+                info!("Diff report saved to {}", path);
+                self.status_message =
+                    Some((format!("Report saved: {}", path), Instant::now()));
+            }
+            Err(e) => {
+                warn!("Failed to generate diff report: {}", e);
+                self.status_message =
+                    Some((format!("Report generation failed: {}", e), Instant::now()));
+            }
+        }
     }
 }
 

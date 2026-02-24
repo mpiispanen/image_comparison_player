@@ -68,6 +68,8 @@ The application supports the following keyboard controls:
 - D: Move zoom center right
 - P: Save the current FLIP diff image to a PNG file
 - I: Save a screenshot of the current window to a PNG file (`screenshot_regular_*` or `screenshot_flip_*` depending on FLIP mode)
+- R: Export a diff summary report as an HTML file (`diff_report_*.html`) in the current directory
+- Shift+R: Export a diff summary report as a Markdown file (`diff_report_*.md`) – a companion `_flip_diff.png` is saved alongside
 - L: Toggle the split line between images on/off
 
 Mouse controls:
