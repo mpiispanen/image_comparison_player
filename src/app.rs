@@ -5,18 +5,19 @@ use crate::player::PlayerConfig;
 use imgui::Condition;
 use imgui::Ui;
 use log::{debug, info, warn};
+use nv_flip::magma_lut;
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
-use winit::event::WindowEvent;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use wgpu::util::DeviceExt;
-use winit::event::VirtualKeyCode;
-use winit::window::Window as WinitWindow;
-use winit::event::TouchPhase;
 use std::process;
+use wgpu::util::DeviceExt;
+use winit::event::TouchPhase;
+use winit::event::VirtualKeyCode;
+use winit::event::WindowEvent;
+use winit::window::Window as WinitWindow;
 
 const APP_TITLE: &str = "Image Comparison Player";
 
@@ -482,6 +483,7 @@ impl PixelInfoWindow {
         ui: &Ui,
         left_color: [u8; 4],
         right_color: [u8; 4],
+        flip_error: Option<f32>,
         flip_stats: Option<&FlipStats>,
         single_image_mode: bool,
     ) {
@@ -567,6 +569,14 @@ impl PixelInfoWindow {
                         right_color[2],
                         right_color[3]
                     ));
+                }
+
+                if !single_image_mode {
+                    if let Some(error) = flip_error {
+                        ui.text(format!("FLIP error @ pixel: {:.4}", error));
+                    } else {
+                        ui.text_disabled("FLIP error @ pixel: n/a");
+                    }
                 }
 
                 ui.separator();
@@ -747,6 +757,50 @@ pub struct AppState {
     pixel_info_window: PixelInfoWindow,
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
+    flip_error_value: Option<f32>,
+}
+
+fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
+    let lut = magma_lut().to_vec();
+    if lut.len() < 3 {
+        return None;
+    }
+    let mut best_index = 0usize;
+    let mut best_dist = u32::MAX;
+    for (index, chunk) in lut.chunks_exact(3).enumerate() {
+        let dr = rgb[0] as i32 - chunk[0] as i32;
+        let dg = rgb[1] as i32 - chunk[1] as i32;
+        let db = rgb[2] as i32 - chunk[2] as i32;
+        let dist = (dr * dr + dg * dg + db * db) as u32;
+        if dist < best_dist {
+            best_dist = dist;
+            best_index = index;
+            if dist == 0 {
+                break;
+            }
+        }
+    }
+    let max_index = lut.chunks_exact(3).len().saturating_sub(1).max(1) as f32;
+    Some(best_index as f32 / max_index)
+}
+
+fn sample_flip_error_at_pixel(
+    player: &Player,
+    left_index: usize,
+    right_index: usize,
+    px: u32,
+    py: u32,
+) -> Option<f32> {
+    let flip_diff_guard = player.flip_diff_raw_data.read();
+    let (diff_data, width, height) = flip_diff_guard.get(&(left_index, right_index))?;
+    if px >= *width || py >= *height {
+        return None;
+    }
+    let offset = ((py * *width + px) * 4) as usize;
+    if offset + 2 >= diff_data.len() {
+        return None;
+    }
+    decode_flip_error_from_magma_rgb([diff_data[offset], diff_data[offset + 1], diff_data[offset + 2]])
 }
 
 impl AppState {
@@ -1160,6 +1214,7 @@ impl AppState {
             pixel_info_window: PixelInfoWindow::new(),
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
+            flip_error_value: None,
         })
     }
 
@@ -1383,6 +1438,7 @@ impl AppState {
                             ui,
                             self.left_pixel_color,
                             self.right_pixel_color,
+                            self.flip_error_value,
                             flip_stats.as_ref(),
                             self.single_image_mode,
                         );
@@ -1587,6 +1643,11 @@ impl AppState {
             );
             self.left_pixel_color = lc;
             self.right_pixel_color = if self.single_image_mode { lc } else { rc };
+            self.flip_error_value = if self.single_image_mode {
+                None
+            } else {
+                sample_flip_error_at_pixel(&player, left_index, right_index, px, py)
+            };
         }
 
         // Capture screenshot if requested.
