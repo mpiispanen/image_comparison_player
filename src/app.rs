@@ -759,6 +759,8 @@ pub struct AppState {
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
     show_hud: bool,
+    show_help: bool,
+    esc_key_down: bool,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1217,6 +1219,8 @@ impl AppState {
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
             show_hud: true,
+            show_help: false,
+            esc_key_down: false,
         })
     }
 
@@ -1415,7 +1419,12 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.show_hud {
+        if self.cache_debug_window.is_open
+            || self.pixel_info_window.is_open
+            || self.status_message.is_some()
+            || self.show_hud
+            || self.show_help
+        {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1449,34 +1458,37 @@ impl AppState {
                     // Draw persistent HUD in the top-right corner
                     if self.show_hud {
                         let player = self.player.read();
-                        let (left_index, _right_index) = player.current_images();
-                        let frame_total = player.frame_count1;
+                        let (left_index, right_index) = player.current_images();
+                        let left_total = player.frame_count1;
+                        let right_total = player.frame_count2;
                         let speed = player.playback_speed();
                         let playing = player.is_playing();
                         drop(player);
 
-                        let compare_mode = if self.single_image_mode {
+                        let base_mode = if self.single_image_mode {
                             "Single"
-                        } else if self.show_flip_diff {
-                            "FLIP diff"
+                        } else if !self.show_image1 && !self.show_image2 {
+                            "Both hidden"
                         } else if !self.show_image1 {
                             "Right only"
                         } else if !self.show_image2 {
                             "Left only"
                         } else {
-                            "Split"
+                            "Compare"
+                        };
+                        let mode_label = if self.single_image_mode {
+                            base_mode.to_string()
+                        } else if self.show_flip_diff {
+                            format!("FLIP diff + {}", base_mode)
+                        } else {
+                            base_mode.to_string()
                         };
 
-                        let win_size = window.inner_size();
                         let padding = 10.0_f32;
                         let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
                         if let Some(_win) = ui
                             .window("##hud")
-                            .position(
-                                [win_size.width as f32 - padding, padding],
-                                imgui::Condition::Always,
-                            )
-                            .position_pivot([1.0, 0.0])
+                            .position([padding, padding], imgui::Condition::Always)
                             .bg_alpha(0.6)
                             .no_decoration()
                             .no_inputs()
@@ -1486,20 +1498,37 @@ impl AppState {
                             .always_auto_resize(true)
                             .begin()
                         {
-                            let play_str = if playing { "▶" } else { "⏸" };
-                            ui.text_colored(
-                                [1.0, 1.0, 1.0, 1.0],
-                                format!(
-                                    "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
-                                    left_index + 1,
-                                    frame_total,
-                                    play_str,
-                                    speed,
-                                    self.zoom_level,
-                                    compare_mode,
-                                ),
-                            );
+                            let play_str = if playing { "Play" } else { "Pause" };
+                            ui.text(format!("Left frame: {}/{}", left_index + 1, left_total));
+                            ui.text(format!("Right frame: {}/{}", right_index + 1, right_total));
+                            if self.show_flip_diff || self.single_image_mode {
+                                ui.text(format!("Playback: {} {:.2}x", play_str, speed));
+                            }
+                            ui.text(format!("Zoom: {:.1}x", self.zoom_level));
+                            ui.text(format!("Mode: {}", mode_label));
+                            ui.text("Hide HUD: O");
                         }
+                    }
+
+                    if self.show_help {
+                        ui.window("Help")
+                            .size([430.0, 300.0], Condition::FirstUseEver)
+                            .position([20.0, 130.0], Condition::FirstUseEver)
+                            .resizable(true)
+                            .always_auto_resize(true)
+                            .build(|| {
+                                ui.text("Controls");
+                                ui.separator();
+                                ui.bullet_text("H: Toggle help window");
+                                ui.bullet_text("O: Toggle HUD");
+                                ui.bullet_text("F: Toggle FLIP diff");
+                                ui.bullet_text("1 / 2: Show only left / right image");
+                                ui.bullet_text("Left / Right: Previous / next frame");
+                                ui.bullet_text("Space: Play / pause");
+                                ui.bullet_text("V: Toggle pixel info");
+                                ui.bullet_text("C: Toggle cache debug");
+                                ui.bullet_text("Esc: Close help (or exit when help is closed)");
+                            });
                     }
 
                     // Draw status-message toast in the bottom-left corner
@@ -1991,6 +2020,23 @@ impl AppState {
                 winit::event::WindowEvent::KeyboardInput {
                     input:
                         winit::event::KeyboardInput {
+                            state: winit::event::ElementState::Released,
+                            virtual_keycode: Some(VirtualKeyCode::Escape),
+                            ..
+                        },
+                    ..
+                },
+            ..
+        } = event
+        {
+            self.esc_key_down = false;
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event:
+                winit::event::WindowEvent::KeyboardInput {
+                    input:
+                        winit::event::KeyboardInput {
                             state: winit::event::ElementState::Pressed,
                             virtual_keycode: Some(keycode),
                             ..
@@ -2002,8 +2048,14 @@ impl AppState {
         {
             match keycode {
                 VirtualKeyCode::Escape => {
-                    // Exit the application when Esc is pressed
-                    process::exit(0);
+                    if !self.esc_key_down {
+                        self.esc_key_down = true;
+                        if self.show_help {
+                            self.show_help = false;
+                        } else {
+                            process::exit(0);
+                        }
+                    }
                 }
                 VirtualKeyCode::C => {
                     self.cache_debug_window.toggle();
@@ -2053,6 +2105,9 @@ impl AppState {
                     self.pixel_info_window.toggle();
                 }
                 VirtualKeyCode::H => {
+                    self.show_help = !self.show_help;
+                }
+                VirtualKeyCode::O => {
                     self.show_hud = !self.show_hud;
                 }
                 _ => {}

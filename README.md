@@ -56,8 +56,9 @@ The application supports the following keyboard controls:
 - Space: Toggle play/pause
 - C: Toggle cache debug window
 - F: Toggle flip difference mode
-- H: Toggle HUD (frame/speed/zoom/mode overlay)
-- Esc: Exit the application
+- H: Toggle help window
+- O: Toggle HUD (frame/speed/zoom/mode overlay)
+- Esc: Close help window (if open), otherwise exit the application
 - [ : Decrease playback speed
 - ] : Increase playback speed
 - Q: Zoom out

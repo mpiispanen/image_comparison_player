@@ -457,18 +457,37 @@ impl Player {
     }
 
     fn jump_to_next_time_point(&self, direction: i64) -> bool {
-        let current_time = self.current_time.load(Ordering::Relaxed);
-        let new_time = self.find_next_time_point(current_time, direction);
+        let old_frame1 = self.current_frame1.load(Ordering::Relaxed);
+        let old_frame2 = self.current_frame2.load(Ordering::Relaxed);
+        let add = direction >= 0;
 
-        if new_time != current_time {
-            self.current_time.store(new_time, Ordering::Relaxed);
-            self.update_current_frames();
+        let new_frame1 = if add {
+            (old_frame1 + 1) % self.frame_count1
+        } else {
+            (old_frame1 + self.frame_count1 - 1) % self.frame_count1
+        };
+        let new_frame2 = if add {
+            (old_frame2 + 1) % self.frame_count2
+        } else {
+            (old_frame2 + self.frame_count2 - 1) % self.frame_count2
+        };
+
+        self.current_frame1.store(new_frame1, Ordering::Relaxed);
+        self.current_frame2.store(new_frame2, Ordering::Relaxed);
+
+        if new_frame1 != old_frame1 || new_frame2 != old_frame2 {
+            let now = Instant::now();
+            let mut frame_switch_times = self.frame_switch_times.write();
+            frame_switch_times.insert((new_frame1, true), now);
+            frame_switch_times.insert((new_frame2, false), now);
+            self.frame_changed.store(true, Ordering::Relaxed);
             true
         } else {
             false
         }
     }
 
+    #[allow(dead_code)]
     fn find_next_time_point(&self, current_time: u64, direction: i64) -> u64 {
         if direction > 0 {
             next_time_point_forward(&self.sorted_time_points, current_time)
@@ -479,8 +498,20 @@ impl Player {
 
     fn update_current_frames(&self) {
         let current_time = self.current_time.load(Ordering::Relaxed);
-        let new_frame1 = self.get_current_index(&self.config.image_data1, current_time);
-        let new_frame2 = self.get_current_index(&self.config.image_data2, current_time);
+        let duration1 = sequence_duration(&self.config.image_data1);
+        let duration2 = sequence_duration(&self.config.image_data2);
+        let time1 = if duration1 > 0 {
+            current_time % duration1
+        } else {
+            current_time
+        };
+        let time2 = if duration2 > 0 {
+            current_time % duration2
+        } else {
+            current_time
+        };
+        let new_frame1 = self.get_current_index(&self.config.image_data1, time1);
+        let new_frame2 = self.get_current_index(&self.config.image_data2, time2);
 
         let old_frame1 = self.current_frame1.swap(new_frame1, Ordering::Relaxed);
         let old_frame2 = self.current_frame2.swap(new_frame2, Ordering::Relaxed);
@@ -866,19 +897,12 @@ impl Player {
     fn advance_frame(&self, delta_micros: u128) -> bool {
         let current_time = self.current_time.load(Ordering::Relaxed);
         let new_time = current_time.saturating_add(delta_micros as u64);
-        let total_duration = self.total_duration();
-
-        if new_time >= total_duration {
-            self.current_time.store(0, Ordering::Relaxed);
-            self.update_current_frames();
-            true
-        } else {
-            self.current_time.store(new_time, Ordering::Relaxed);
-            self.update_current_frames();
-            self.frame_changed.swap(false, Ordering::Relaxed)
-        }
+        self.current_time.store(new_time, Ordering::Relaxed);
+        self.update_current_frames();
+        self.frame_changed.swap(false, Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
     pub fn total_duration(&self) -> u64 {
         std::cmp::max(
             self.config
@@ -1448,6 +1472,10 @@ fn current_index_for_time(image_data: &[(String, u64, u64)], current_time: u64) 
     } else {
         pos - 1
     }
+}
+
+fn sequence_duration(image_data: &[(String, u64, u64)]) -> u64 {
+    image_data.last().map(|(_, _, end)| *end).unwrap_or(0)
 }
 
 /// Return the first time point strictly after `current_time` in a sorted,
