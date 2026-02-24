@@ -233,7 +233,7 @@ impl CacheDebugWindow {
 
                 let color = if cache.contains(frame) {
                     [0.0, 1.0, 0.0, 1.0]
-                } else if player.texture_load_queue.lock().contains(&(frame, is_left)) {
+                } else if player.texture_load_queue.lock().contains(&(frame, if is_left { 0usize } else { 1usize })) {
                     [1.0, 1.0, 0.0, 1.0]
                 } else {
                     [1.0, 0.0, 0.0, 1.0]
@@ -260,8 +260,8 @@ impl CacheDebugWindow {
                 }
 
                 // Check if playback delay is bigger than frame duration and draw orange border
-                let switch_time = player.frame_switch_times.read().get(&(frame, is_left)).cloned();
-                let available_time = player.texture_available_times.read().get(&(frame, is_left)).cloned();
+                let switch_time = player.frame_switch_times.read().get(&(frame, if is_left { 0usize } else { 1usize })).cloned();
+                let available_time = player.texture_available_times.read().get(&(frame, if is_left { 0usize } else { 1usize })).cloned();
                 if let (Some(switch), Some(available)) = (switch_time, available_time) {
                     let playback_delay = available.duration_since(switch);
                     if let Some(frame_duration) = player.get_frame_duration(frame, is_left) {
@@ -284,18 +284,18 @@ impl CacheDebugWindow {
                     && params.mouse_pos.1 <= y + scaled_button_size
                 {
                     let tooltip = if let Some(texture_info) =
-                        player.texture_timings.read().get(&(frame, is_left))
+                        player.texture_timings.read().get(&(frame, if is_left { 0usize } else { 1usize }))
                     {
                         let switch_time = player
                             .frame_switch_times
                             .read()
-                            .get(&(frame, is_left))
+                            .get(&(frame, if is_left { 0usize } else { 1usize }))
                             .cloned();
                         
                         let available_time = player
                             .texture_available_times
                             .read()
-                            .get(&(frame, is_left))
+                            .get(&(frame, if is_left { 0usize } else { 1usize }))
                             .cloned();
                         
                         let playback_delay = match (switch_time, available_time) {
@@ -314,7 +314,7 @@ impl CacheDebugWindow {
                             playback_delay.as_secs_f32() * 1000.0,
                             frame_duration.as_secs_f32() * 1000.0
                         )
-                    } else if player.texture_load_queue.lock().contains(&(frame, is_left)) {
+                    } else if player.texture_load_queue.lock().contains(&(frame, if is_left { 0usize } else { 1usize })) {
                         format!("Frame {} (Loading)", frame)
                     } else {
                         format!("Frame {} (Not loaded)", frame)
@@ -772,6 +772,10 @@ pub struct AppConfig {
     pub dir2: Option<String>,
     pub images1: Option<Vec<String>>,
     pub images2: Option<Vec<String>>,
+    /// Extra sequences beyond the primary two (each element is a dir path).
+    pub extra_dirs: Vec<Option<String>>,
+    /// Extra sequences beyond the primary two (each element is an explicit file list).
+    pub extra_images: Vec<Option<Vec<String>>>,
     pub cache_size: usize,
     pub preload_ahead: usize,
     pub preload_behind: usize,
@@ -795,6 +799,7 @@ pub struct AppState {
     cursor_y: f32,
     last_update: Instant,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    uniform_bind_group_layout: wgpu::BindGroupLayout,
     uniform_buffer: wgpu::Buffer,
     vertex_buffer: wgpu::Buffer,
     imgui_context: imgui::Context,
@@ -829,6 +834,8 @@ pub struct AppState {
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
+    /// Total number of active sequences (1, 2, or 3+ for multi-view).
+    active_sequence_count: usize,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -899,9 +906,32 @@ impl AppState {
         };
         let single_image_mode =
             app_config.dir2.is_none() && app_config.images2.as_ref().is_none_or(|v| v.is_empty());
+
+        // Load extra sequences (beyond the primary two).
+        let mut extra_image_data: Vec<Vec<(String, u64, u64)>> = Vec::new();
+        let num_extra = app_config.extra_dirs.len().max(app_config.extra_images.len());
+        for i in 0..num_extra {
+            let extra_files = app_config.extra_images.get(i).and_then(|v| v.as_ref());
+            let extra_dir = app_config.extra_dirs.get(i).and_then(|v| v.as_deref());
+            let (data, _len) = if let Some(files) = extra_files {
+                image_loader::load_image_paths_from_files(files, app_config.fps)?
+            } else if let Some(raw) = extra_dir {
+                let dir = std::fs::canonicalize(raw)?;
+                image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
+            } else {
+                continue;
+            };
+            extra_image_data.push(data);
+        }
+        let active_sequence_count = if single_image_mode {
+            1
+        } else {
+            2 + extra_image_data.len()
+        };
+
         debug!(
-            "Loaded {} images from input1 and {} images from input2",
-            image_len1, image_len2
+            "Loaded {} images from input1 and {} images from input2, {} extra sequences",
+            image_len1, image_len2, extra_image_data.len()
         );
 
         let size = window.inner_size();
@@ -1189,6 +1219,7 @@ impl AppState {
             PlayerConfig {
                 image_data1: images1,
                 image_data2: images2,
+                extra_image_data,
                 cache_size: app_config.cache_size,
                 preload_ahead: app_config.preload_ahead,
                 preload_behind: app_config.preload_behind,
@@ -1255,6 +1286,7 @@ impl AppState {
             cursor_y: size.height as f32 / 2.0,
             last_update: Instant::now(),
             texture_bind_group_layout,
+            uniform_bind_group_layout,
             uniform_buffer,
             vertex_buffer,
             imgui_context,
@@ -1289,6 +1321,7 @@ impl AppState {
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
+            active_sequence_count,
         })
     }
 
@@ -1386,25 +1419,6 @@ impl AppState {
             (scaled_width, scaled_height)
         };
 
-        let uniforms = UniformData {
-            cursor_x: if self.single_image_mode { 1.0 } else { self.cursor_x / render_width },
-            cursor_y: self.cursor_y / render_height,
-            image1_size: [image_width, image_height],
-            image2_size: [image_width, image_height],
-            flip_diff_size: [image_width, image_height],
-            show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
-            zoom_level: self.zoom_level,
-            zoom_center: [
-                self.fixed_zoom_center.0 + self.zoom_center_offset.0,
-                self.fixed_zoom_center.1 + self.zoom_center_offset.1
-            ],
-            window_size: [window_size.width as f32, window_size.height as f32],
-            show_image1: if self.show_image1 { 1.0 } else { 0.0 },
-            show_image2: if self.show_image2 { 1.0 } else { 0.0 },
-            show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
-            _padding: 0.0,
-        };
-
         debug!("Created texture view");
 
         let mut encoder = self
@@ -1413,61 +1427,197 @@ impl AppState {
                 label: Some("Render Encoder"),
             });
 
-        // Check if a valid flip diff texture exists for the current frame pair
-        let flip_diff_texture = if self.show_flip_diff {
-            player
-                .flip_diff_cache
-                .read()
-                .get(&(left_index, right_index))
-                .and_then(|mutex| mutex.lock().as_ref().cloned())
-        } else {
-            None
-        };
+        // ── Multi-view mode (3+ sequences) ──────────────────────────────────
+        if self.active_sequence_count >= 3 {
+            let n = self.active_sequence_count;
+            let panel_w = window_size.width as f32 / n as f32;
+            let panel_h = window_size.height as f32;
 
-        let use_flip_diff = flip_diff_texture.is_some();
-
-        let texture_bind_group = if use_flip_diff {
-            self.create_texture_bind_group_with_flip(
-                &left_texture,
-                &right_texture,
-                &flip_diff_texture.clone().unwrap(),
-            )
-        } else {
-            self.create_texture_bind_group(&left_texture, &right_texture)
-        };
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        }),
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: None,
-            });
-
-            self.queue
-                .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-
-            if use_flip_diff {
-                render_pass.set_pipeline(&self.render_pipeline_with_flip);
-            } else {
-                render_pass.set_pipeline(&self.render_pipeline);
+            // Collect textures for all sequences: [left, right, extra0, extra1, ...]
+            let mut panel_textures: Vec<Option<Arc<wgpu::Texture>>> = vec![
+                Some(left_texture.clone()),
+                Some(right_texture.clone()),
+            ];
+            for i in 0..player.extra_sequence_count() {
+                panel_textures.push(player.get_extra_sequence_texture(i));
             }
-            render_pass.set_bind_group(0, &texture_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.draw(0..6, 0..1);
-        }
+
+            // Per-panel render passes.
+            for (i, panel_tex) in panel_textures.iter().enumerate().take(n) {
+                let load_op = if i == 0 {
+                    wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+                } else {
+                    wgpu::LoadOp::Load
+                };
+                let tex = match panel_tex {
+                    Some(t) => t,
+                    None => {
+                        // Texture not ready – just clear/preserve this panel.
+                        let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Multi-View Panel Clear"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations { load: load_op, store: true },
+                            })],
+                            depth_stencil_attachment: None,
+                        });
+                        continue;
+                    }
+                };
+                let panel_x = i as f32 * panel_w;
+                // Compute letterbox within the panel.
+                let panel_aspect = panel_w / panel_h;
+                let (pw, ph) = if panel_aspect > image_aspect_ratio {
+                    (panel_h * image_aspect_ratio, panel_h)
+                } else {
+                    (panel_w, panel_w / image_aspect_ratio)
+                };
+
+                // Create per-panel uniform buffer so each panel gets correct window_size.
+                let panel_uniforms = UniformData {
+                    cursor_x: 1.0, // show only image1 in single-sequence tile view
+                    cursor_y: 0.5,
+                    image1_size: [image_width, image_height],
+                    image2_size: [image_width, image_height],
+                    flip_diff_size: [image_width, image_height],
+                    show_flip_diff: 0.0,
+                    zoom_level: self.zoom_level,
+                    zoom_center: [
+                        self.fixed_zoom_center.0 + self.zoom_center_offset.0,
+                        self.fixed_zoom_center.1 + self.zoom_center_offset.1,
+                    ],
+                    window_size: [panel_w, panel_h],
+                    show_image1: 1.0,
+                    show_image2: 0.0,
+                    show_split_line: 0.0,
+                    _padding: 0.0,
+                };
+                let panel_uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Panel Uniform Buffer"),
+                    contents: bytemuck::cast_slice(&[panel_uniforms]),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
+                let panel_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Panel Uniform Bind Group"),
+                    layout: &self.uniform_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: panel_uniform_buf.as_entire_binding(),
+                    }],
+                });
+                let tex_bind_group = self.create_texture_bind_group(tex, tex);
+
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Multi-View Panel Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: load_op,
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
+
+                // Viewport clips this panel's draw call to its horizontal strip.
+                let vp_x = panel_x;
+                let vp_y = 0.0_f32;
+                let vp_w = panel_w.max(1.0);
+                let vp_h = panel_h.max(1.0);
+                render_pass.set_viewport(vp_x, vp_y, vp_w, vp_h, 0.0, 1.0);
+                render_pass.set_scissor_rect(
+                    vp_x as u32,
+                    vp_y as u32,
+                    vp_w as u32,
+                    vp_h as u32,
+                );
+                let _ = (pw, ph); // letterbox computed but viewport handles clipping
+
+                render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_bind_group(0, &tex_bind_group, &[]);
+                render_pass.set_bind_group(1, &panel_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.draw(0..6, 0..1);
+            }
+        } else {
+            // ── Standard 1-or-2-input mode (existing behaviour) ─────────────
+            let uniforms = UniformData {
+                cursor_x: if self.single_image_mode { 1.0 } else { self.cursor_x / render_width },
+                cursor_y: self.cursor_y / render_height,
+                image1_size: [image_width, image_height],
+                image2_size: [image_width, image_height],
+                flip_diff_size: [image_width, image_height],
+                show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+                zoom_level: self.zoom_level,
+                zoom_center: [
+                    self.fixed_zoom_center.0 + self.zoom_center_offset.0,
+                    self.fixed_zoom_center.1 + self.zoom_center_offset.1
+                ],
+                window_size: [window_size.width as f32, window_size.height as f32],
+                show_image1: if self.show_image1 { 1.0 } else { 0.0 },
+                show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+                show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
+                _padding: 0.0,
+            };
+
+            // Check if a valid flip diff texture exists for the current frame pair
+            let flip_diff_texture = if self.show_flip_diff {
+                player
+                    .flip_diff_cache
+                    .read()
+                    .get(&(left_index, right_index))
+                    .and_then(|mutex| mutex.lock().as_ref().cloned())
+            } else {
+                None
+            };
+
+            let use_flip_diff = flip_diff_texture.is_some();
+
+            let texture_bind_group = if use_flip_diff {
+                self.create_texture_bind_group_with_flip(
+                    &left_texture,
+                    &right_texture,
+                    &flip_diff_texture.clone().unwrap(),
+                )
+            } else {
+                self.create_texture_bind_group(&left_texture, &right_texture)
+            };
+
+            {
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            }),
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
+
+                self.queue
+                    .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+                if use_flip_diff {
+                    render_pass.set_pipeline(&self.render_pipeline_with_flip);
+                } else {
+                    render_pass.set_pipeline(&self.render_pipeline);
+                }
+                render_pass.set_bind_group(0, &texture_bind_group, &[]);
+                render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.draw(0..6, 0..1);
+            }
+        } // end standard mode
 
         let mut should_render_imgui = false;
 

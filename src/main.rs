@@ -66,6 +66,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .num_args(1..),
         )
         .arg(
+            Arg::new("dir3")
+                .long("dir3")
+                .action(ArgAction::Set)
+                .value_name("DIR")
+                .help("Third directory for multi-view comparison (mutually exclusive with --images3)")
+                .required(false)
+                .conflicts_with("images3"),
+        )
+        .arg(
+            Arg::new("dir4")
+                .long("dir4")
+                .action(ArgAction::Set)
+                .value_name("DIR")
+                .help("Fourth directory for multi-view comparison (mutually exclusive with --images4)")
+                .required(false)
+                .conflicts_with("images4"),
+        )
+        .arg(
+            Arg::new("images3")
+                .long("images3")
+                .action(ArgAction::Append)
+                .value_name("FILE")
+                .help("One or more image files for the third sequence (use instead of --dir3)")
+                .required(false)
+                .num_args(1..),
+        )
+        .arg(
+            Arg::new("images4")
+                .long("images4")
+                .action(ArgAction::Append)
+                .value_name("FILE")
+                .help("One or more image files for the fourth sequence (use instead of --dir4)")
+                .required(false)
+                .num_args(1..),
+        )
+        .arg(
             Arg::new("window_size")
                 .short('w')
                 .long("window-size")
@@ -178,6 +214,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (dir1, dir2, images1, images2)
     };
 
+    // Extra sequences (3rd, 4th, …) — only parsed in non-test mode.
+    let extra_dirs: Vec<Option<String>> = if test_mode {
+        vec![]
+    } else {
+        vec![
+            matches.get_one::<String>("dir3").cloned(),
+            matches.get_one::<String>("dir4").cloned(),
+        ]
+        .into_iter()
+        .take_while(|d| d.is_some() || matches.get_many::<String>("images3").is_some())
+        .collect()
+    };
+    let extra_images_3: Option<Vec<String>> = if test_mode {
+        None
+    } else {
+        matches.get_many::<String>("images3").map(|vals| vals.cloned().collect())
+    };
+    let extra_images_4: Option<Vec<String>> = if test_mode {
+        None
+    } else {
+        matches.get_many::<String>("images4").map(|vals| vals.cloned().collect())
+    };
+    // Build per-sequence extra-images lists aligned with extra_dirs.
+    let extra_images: Vec<Option<Vec<String>>> = if test_mode {
+        vec![]
+    } else {
+        vec![extra_images_3, extra_images_4]
+    };
+    // Trim trailing (None, None) pairs that provide no data.
+    let num_extra = {
+        let max_with_dir = extra_dirs.iter().rposition(|d| d.is_some()).map(|i| i + 1).unwrap_or(0);
+        let max_with_imgs = extra_images.iter().rposition(|im| im.is_some()).map(|i| i + 1).unwrap_or(0);
+        max_with_dir.max(max_with_imgs)
+    };
+    let extra_dirs: Vec<Option<String>> = extra_dirs.into_iter().take(num_extra).collect();
+    let extra_images: Vec<Option<Vec<String>>> = extra_images.into_iter().take(num_extra).collect();
+
     let window_size = matches.get_one::<String>("window_size").unwrap();
     let cache_size = matches
         .get_one::<String>("cache_size")
@@ -248,6 +321,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dir2,
         images1,
         images2,
+        extra_dirs,
+        extra_images,
         cache_size,
         preload_ahead,
         preload_behind,

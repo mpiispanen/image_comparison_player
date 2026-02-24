@@ -119,16 +119,17 @@ impl Clone for RingBufferTextureCache {
 pub struct TextureLoadRequest {
     path: String,
     index: usize,
-    is_left: bool,
+    /// Sequence index: 0 = left, 1 = right, 2+ = extra sequences.
+    sequence_idx: usize,
     load_start: Instant,
 }
 
 impl TextureLoadRequest {
-    fn new(path: String, index: usize, is_left: bool) -> Self {
+    fn new(path: String, index: usize, sequence_idx: usize) -> Self {
         Self {
             path,
             index,
-            is_left,
+            sequence_idx,
             load_start: Instant::now(),
         }
     }
@@ -136,16 +137,17 @@ impl TextureLoadRequest {
 
 struct TextureProcessRequest {
     index: usize,
-    is_left: bool,
+    /// Sequence index: 0 = left, 1 = right, 2+ = extra sequences.
+    sequence_idx: usize,
     image_data: Vec<u8>,
     size: wgpu::Extent3d,
 }
 
 impl TextureProcessRequest {
-    fn new(index: usize, is_left: bool, image_data: Vec<u8>, size: wgpu::Extent3d) -> Self {
+    fn new(index: usize, sequence_idx: usize, image_data: Vec<u8>, size: wgpu::Extent3d) -> Self {
         Self {
             index,
-            is_left,
+            sequence_idx,
             image_data,
             size,
         }
@@ -159,23 +161,23 @@ pub struct TextureTimingInfo {
 
 pub struct PriorityTextureLoadQueue {
     queue: Arc<Mutex<VecDeque<TextureLoadRequest>>>,
-    unique_requests: Arc<Mutex<HashSet<(usize, bool)>>>,
-    frame_count_left: usize,
-    frame_count_right: usize,
+    /// Key is (frame_index, sequence_idx).
+    unique_requests: Arc<Mutex<HashSet<(usize, usize)>>>,
+    /// frame_counts[i] = frame count for sequence i (0 = left, 1 = right, 2+ = extra).
+    frame_counts: Vec<usize>,
 }
 
 impl PriorityTextureLoadQueue {
-    fn new(frame_count_left: usize, frame_count_right: usize) -> Self {
+    fn new(frame_counts: Vec<usize>) -> Self {
         Self {
             queue: Arc::new(Mutex::new(VecDeque::new())),
             unique_requests: Arc::new(Mutex::new(HashSet::new())),
-            frame_count_left,
-            frame_count_right,
+            frame_counts,
         }
     }
 
     pub fn push(&self, request: TextureLoadRequest) {
-        let key = (request.index, request.is_left);
+        let key = (request.index, request.sequence_idx);
         let mut unique_requests = self.unique_requests.lock();
         if !unique_requests.contains(&key) {
             self.queue.lock().push_back(request);
@@ -187,21 +189,23 @@ impl PriorityTextureLoadQueue {
         let mut queue = self.queue.lock();
         let mut unique_requests = self.unique_requests.lock();
         if let Some(request) = queue.pop_front() {
-            unique_requests.remove(&(request.index, request.is_left));
+            unique_requests.remove(&(request.index, request.sequence_idx));
             Some(request)
         } else {
             None
         }
     }
 
-    pub fn reprioritize(&self, current_frame_left: usize, current_frame_right: usize) {
+    /// Re-sort the queue so that frames closest to the current playback position
+    /// for each sequence are processed first.  `current_frames[i]` is the current
+    /// frame for sequence `i`.
+    pub fn reprioritize(&self, current_frames: &[usize]) {
         let mut queue = self.queue.lock();
+        let frame_counts = &self.frame_counts;
         queue.make_contiguous().sort_by_key(|req| {
-            let (current_frame, frame_count) = if req.is_left {
-                (current_frame_left, self.frame_count_left)
-            } else {
-                (current_frame_right, self.frame_count_right)
-            };
+            let seq = req.sequence_idx;
+            let current_frame = current_frames.get(seq).copied().unwrap_or(0);
+            let frame_count = frame_counts.get(seq).copied().unwrap_or(1);
             std::cmp::min(
                 usize::abs_diff(req.index, current_frame),
                 frame_count - usize::abs_diff(req.index, current_frame),
@@ -209,13 +213,13 @@ impl PriorityTextureLoadQueue {
         });
     }
 
-    pub fn contains(&self, key: &(usize, bool)) -> bool {
+    pub fn contains(&self, key: &(usize, usize)) -> bool {
         self.unique_requests.lock().contains(key)
     }
 }
 
-type TextureProcessSender = Sender<(usize, bool, Vec<u8>, wgpu::Extent3d)>;
-type TextureProcessReceiver = Arc<Mutex<Receiver<(usize, bool, Vec<u8>, wgpu::Extent3d)>>>;
+type TextureProcessSender = Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>;
+type TextureProcessReceiver = Arc<Mutex<Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
 type TextureHolder = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
 
 type FlipDiffCache = Arc<RwLock<HashMap<(usize, usize), Arc<Mutex<Option<Arc<wgpu::Texture>>>>>>>;
@@ -225,6 +229,8 @@ type FlipDiffRawData = Arc<RwLock<HashMap<(usize, usize), (Vec<u8>, u32, u32)>>>
 pub struct PlayerConfig {
     pub image_data1: Vec<(String, u64, u64)>,
     pub image_data2: Vec<(String, u64, u64)>,
+    /// Additional sequences beyond the primary two (index 0 = sequence 3, etc.).
+    pub extra_image_data: Vec<Vec<(String, u64, u64)>>,
     pub cache_size: usize,
     pub preload_ahead: usize,
     pub preload_behind: usize,
@@ -275,8 +281,10 @@ pub struct Player {
     texture_process_receiver: TextureProcessReceiver,
     left_texture: TextureHolder,
     right_texture: TextureHolder,
-    processing_textures: Arc<Mutex<HashSet<(usize, bool)>>>,
-    pub texture_timings: Arc<RwLock<HashMap<(usize, bool), TextureTimingInfo>>>,
+    /// Key is (frame_index, sequence_idx) where 0=left, 1=right, 2+=extra.
+    processing_textures: Arc<Mutex<HashSet<(usize, usize)>>>,
+    /// Key is (frame_index, sequence_idx) where 0=left, 1=right, 2+=extra.
+    pub texture_timings: Arc<RwLock<HashMap<(usize, usize), TextureTimingInfo>>>,
     pub current_frame_set_time: Arc<Mutex<Instant>>,
     pub flip_diff_cache: FlipDiffCache,
     flip_diff_pool: ThreadPool,
@@ -285,8 +293,10 @@ pub struct Player {
     flip_diff_receiver: FlipDiffReceiver,
     pub flip_diff_in_progress: FlipDiffInProgress,
     pub diff_image_timings: Arc<RwLock<HashMap<(usize, usize), DiffImageInfo>>>,
-    pub frame_switch_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
-    pub texture_available_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
+    /// Key is (frame_index, sequence_idx) where 0=left, 1=right, 2+=extra.
+    pub frame_switch_times: Arc<RwLock<HashMap<(usize, usize), Instant>>>,
+    /// Key is (frame_index, sequence_idx) where 0=left, 1=right, 2+=extra.
+    pub texture_available_times: Arc<RwLock<HashMap<(usize, usize), Instant>>>,
     playback_speed: f32,
     pub flip_stats: Arc<RwLock<HashMap<(usize, usize), FlipStats>>>,
     expected_image_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
@@ -296,6 +306,15 @@ pub struct Player {
     sorted_time_points: Vec<u64>,
     pub flip_diff_cache_metrics: Arc<CacheMetrics>,
     flip_diff_cache_capacity: usize,
+    // --- Extra sequences (index 0 = sequence 3, etc.) ---
+    /// Frame counts for extra sequences.
+    pub extra_frame_counts: Vec<usize>,
+    /// Current frame index for each extra sequence.
+    extra_current_frames: Vec<AtomicUsize>,
+    /// Texture caches for extra sequences.
+    pub extra_texture_caches: Vec<RingBufferTextureCache>,
+    /// Currently displayed texture for each extra sequence.
+    extra_textures: Vec<TextureHolder>,
 }
 
 impl Player {
@@ -326,7 +345,30 @@ impl Player {
         let expected_image_dimensions = Arc::new(Mutex::new(Some(expected_dimensions)));
 
         let single_image_mode = config.single_image_mode;
-        let sorted_time_points = Self::compute_sorted_time_points(&config.image_data1, &config.image_data2);
+
+        // Build per-sequence frame counts: [seq0, seq1, seq2, ...]
+        let mut all_frame_counts = vec![frame_count1, frame_count2];
+        for extra in &config.extra_image_data {
+            all_frame_counts.push(extra.len());
+        }
+
+        let extra_frame_counts: Vec<usize> = config.extra_image_data.iter().map(|d| d.len()).collect();
+        let num_extra = extra_frame_counts.len();
+
+        let sorted_time_points = Self::compute_sorted_time_points(
+            &config.image_data1,
+            &config.image_data2,
+            &config.extra_image_data,
+        );
+
+        // Per-extra-sequence atomics / caches / texture holders
+        let extra_current_frames: Vec<AtomicUsize> = (0..num_extra).map(|_| AtomicUsize::new(0)).collect();
+        let extra_texture_caches: Vec<RingBufferTextureCache> = (0..num_extra)
+            .map(|_| RingBufferTextureCache::new(per_side_cache_size))
+            .collect();
+        let extra_textures: Vec<TextureHolder> = (0..num_extra)
+            .map(|_| Arc::new(Mutex::new(None)))
+            .collect();
 
         Self {
             config,
@@ -348,10 +390,7 @@ impl Player {
             texture_cache_right: RingBufferTextureCache::new(per_side_cache_size),
             texture_reuse_pool: Arc::new(Mutex::new(Vec::new())),
             frame_changed: Arc::new(AtomicBool::new(false)),
-            texture_load_queue: Arc::new(Mutex::new(PriorityTextureLoadQueue::new(
-                frame_count1,
-                frame_count2,
-            ))),
+            texture_load_queue: Arc::new(Mutex::new(PriorityTextureLoadQueue::new(all_frame_counts))),
             texture_load_pool,
             texture_process_pool,
             texture_process_sender,
@@ -377,6 +416,10 @@ impl Player {
             sorted_time_points,
             flip_diff_cache_metrics: Arc::new(CacheMetrics::default()),
             flip_diff_cache_capacity,
+            extra_frame_counts,
+            extra_current_frames,
+            extra_texture_caches,
+            extra_textures,
         }
     }
 
@@ -391,15 +434,17 @@ impl Player {
         Ok(dimensions)
     }
 
-    /// Pre-compute a sorted, deduplicated list of all time points from both sequences.
+    /// Pre-compute a sorted, deduplicated list of all time points from all sequences.
     /// This is computed once at construction time to make `find_next_time_point` O(log N).
     fn compute_sorted_time_points(
         image_data1: &[(String, u64, u64)],
         image_data2: &[(String, u64, u64)],
+        extra_image_data: &[Vec<(String, u64, u64)>],
     ) -> Vec<u64> {
         let mut times: Vec<u64> = image_data1
             .iter()
             .chain(image_data2.iter())
+            .chain(extra_image_data.iter().flatten())
             .flat_map(|(_, start, end)| [*start, *end])
             .collect();
         times.sort_unstable();
@@ -414,13 +459,37 @@ impl Player {
         )
     }
 
+    /// Returns the current frame index for each extra sequence (indices 2+).
+    #[allow(dead_code)]
+    pub fn extra_current_images(&self) -> Vec<usize> {
+        self.extra_current_frames
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .collect()
+    }
+
+    /// Number of extra sequences (beyond the primary two).
+    pub fn extra_sequence_count(&self) -> usize {
+        self.extra_frame_counts.len()
+    }
+
+    /// Get the currently displayed texture for an extra sequence (0-indexed, so 0 = sequence 3).
+    pub fn get_extra_sequence_texture(&self, extra_idx: usize) -> Option<Arc<wgpu::Texture>> {
+        self.extra_textures.get(extra_idx)?.lock().clone()
+    }
+
+    /// Get a texture from a specific sequence's cache by sequence index.
+    /// sequence_idx: 0 = left, 1 = right, 2+ = extra[sequence_idx - 2].
+    fn get_texture_by_seq(&self, frame_idx: usize, sequence_idx: usize) -> Option<Arc<wgpu::Texture>> {
+        match sequence_idx {
+            0 => self.texture_cache_left.get(frame_idx),
+            1 => self.texture_cache_right.get(frame_idx),
+            n => self.extra_texture_caches.get(n - 2)?.get(frame_idx),
+        }
+    }
+
     pub fn get_texture(&self, index: usize, is_left: bool) -> Option<Arc<wgpu::Texture>> {
-        let cache = if is_left {
-            &self.texture_cache_left
-        } else {
-            &self.texture_cache_right
-        };
-        cache.get(index)
+        self.get_texture_by_seq(index, if is_left { 0 } else { 1 })
     }
 
     fn get_current_index(&self, image_data: &[(String, u64, u64)], current_time: u64) -> usize {
@@ -485,11 +554,27 @@ impl Player {
         let old_frame1 = self.current_frame1.swap(new_frame1, Ordering::Relaxed);
         let old_frame2 = self.current_frame2.swap(new_frame2, Ordering::Relaxed);
 
-        if new_frame1 != old_frame1 || new_frame2 != old_frame2 {
+        let mut any_changed = new_frame1 != old_frame1 || new_frame2 != old_frame2;
+
+        // Update extra sequence frame indices
+        let mut new_extra_frames = Vec::with_capacity(self.extra_current_frames.len());
+        for (i, extra_data) in self.config.extra_image_data.iter().enumerate() {
+            let new_frame = self.get_current_index(extra_data, current_time);
+            let old_frame = self.extra_current_frames[i].swap(new_frame, Ordering::Relaxed);
+            if new_frame != old_frame {
+                any_changed = true;
+            }
+            new_extra_frames.push(new_frame);
+        }
+
+        if any_changed {
             let now = Instant::now();
             let mut frame_switch_times = self.frame_switch_times.write();
-            frame_switch_times.insert((new_frame1, true), now);
-            frame_switch_times.insert((new_frame2, false), now);
+            frame_switch_times.insert((new_frame1, 0), now);
+            frame_switch_times.insert((new_frame2, 1), now);
+            for (i, &f) in new_extra_frames.iter().enumerate() {
+                frame_switch_times.insert((f, i + 2), now);
+            }
             self.frame_changed.store(true, Ordering::Relaxed);
         }
     }
@@ -500,6 +585,12 @@ impl Player {
         // Ensure current frames are loaded
         self.ensure_texture_loaded(current_left, true);
         self.ensure_texture_loaded(current_right, false);
+
+        // Ensure current extra-sequence frames are loaded
+        for i in 0..self.extra_frame_counts.len() {
+            let frame = self.extra_current_frames[i].load(Ordering::Relaxed);
+            self.ensure_texture_loaded_seq(frame, i + 2);
+        }
 
         // Preload textures
         self.preload_textures(current_left, current_right, show_flip_diff);
@@ -533,64 +624,103 @@ impl Player {
             }
         }
 
+        // Update extra sequence textures
+        for i in 0..self.extra_frame_counts.len() {
+            let frame = self.extra_current_frames[i].load(Ordering::Relaxed);
+            if let Some(new_tex) = self.get_texture_by_seq(frame, i + 2) {
+                let mut holder = self.extra_textures[i].lock();
+                if holder.as_ref().is_none_or(|t| !Arc::ptr_eq(t, &new_tex)) {
+                    *holder = Some(new_tex);
+                    textures_updated = true;
+                }
+            }
+        }
+
         textures_updated
     }
 
-    pub fn ensure_texture_loaded(&self, index: usize, is_left: bool) {
-        if !self.is_within_preload_range(index, is_left) {
+    /// Internal helper: ensure a frame for a given sequence_idx (0=left, 1=right, 2+=extra) is queued for loading.
+    fn ensure_texture_loaded_seq(&self, index: usize, sequence_idx: usize) {
+        if !self.is_within_preload_range_seq(index, sequence_idx) {
             return;
         }
 
-        let cache = if is_left {
-            &self.texture_cache_left
-        } else {
-            &self.texture_cache_right
+        let cache_contains = match sequence_idx {
+            0 => self.texture_cache_left.contains(index),
+            1 => self.texture_cache_right.contains(index),
+            n => self.extra_texture_caches.get(n - 2).map(|c| c.contains(index)).unwrap_or(false),
+        };
+        let cache_metrics = match sequence_idx {
+            0 => &self.texture_cache_left.metrics,
+            1 => &self.texture_cache_right.metrics,
+            n => {
+                if let Some(c) = self.extra_texture_caches.get(n - 2) {
+                    &c.metrics
+                } else {
+                    return;
+                }
+            }
         };
 
-        if cache.contains(index) {
-            cache.metrics.hits.fetch_add(1, Ordering::Relaxed);
+        if cache_contains {
+            cache_metrics.hits.fetch_add(1, Ordering::Relaxed);
             return;
         }
 
-        cache.metrics.misses.fetch_add(1, Ordering::Relaxed);
+        cache_metrics.misses.fetch_add(1, Ordering::Relaxed);
 
-        let path = if is_left {
-            &self.config.image_data1[index].0
-        } else {
-            &self.config.image_data2[index].0
+        let path = match sequence_idx {
+            0 => self.config.image_data1.get(index).map(|(p, _, _)| p.as_str()),
+            1 => self.config.image_data2.get(index).map(|(p, _, _)| p.as_str()),
+            n => self.config.extra_image_data.get(n - 2)
+                .and_then(|d| d.get(index))
+                .map(|(p, _, _)| p.as_str()),
+        };
+        let path = match path {
+            Some(p) => p.to_string(),
+            None => return,
         };
 
-        // Check if the image is already being processed
         let mut processing_textures = self.processing_textures.lock();
-        if !processing_textures.contains(&(index, is_left)) {
-            processing_textures.insert((index, is_left));
+        if !processing_textures.contains(&(index, sequence_idx)) {
+            processing_textures.insert((index, sequence_idx));
             drop(processing_textures);
 
-            // Add the request to the queue
             let queue = self.texture_load_queue.lock();
-            if !queue.contains(&(index, is_left)) {
-                queue.push(TextureLoadRequest::new(path.to_string(), index, is_left));
+            if !queue.contains(&(index, sequence_idx)) {
+                queue.push(TextureLoadRequest::new(path, index, sequence_idx));
             }
         }
     }
 
+    pub fn ensure_texture_loaded(&self, index: usize, is_left: bool) {
+        self.ensure_texture_loaded_seq(index, if is_left { 0 } else { 1 });
+    }
+
     pub fn process_load_queue(&mut self) {
-        let queue = self.texture_load_queue.lock();
-        queue.reprioritize(
+        // Build current-frame snapshot for all sequences to reprioritize the queue.
+        let mut current_frames = vec![
             self.current_frame1.load(Ordering::Relaxed),
             self.current_frame2.load(Ordering::Relaxed),
-        );
+        ];
+        for a in &self.extra_current_frames {
+            current_frames.push(a.load(Ordering::Relaxed));
+        }
+
+        let queue = self.texture_load_queue.lock();
+        queue.reprioritize(&current_frames);
 
         while let Some(request) = queue.pop() {
             let texture_process_sender = self.texture_process_sender.clone();
             let processing_textures = Arc::clone(&self.processing_textures);
             let texture_timings = Arc::clone(&self.texture_timings);
             let expected_dimensions = *self.expected_image_dimensions.lock();
+            let seq_idx = request.sequence_idx;
             self.texture_load_pool.execute(move || {
                 let request = TextureLoadRequest::new(
                     request.path.to_string(),
                     request.index,
-                    request.is_left,
+                    seq_idx,
                 );
                 if let Ok((image_data, size)) =
                     Self::load_image_data_from_path(&request.path, expected_dimensions)
@@ -600,14 +730,14 @@ impl Player {
 
                     let process_request = TextureProcessRequest::new(
                         request.index,
-                        request.is_left,
+                        seq_idx,
                         image_data,
                         size,
                     );
                     texture_process_sender
                         .send((
                             process_request.index,
-                            process_request.is_left,
+                            process_request.sequence_idx,
                             process_request.image_data,
                             process_request.size,
                         ))
@@ -615,7 +745,7 @@ impl Player {
 
                     let mut texture_timings = texture_timings.write();
                     texture_timings
-                        .entry((request.index, request.is_left))
+                        .entry((request.index, seq_idx))
                         .or_insert(TextureTimingInfo {
                             load_time,
                             process_time: Duration::default(),
@@ -623,36 +753,44 @@ impl Player {
                 }
                 processing_textures
                     .lock()
-                    .remove(&(request.index, request.is_left));
+                    .remove(&(request.index, seq_idx));
             });
         }
     }
 
     pub fn process_loaded_textures(&self) {
-        while let Ok((index, is_left, image_data, size)) =
+        while let Ok((index, sequence_idx, image_data, size)) =
             self.texture_process_receiver.lock().try_recv()
         {
             let device = Arc::clone(&self.device);
             let queue = Arc::clone(&self.queue);
             let texture_reuse_pool = Arc::clone(&self.texture_reuse_pool);
-            let cache = if is_left {
-                self.texture_cache_left.clone()
-            } else {
-                self.texture_cache_right.clone()
+            let cache = match sequence_idx {
+                0 => self.texture_cache_left.clone(),
+                1 => self.texture_cache_right.clone(),
+                n => {
+                    if let Some(c) = self.extra_texture_caches.get(n - 2) {
+                        c.clone()
+                    } else {
+                        continue;
+                    }
+                }
             };
             let frame_changed = Arc::clone(&self.frame_changed);
             let texture_timings = Arc::clone(&self.texture_timings);
             let texture_available_times = Arc::clone(&self.texture_available_times);
 
-            let current_frame = if is_left {
-                self.current_frame1.load(Ordering::Relaxed)
-            } else {
-                self.current_frame2.load(Ordering::Relaxed)
+            let current_frame = match sequence_idx {
+                0 => self.current_frame1.load(Ordering::Relaxed),
+                1 => self.current_frame2.load(Ordering::Relaxed),
+                n => self.extra_current_frames.get(n - 2)
+                    .map(|a| a.load(Ordering::Relaxed))
+                    .unwrap_or(0),
             };
-            let frame_count = if is_left {
-                self.frame_count1
-            } else {
-                self.frame_count2
+            let frame_count = match sequence_idx {
+                0 => self.frame_count1,
+                1 => self.frame_count2,
+                n => self.extra_frame_counts.get(n - 2).copied().unwrap_or(1),
             };
 
             self.texture_process_pool.execute(move || {
@@ -663,8 +801,8 @@ impl Player {
                 } else {
                     Arc::new(device.create_texture(&wgpu::TextureDescriptor {
                         label: Some(&format!(
-                            "Image Texture - {} (Frame {})",
-                            if is_left { "Left" } else { "Right" },
+                            "Image Texture - Seq{} (Frame {})",
+                            sequence_idx,
                             index
                         )),
                         size,
@@ -707,13 +845,13 @@ impl Player {
                 let process_time = process_end - process_start;
 
                 let mut texture_timings = texture_timings.write();
-                if let Some(timing) = texture_timings.get_mut(&(index, is_left)) {
+                if let Some(timing) = texture_timings.get_mut(&(index, sequence_idx)) {
                     timing.process_time = process_time;
                 }
 
                 // Record the time when the texture becomes available
                 let mut texture_available_times = texture_available_times.write();
-                texture_available_times.insert((index, is_left), Instant::now());
+                texture_available_times.insert((index, sequence_idx), Instant::now());
             });
         }
     }
@@ -745,6 +883,20 @@ impl Player {
             if !self.single_image_mode {
                 let preload_index2 = (index2 + frame_count2 - i % frame_count2) % frame_count2;
                 self.ensure_texture_loaded(preload_index2, false);
+            }
+        }
+
+        // Preload extra sequences
+        for extra_idx in 0..self.extra_frame_counts.len() {
+            let seq_idx = extra_idx + 2;
+            let fc = self.extra_frame_counts[extra_idx];
+            let cur = self.extra_current_frames[extra_idx].load(Ordering::Relaxed);
+            self.ensure_texture_loaded_seq(cur, seq_idx);
+            for i in 1..=self.config.preload_ahead {
+                self.ensure_texture_loaded_seq((cur + i) % fc, seq_idx);
+            }
+            for i in 1..=self.config.preload_behind {
+                self.ensure_texture_loaded_seq((cur + fc - i % fc) % fc, seq_idx);
             }
         }
 
@@ -795,24 +947,30 @@ impl Player {
         }
     }
 
-    pub fn is_within_preload_range(&self, index: usize, is_left: bool) -> bool {
-        let current_frame = if is_left {
-            self.current_frame1.load(Ordering::Relaxed)
-        } else {
-            self.current_frame2.load(Ordering::Relaxed)
+    /// Internal: check whether `index` is within the preload window for `sequence_idx`.
+    fn is_within_preload_range_seq(&self, index: usize, sequence_idx: usize) -> bool {
+        let current_frame = match sequence_idx {
+            0 => self.current_frame1.load(Ordering::Relaxed),
+            1 => self.current_frame2.load(Ordering::Relaxed),
+            n => self.extra_current_frames.get(n - 2)
+                .map(|a| a.load(Ordering::Relaxed))
+                .unwrap_or(0),
         };
-        let frame_count = if is_left {
-            self.frame_count1
-        } else {
-            self.frame_count2
+        let frame_count = match sequence_idx {
+            0 => self.frame_count1,
+            1 => self.frame_count2,
+            n => self.extra_frame_counts.get(n - 2).copied().unwrap_or(1),
         };
 
         let forward_distance = (index + frame_count - current_frame) % frame_count;
         let backward_distance = (current_frame + frame_count - index) % frame_count;
-
         let min_distance = std::cmp::min(forward_distance, backward_distance);
-
         min_distance <= self.config.preload_ahead || min_distance <= self.config.preload_behind
+    }
+
+    #[allow(dead_code)]
+    pub fn is_within_preload_range(&self, index: usize, is_left: bool) -> bool {
+        self.is_within_preload_range_seq(index, if is_left { 0 } else { 1 })
     }
 
     pub fn update(&self, delta: std::time::Duration, show_flip_diff: bool) -> bool {
@@ -821,8 +979,14 @@ impl Player {
             let now = Instant::now();
             let elapsed = now.duration_since(*self.current_frame_set_time.lock());
 
+            let extra_ready = self.extra_frame_counts.iter().enumerate().all(|(i, _)| {
+                let frame = self.extra_current_frames[i].load(Ordering::Relaxed);
+                self.get_texture_by_seq(frame, i + 2).is_some()
+            });
+
             if self.get_texture(current_left, true).is_some()
                 && (self.single_image_mode || self.get_texture(current_right, false).is_some())
+                && extra_ready
             {
                 debug!("Frame displayed after {:?} delay", elapsed);
                 let scaled_delta = delta.mul_f32(self.playback_speed);
@@ -872,7 +1036,7 @@ impl Player {
     }
 
     pub fn total_duration(&self) -> u64 {
-        std::cmp::max(
+        let base = std::cmp::max(
             self.config
                 .image_data1
                 .last()
@@ -883,7 +1047,10 @@ impl Player {
                 .last()
                 .map(|(_, _, end)| *end)
                 .unwrap_or(0),
-        )
+        );
+        self.config.extra_image_data.iter().fold(base, |acc, extra| {
+            std::cmp::max(acc, extra.last().map(|(_, _, end)| *end).unwrap_or(0))
+        })
     }
 
     pub fn get_frame_duration(&self, frame: usize, is_left: bool) -> Option<Duration> {
@@ -1299,27 +1466,27 @@ mod performance_tests {
 
     #[test]
     fn test_priority_queue_push_and_pop() {
-        let queue = PriorityTextureLoadQueue::new(10, 10);
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        let queue = PriorityTextureLoadQueue::new(vec![10, 10]);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, 0));
 
         let popped = queue.pop();
         assert!(popped.is_some());
         let req = popped.unwrap();
         assert_eq!(req.index, 0);
-        assert!(req.is_left);
+        assert_eq!(req.sequence_idx, 0);
     }
 
     #[test]
     fn test_priority_queue_empty_pop_returns_none() {
-        let queue = PriorityTextureLoadQueue::new(10, 10);
+        let queue = PriorityTextureLoadQueue::new(vec![10, 10]);
         assert!(queue.pop().is_none());
     }
 
     #[test]
     fn test_priority_queue_deduplication() {
-        let queue = PriorityTextureLoadQueue::new(10, 10);
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        let queue = PriorityTextureLoadQueue::new(vec![10, 10]);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, 0));
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, 0));
 
         assert!(queue.pop().is_some());
         assert!(queue.pop().is_none());
@@ -1327,9 +1494,9 @@ mod performance_tests {
 
     #[test]
     fn test_priority_queue_left_and_right_are_distinct_keys() {
-        let queue = PriorityTextureLoadQueue::new(10, 10);
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, false));
+        let queue = PriorityTextureLoadQueue::new(vec![10, 10]);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, 0));
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, 1));
 
         assert!(queue.pop().is_some());
         assert!(queue.pop().is_some());
@@ -1338,22 +1505,22 @@ mod performance_tests {
 
     #[test]
     fn test_priority_queue_contains() {
-        let queue = PriorityTextureLoadQueue::new(10, 10);
-        assert!(!queue.contains(&(0, true)));
+        let queue = PriorityTextureLoadQueue::new(vec![10, 10]);
+        assert!(!queue.contains(&(0, 0)));
 
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
-        assert!(queue.contains(&(0, true)));
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, 0));
+        assert!(queue.contains(&(0, 0)));
 
         queue.pop();
-        assert!(!queue.contains(&(0, true)));
+        assert!(!queue.contains(&(0, 0)));
     }
 
     #[test]
     fn test_priority_queue_maintains_fifo_order() {
-        let queue = PriorityTextureLoadQueue::new(10, 10);
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
-        queue.push(TextureLoadRequest::new("frame_002.png".to_string(), 1, true));
-        queue.push(TextureLoadRequest::new("frame_003.png".to_string(), 2, true));
+        let queue = PriorityTextureLoadQueue::new(vec![10, 10]);
+        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, 0));
+        queue.push(TextureLoadRequest::new("frame_002.png".to_string(), 1, 0));
+        queue.push(TextureLoadRequest::new("frame_003.png".to_string(), 2, 0));
 
         assert_eq!(queue.pop().unwrap().index, 0);
         assert_eq!(queue.pop().unwrap().index, 1);
@@ -1514,7 +1681,7 @@ mod tests {
     fn test_compute_sorted_time_points_basic() {
         let data1 = make_image_data(&[100, 100]);
         let data2 = make_image_data(&[100, 100]);
-        let times = Player::compute_sorted_time_points(&data1, &data2);
+        let times = Player::compute_sorted_time_points(&data1, &data2, &[]);
         assert_eq!(times, vec![0, 100, 200]);
     }
 
@@ -1523,7 +1690,7 @@ mod tests {
         // Both sequences share the same time points — result must be deduplicated.
         let data1 = make_image_data(&[50, 50]);
         let data2 = make_image_data(&[50, 50]);
-        let times = Player::compute_sorted_time_points(&data1, &data2);
+        let times = Player::compute_sorted_time_points(&data1, &data2, &[]);
         assert_eq!(times, vec![0, 50, 100]);
     }
 
@@ -1531,7 +1698,16 @@ mod tests {
     fn test_compute_sorted_time_points_unequal_sequences() {
         let data1 = make_image_data(&[100]);
         let data2 = make_image_data(&[50, 50]);
-        let times = Player::compute_sorted_time_points(&data1, &data2);
+        let times = Player::compute_sorted_time_points(&data1, &data2, &[]);
+        assert_eq!(times, vec![0, 50, 100]);
+    }
+
+    #[test]
+    fn test_compute_sorted_time_points_extra_sequences() {
+        let data1 = make_image_data(&[100]);
+        let data2 = make_image_data(&[100]);
+        let extra = vec![make_image_data(&[50, 50])];
+        let times = Player::compute_sorted_time_points(&data1, &data2, &extra);
         assert_eq!(times, vec![0, 50, 100]);
     }
 
