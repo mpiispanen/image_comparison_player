@@ -75,6 +75,86 @@ Mouse controls:
 - Move the cursor vertically in flip difference mode to switch between normal and difference views
 - Scroll to zoom in/out
 
+## Keyboard Remapping
+
+Key bindings can be overridden with a plain-text config file passed via
+`--key-config <FILE>`.
+
+### Format
+
+Each non-empty line that does not start with `#` must follow:
+
+```
+action_name = Key1[, Key2, ...]
+```
+
+- `action_name` — one of the supported action names listed below (case-insensitive).
+- One or more comma-separated key names.  Providing multiple keys binds them all to the same action, replacing the defaults entirely for that action.
+- Unknown action names or unrecognised key names produce a warning and are skipped; all other bindings fall back to their defaults.
+
+### Supported action names
+
+| Action name             | Default key(s)       | Description                          |
+|-------------------------|----------------------|--------------------------------------|
+| `play_pause`            | `Space`              | Toggle play / pause                  |
+| `next_frame`            | `Right`              | Advance one frame                    |
+| `previous_frame`        | `Left`               | Go back one frame                    |
+| `zoom_in`               | `E`, `Up`            | Zoom in                              |
+| `zoom_out`              | `Q`, `Down`          | Zoom out                             |
+| `pan_up`                | `W`                  | Pan view upward                      |
+| `pan_left`              | `A`                  | Pan view left                        |
+| `pan_down`              | `S`                  | Pan view downward                    |
+| `pan_right`             | `D`                  | Pan view right                       |
+| `toggle_flip_diff`      | `F`                  | Toggle FLIP diff overlay             |
+| `toggle_split_line`     | `L`                  | Toggle the split-line divider        |
+| `toggle_show_left`      | `1`                  | Show only the left image             |
+| `toggle_show_right`     | `2`                  | Show only the right image            |
+| `save_flip_diff`        | `P`                  | Save FLIP diff image to PNG          |
+| `save_screenshot`       | `I`                  | Save a screenshot to PNG             |
+| `toggle_help`           | `H`                  | Toggle the help overlay              |
+| `toggle_cache_debug`    | `C`                  | Toggle the cache debug window        |
+| `toggle_pixel_info`     | `V`                  | Toggle the pixel info window         |
+| `decrease_playback_speed` | `[`              | Decrease playback speed              |
+| `increase_playback_speed` | `]`              | Increase playback speed              |
+| `quit`                  | `Escape`             | Close overlay or exit the app        |
+
+### Supported key names
+
+Single characters are accepted as-is (`A`–`Z`, case-insensitive; `0`–`9`; `[`, `]`).
+Named keys: `Escape` / `Esc`, `Space`, `Left`, `Right`, `Up`, `Down`,
+`Return` / `Enter`, `Tab`, `Back` / `Backspace`, `Delete` / `Del`,
+`Home`, `End`, `PageUp`, `PageDown`, `Insert`,
+`LBracket`, `RBracket`,
+`F1`–`F12`,
+`LShift`, `RShift`, `LCtrl` / `LControl`, `RCtrl` / `RControl`,
+`LAlt`, `RAlt`.
+
+### Example config file
+
+```ini
+# ~/.config/icp/keys.conf
+
+# Remap zoom to arrow keys and pan to IJKL
+zoom_in     = Up
+zoom_out    = Down
+pan_up      = I
+pan_left    = J
+pan_down    = K
+pan_right   = L
+
+# Keep Space for play/pause (this line is redundant but valid)
+play_pause  = Space
+
+# Bind two keys to next_frame
+next_frame  = Right, Period
+```
+
+Pass the file on the command line:
+
+```
+./target/release/image_comparison_player --dir1 /path/to/images --key-config ~/.config/icp/keys.conf
+```
+
 ## Input Options
 
 ## Supported Image Formats

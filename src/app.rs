@@ -1,4 +1,5 @@
 use crate::image_loader;
+use crate::key_config::{KeyAction, KeyConfig};
 use crate::player::FlipStats;
 use crate::player::Player;
 use crate::player::PlayerConfig;
@@ -15,7 +16,6 @@ use std::time::Instant;
 use std::process;
 use wgpu::util::DeviceExt;
 use winit::event::TouchPhase;
-use winit::event::VirtualKeyCode;
 use winit::event::WindowEvent;
 use winit::window::Window as WinitWindow;
 
@@ -781,6 +781,7 @@ pub struct AppConfig {
     pub diff_preload_ahead: usize,
     pub diff_preload_behind: usize,
     pub fps: f32,
+    pub key_config: KeyConfig,
 }
 
 pub struct AppState {
@@ -823,12 +824,13 @@ pub struct AppState {
     screenshot_result_rx: Arc<Mutex<mpsc::Receiver<String>>>,
     screenshot_result_tx: mpsc::Sender<String>,
     single_image_mode: bool,
-    esc_key_down: bool,
+    quit_key_down: bool,
     pixel_info_window: PixelInfoWindow,
     help_overlay: HelpOverlay,
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
+    key_config: KeyConfig,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1283,12 +1285,13 @@ impl AppState {
             screenshot_result_tx,
             screenshot_result_rx: Arc::new(Mutex::new(screenshot_result_rx)),
             single_image_mode,
-            esc_key_down: false,
+            quit_key_down: false,
             pixel_info_window: PixelInfoWindow::new(),
             help_overlay: HelpOverlay::new(),
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
+            key_config: app_config.key_config,
         })
     }
 
@@ -2018,7 +2021,7 @@ impl AppState {
                     input:
                         winit::event::KeyboardInput {
                             state: winit::event::ElementState::Released,
-                            virtual_keycode: Some(VirtualKeyCode::Escape),
+                            virtual_keycode: Some(vk),
                             ..
                         },
                     ..
@@ -2026,7 +2029,9 @@ impl AppState {
             ..
         } = event
         {
-            self.esc_key_down = false;
+            if self.key_config.bindings.get(vk) == Some(&KeyAction::Quit) {
+                self.quit_key_down = false;
+            }
         }
 
         if let winit::event::Event::WindowEvent {
@@ -2043,72 +2048,73 @@ impl AppState {
             ..
         } = event
         {
-            match keycode {
-                VirtualKeyCode::Escape => {
-                    if !self.esc_key_down {
-                        self.esc_key_down = true;
-                        if self.help_overlay.is_open {
-                            self.help_overlay.close();
-                        } else {
-                            // Exit the application when Esc is pressed
-                            process::exit(0);
+            if let Some(&action) = self.key_config.bindings.get(keycode) {
+                match action {
+                    KeyAction::Quit => {
+                        if !self.quit_key_down {
+                            self.quit_key_down = true;
+                            if self.help_overlay.is_open {
+                                self.help_overlay.close();
+                            } else {
+                                process::exit(0);
+                            }
                         }
                     }
-                }
-                VirtualKeyCode::C => {
-                    self.cache_debug_window.toggle();
-                }
-                VirtualKeyCode::F => {
-                    if !self.single_image_mode {
-                        self.toggle_flip_diff();
+                    KeyAction::ToggleCacheDebug => {
+                        self.cache_debug_window.toggle();
                     }
-                }
-                VirtualKeyCode::Left | VirtualKeyCode::Right => {
-                    if *keycode == VirtualKeyCode::Left {
+                    KeyAction::ToggleFlipDiff => {
+                        if !self.single_image_mode {
+                            self.toggle_flip_diff();
+                        }
+                    }
+                    KeyAction::PreviousFrame => {
                         self.previous_frame();
-                    } else {
+                    }
+                    KeyAction::NextFrame => {
                         self.next_frame();
                     }
+                    KeyAction::PlayPause => {
+                        self.toggle_play_pause();
+                    }
+                    KeyAction::ZoomIn => {
+                        self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0));
+                    }
+                    KeyAction::ZoomOut => {
+                        self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0));
+                    }
+                    KeyAction::DecreasePlaybackSpeed => {
+                        self.player.write().decrease_playback_speed();
+                    }
+                    KeyAction::IncreasePlaybackSpeed => {
+                        self.player.write().increase_playback_speed();
+                    }
+                    KeyAction::PanUp => self.handle_zoom_move((0.0, -1.0)),
+                    KeyAction::PanLeft => self.handle_zoom_move((-1.0, 0.0)),
+                    KeyAction::PanDown => self.handle_zoom_move((0.0, 1.0)),
+                    KeyAction::PanRight => self.handle_zoom_move((1.0, 0.0)),
+                    KeyAction::SaveFlipDiff => {
+                        self.save_flip_diff_image();
+                    }
+                    KeyAction::SaveScreenshot => {
+                        self.request_screenshot();
+                    }
+                    KeyAction::ToggleShowLeft => {
+                        self.toggle_image_source(true);
+                    }
+                    KeyAction::ToggleShowRight => {
+                        self.toggle_image_source(false);
+                    }
+                    KeyAction::ToggleSplitLine => {
+                        self.toggle_split_line();
+                    }
+                    KeyAction::TogglePixelInfo => {
+                        self.pixel_info_window.toggle();
+                    }
+                    KeyAction::ToggleHelp => {
+                        self.help_overlay.toggle();
+                    }
                 }
-                VirtualKeyCode::Space => {
-                    self.toggle_play_pause();
-                }
-                VirtualKeyCode::Up => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0)),
-                VirtualKeyCode::Down => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0)),
-                VirtualKeyCode::Q => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0)),
-                VirtualKeyCode::E => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0)),
-                VirtualKeyCode::LBracket => {
-                    self.player.write().decrease_playback_speed();
-                }
-                VirtualKeyCode::RBracket => {
-                    self.player.write().increase_playback_speed();
-                }
-                VirtualKeyCode::W => self.handle_zoom_move((0.0, -1.0)),
-                VirtualKeyCode::A => self.handle_zoom_move((-1.0, 0.0)),
-                VirtualKeyCode::S => self.handle_zoom_move((0.0, 1.0)),
-                VirtualKeyCode::D => self.handle_zoom_move((1.0, 0.0)),
-                VirtualKeyCode::P => {
-                    self.save_flip_diff_image();
-                }
-                VirtualKeyCode::I => {
-                    self.request_screenshot();
-                }
-                VirtualKeyCode::Key1 => {
-                    self.toggle_image_source(true);
-                }
-                VirtualKeyCode::Key2 => {
-                    self.toggle_image_source(false);
-                }
-                VirtualKeyCode::L => {
-                    self.toggle_split_line();
-                }
-                VirtualKeyCode::V => {
-                    self.pixel_info_window.toggle();
-                }
-                VirtualKeyCode::H => {
-                    self.help_overlay.toggle();
-                }
-                _ => {}
             }
         }
 

@@ -8,10 +8,12 @@ use winit::{
 };
 mod app;
 mod image_loader;
+mod key_config;
 mod player;
 mod test_images;
 
 use crate::app::AppConfig;
+use crate::key_config::KeyConfig;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -146,6 +148,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Frames per second (overrides input.txt durations)")
                 .default_value("30"),
         )
+        .arg(
+            Arg::new("key_config")
+                .long("key-config")
+                .action(ArgAction::Set)
+                .value_name("FILE")
+                .help("Path to a key bindings config file (see README for format)")
+                .required(false),
+        )
         .get_matches();
 
     let test_mode = matches.get_flag("test_mode");
@@ -225,6 +235,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(30.0);
 
+    let key_config = if let Some(path) = matches.get_one::<String>("key_config") {
+        KeyConfig::load(std::path::Path::new(path))
+    } else {
+        KeyConfig::default()
+    };
+
     let (width, height) = parse_window_size(window_size)?;
 
     info!(
@@ -257,6 +273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diff_preload_ahead,
         diff_preload_behind,
         fps,
+        key_config,
     };
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;
