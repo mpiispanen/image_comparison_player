@@ -23,6 +23,8 @@ struct Uniforms {
     show_image1: f32,
     show_image2: f32,
     show_split_line: f32,
+    // 0.0 = sRGB (default GPU-managed round-trip), 1.0 = Linear (show raw linear values)
+    color_space: f32,
 }
 
 @group(1) @binding(0)
@@ -60,6 +62,17 @@ var t_diffuse2: texture_2d<f32>;
 @group(0) @binding(3)
 var s_diffuse2: sampler;
 
+// Apply the sRGB-to-linear transfer function to a single channel.
+// Used in Linear mode to counteract the sRGB surface's automatic linear→sRGB
+// encoding, so that raw linear-light values are displayed without gamma correction.
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    } else {
+        return pow((c + 0.055) / 1.055, 2.4);
+    }
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Apply zoom
@@ -94,5 +107,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the line
     }
 
-    return vec4<f32>(mixed_color.rgb, mixed_color.a * alpha);
+    var out_rgb = mixed_color.rgb;
+    // In Linear mode, apply sRGB→linear to counteract the sRGB surface encoding so
+    // that the framebuffer receives the raw linear-light values unchanged.
+    if uniforms.color_space > 0.5 {
+        out_rgb = vec3<f32>(srgb_to_linear(out_rgb.r), srgb_to_linear(out_rgb.g), srgb_to_linear(out_rgb.b));
+    }
+
+    return vec4<f32>(out_rgb, mixed_color.a * alpha);
 }

@@ -1,3 +1,4 @@
+use crate::color_management::ColorSpace;
 use crate::image_loader;
 use crate::player::FlipStats;
 use crate::player::Player;
@@ -37,11 +38,13 @@ struct UniformData {
     show_image1: f32,
     show_image2: f32,
     show_split_line: f32,
-    _padding: f32,
+    // 0.0 = sRGB (default), 1.0 = Linear — matches ColorSpace::as_f32().
+    color_space: f32,
 }
 
 // SAFETY: UniformData is #[repr(C)] and all fields are plain f32 arrays/scalars.
-// `_padding` keeps the total size aligned with WGSL uniform layout expectations.
+// `color_space` occupies the final slot, keeping the struct at 72 bytes to match
+// the WGSL uniform layout (the last field replaces the previous _padding field).
 unsafe impl bytemuck::Zeroable for UniformData {}
 unsafe impl bytemuck::Pod for UniformData {}
 
@@ -652,6 +655,11 @@ impl HelpOverlay {
                 ui.text("  V              Toggle pixel info window");
                 ui.dummy([0.0, 4.0]);
 
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Color Management");
+                ui.separator();
+                ui.text("  G              Toggle color space (sRGB / Linear)");
+                ui.dummy([0.0, 4.0]);
+
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
                 ui.separator();
                 ui.text("  I              Save screenshot");
@@ -781,6 +789,8 @@ pub struct AppConfig {
     pub diff_preload_ahead: usize,
     pub diff_preload_behind: usize,
     pub fps: f32,
+    /// Initial color-space mode.  Defaults to [`ColorSpace::Srgb`].
+    pub color_space: ColorSpace,
 }
 
 pub struct AppState {
@@ -829,6 +839,9 @@ pub struct AppState {
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
+    /// Active color-space mode.  Toggled with `G`; propagated to the GPU via the
+    /// `color_space` uniform field.
+    color_space: ColorSpace,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1289,6 +1302,7 @@ impl AppState {
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
+            color_space: app_config.color_space,
         })
     }
 
@@ -1402,7 +1416,7 @@ impl AppState {
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
-            _padding: 0.0,
+            color_space: self.color_space.as_f32(),
         };
 
         debug!("Created texture view");
@@ -1493,6 +1507,7 @@ impl AppState {
             || self.pixel_info_window.is_open
             || self.help_overlay.is_open
             || self.status_message.is_some()
+            || self.color_space != ColorSpace::Srgb
         {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
@@ -1525,6 +1540,36 @@ impl AppState {
                     }
 
                     self.help_overlay.draw(ui, self.single_image_mode);
+
+                    // Draw a color-space indicator HUD in the top-right corner when
+                    // the active mode is non-default (Linear), so the user always
+                    // knows when perceptual gamma correction has been bypassed.
+                    if self.color_space != ColorSpace::Srgb {
+                        let win_size = window.inner_size();
+                        let padding = 10.0_f32;
+                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([6.0, 4.0]));
+                        if let Some(_win) = ui
+                            .window("##color_space_hud")
+                            .position(
+                                [win_size.width as f32 - padding, padding],
+                                imgui::Condition::Always,
+                            )
+                            .position_pivot([1.0, 0.0])
+                            .bg_alpha(0.6)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            ui.text_colored(
+                                [0.4, 0.9, 1.0, 1.0],
+                                format!("CS: {}", self.color_space.label()),
+                            );
+                        }
+                    }
 
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
@@ -1658,7 +1703,7 @@ impl AppState {
                     show_image1: if self.show_image1 { 1.0 } else { 0.0 },
                     show_image2: if self.show_image2 { 1.0 } else { 0.0 },
                     show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
-                    _padding: 0.0,
+                    color_space: self.color_space.as_f32(),
                 };
 
                 self.queue
@@ -2102,6 +2147,9 @@ impl AppState {
                 VirtualKeyCode::L => {
                     self.toggle_split_line();
                 }
+                VirtualKeyCode::G => {
+                    self.toggle_color_space();
+                }
                 VirtualKeyCode::V => {
                     self.pixel_info_window.toggle();
                 }
@@ -2189,6 +2237,17 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
+    /// Cycles the active color-space mode (sRGB ↔ Linear) and propagates the change
+    /// to the GPU uniform buffer.  A status-message toast confirms the new mode.
+    pub fn toggle_color_space(&mut self) {
+        self.color_space = self.color_space.toggle();
+        self.status_message = Some((
+            format!("Color space: {}", self.color_space.label()),
+            Instant::now(),
+        ));
+        self.update_uniform_buffer();
+    }
+
     fn handle_zoom(&mut self, delta: &winit::event::MouseScrollDelta) {
         let zoom_factor = match delta {
             winit::event::MouseScrollDelta::LineDelta(_, y) => {
@@ -2266,7 +2325,7 @@ impl AppState {
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
-            _padding: 0.0,
+            color_space: self.color_space.as_f32(),
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));

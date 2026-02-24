@@ -7,11 +7,13 @@ use winit::{
     window::WindowBuilder,
 };
 mod app;
+mod color_management;
 mod image_loader;
 mod player;
 mod test_images;
 
 use crate::app::AppConfig;
+use crate::color_management::ColorSpace;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -146,6 +148,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Frames per second (overrides input.txt durations)")
                 .default_value("30"),
         )
+        .arg(
+            Arg::new("color_space")
+                .long("color-space")
+                .action(ArgAction::Set)
+                .value_name("MODE")
+                .help("Initial color-space mode: 'srgb' (default) or 'linear'")
+                .default_value("srgb"),
+        )
         .get_matches();
 
     let test_mode = matches.get_flag("test_mode");
@@ -224,6 +234,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .parse()
         .unwrap_or(30.0);
+    let color_space = matches
+        .get_one::<String>("color_space")
+        .and_then(|s| ColorSpace::from_str(s))
+        .unwrap_or_default();
 
     let (width, height) = parse_window_size(window_size)?;
 
@@ -257,6 +271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diff_preload_ahead,
         diff_preload_behind,
         fps,
+        color_space,
     };
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;
