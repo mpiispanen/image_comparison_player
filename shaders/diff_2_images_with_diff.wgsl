@@ -14,7 +14,7 @@ struct Uniforms {
     image1_size: vec2<f32>,
     image2_size: vec2<f32>,
     flip_diff_size: vec2<f32>,
-    show_flip_diff: f32,
+    comparison_mode: f32,
     zoom_level: f32,
     zoom_center: vec2<f32>,
     window_size: vec2<f32>,
@@ -97,7 +97,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (both_shown > 0.5 && uniforms.show_split_line > 0.5 && abs(in.clip_position.x - cursor_screen_x) < 1.0) {
         return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the lines
     }
-    if (uniforms.show_flip_diff > 0.5 && uniforms.show_split_line > 0.5 && abs(in.clip_position.y - cursor_screen_y) < 1.0) {
+    if (uniforms.comparison_mode > 0.5 && uniforms.show_split_line > 0.5 && abs(in.clip_position.y - cursor_screen_y) < 1.0) {
         return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the lines
     }
 

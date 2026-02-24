@@ -16,7 +16,7 @@ struct Uniforms {
     image1_size: vec2<f32>,
     image2_size: vec2<f32>,
     flip_diff_size: vec2<f32>,
-    show_flip_diff: f32,
+    comparison_mode: f32,
     zoom_level: f32,
     zoom_center: vec2<f32>,
     window_size: vec2<f32>,
@@ -27,6 +27,11 @@ struct Uniforms {
 
 @group(1) @binding(0)
 var<uniform> uniforms: Uniforms;
+
+const MODE_NORMAL: f32 = 0.0;
+const MODE_FLIP: f32 = 1.0;
+const MODE_OVERLAY: f32 = 2.0;
+const MODE_ABS_DIFF: f32 = 3.0;
 
 @vertex
 fn vs_main(model: VertexInput) -> VertexOutput {
@@ -72,15 +77,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color1 = textureSample(t_diffuse1, s_diffuse1, clamped_tex_coords);
     let color2 = textureSample(t_diffuse2, s_diffuse2, clamped_tex_coords);
 
+    // Calculate alpha based on whether the zoomed coordinates are within bounds
+    let alpha = 1.0 - step(1.0, max(abs(zoomed_tex_coords.x - 0.5), abs(zoomed_tex_coords.y - 0.5)) * 2.0);
+
+    let mode = uniforms.comparison_mode;
+
+    // Alpha Overlay mode (2): blend both images 50/50
+    if mode == MODE_OVERLAY {
+        let overlay_color = mix(color1, color2, 0.5);
+        return vec4<f32>(overlay_color.rgb, overlay_color.a * alpha);
+    }
+
+    // Absolute Difference mode (3): per-channel |image1 - image2|, amplified
+    if mode == MODE_ABS_DIFF {
+        let diff = abs(color1 - color2);
+        let amplified = clamp(diff.rgb * 10.0, vec3(0.0), vec3(1.0));
+        return vec4<f32>(amplified, alpha);
+    }
+
+    // Normal split-screen mode (0) or fallback
     // Determine split factor based on which images are enabled
     let both_shown = uniforms.show_image1 * uniforms.show_image2;
     let only_image2 = (1.0 - uniforms.show_image1) * uniforms.show_image2;
     let t = both_shown * step(uniforms.cursor_x, in.tex_coords.x) + only_image2;
 
     let mixed_color = mix(color1 * uniforms.show_image1, color2 * uniforms.show_image2, t);
-
-    // Calculate alpha based on whether the zoomed coordinates are within bounds
-    let alpha = 1.0 - step(1.0, max(abs(zoomed_tex_coords.x - 0.5), abs(zoomed_tex_coords.y - 0.5)) * 2.0);
 
     // Add a 1-pixel-wide white line at the split position using screen-space coordinates
     // so the line stays a constant width regardless of image resolution or window size.

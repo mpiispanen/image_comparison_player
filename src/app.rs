@@ -33,7 +33,7 @@ struct UniformData {
     image1_size: [f32; 2],
     image2_size: [f32; 2],
     flip_diff_size: [f32; 2],
-    show_flip_diff: f32,
+    comparison_mode: f32,
     zoom_level: f32,
     zoom_center: [f32; 2],
     window_size: [f32; 2],
@@ -47,6 +47,44 @@ struct UniformData {
 // `_padding` keeps the total size aligned with WGSL uniform layout expectations.
 unsafe impl bytemuck::Zeroable for UniformData {}
 unsafe impl bytemuck::Pod for UniformData {}
+
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+enum ComparisonMode {
+    #[default]
+    None,
+    Flip,
+    Overlay,
+    AbsDiff,
+}
+
+impl ComparisonMode {
+    fn cycle(self) -> Self {
+        match self {
+            ComparisonMode::None => ComparisonMode::Flip,
+            ComparisonMode::Flip => ComparisonMode::Overlay,
+            ComparisonMode::Overlay => ComparisonMode::AbsDiff,
+            ComparisonMode::AbsDiff => ComparisonMode::None,
+        }
+    }
+
+    fn as_f32(self) -> f32 {
+        match self {
+            ComparisonMode::None => 0.0,
+            ComparisonMode::Flip => 1.0,
+            ComparisonMode::Overlay => 2.0,
+            ComparisonMode::AbsDiff => 3.0,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ComparisonMode::None => "Normal",
+            ComparisonMode::Flip => "FLIP",
+            ComparisonMode::Overlay => "Alpha Overlay",
+            ComparisonMode::AbsDiff => "Abs Diff",
+        }
+    }
+}
 
 struct CacheDebugWindow {
     is_open: bool,
@@ -643,9 +681,9 @@ impl HelpOverlay {
                 if !single_image_mode {
                     ui.text_colored([1.0, 0.85, 0.3, 1.0], "Comparison");
                     ui.separator();
-                    ui.text("  Mouse move     Move split-line divider");
                     ui.text("  L              Toggle split-line divider");
-                    ui.text("  F              Toggle FLIP diff overlay");
+                    ui.text("  F              Cycle comparison mode");
+                    ui.text("                 (Normal -> FLIP -> Overlay -> Abs Diff)");
                     ui.text("  1 / 2          Show only left / right image");
                     ui.text("  P              Save FLIP diff image");
                     ui.dummy([0.0, 4.0]);
@@ -815,7 +853,7 @@ pub struct AppState {
     flip_diff_receiver: FlipDiffReceiver,
     flip_diff_texture: FlipDiffTexture,
     flip_mode: bool,
-    show_flip_diff: bool,
+    comparison_mode: ComparisonMode,
     show_image1: bool,
     show_image2: bool,
     show_split_line: bool,
@@ -1316,7 +1354,7 @@ impl AppState {
             mouse_position,
             flip_diff_texture: Arc::new(Mutex::new(None)),
             flip_mode: false,
-            show_flip_diff: false,
+            comparison_mode: ComparisonMode::None,
             show_image1: true,
             show_image2: true,
             show_split_line: true,
@@ -1375,7 +1413,7 @@ impl AppState {
         self.last_update = now;
 
         let mut player = self.player.write();
-        let frame_changed = player.update(delta, self.show_flip_diff);
+        let frame_changed = player.update(delta, self.comparison_mode == ComparisonMode::Flip);
         player.process_load_queue();
         debug!("Update called, frame changed: {}", frame_changed);
 
@@ -1387,7 +1425,7 @@ impl AppState {
 
     pub fn update_textures(&mut self) -> bool {
         let player = self.player.write();
-        player.update_textures(self.show_flip_diff)
+        player.update_textures(self.comparison_mode == ComparisonMode::Flip)
     }
 
     pub fn render(&mut self, window: &WinitWindow) -> Result<(), wgpu::SurfaceError> {
@@ -1456,7 +1494,7 @@ impl AppState {
             image1_size: [image_width, image_height],
             image2_size: [image_width, image_height],
             flip_diff_size: [image_width, image_height],
-            show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+            comparison_mode: self.comparison_mode.as_f32(),
             zoom_level: self.zoom_level,
             zoom_center: [
                 self.fixed_zoom_center.0 + self.zoom_center_offset.0,
@@ -1478,7 +1516,7 @@ impl AppState {
             });
 
         // Check if a valid flip diff texture exists for the current frame pair
-        let flip_diff_texture = if self.show_flip_diff {
+        let flip_diff_texture = if self.comparison_mode == ComparisonMode::Flip {
             player
                 .flip_diff_cache
                 .read()
@@ -1553,7 +1591,16 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop || self.hovering_file || self.help_overlay.is_open || self.show_hud || self.drag_zoom_start.is_some() {
+        if self.cache_debug_window.is_open
+            || self.pixel_info_window.is_open
+            || self.help_overlay.is_open
+            || self.status_message.is_some()
+            || self.waiting_for_drop
+            || self.hovering_file
+            || self.show_hud
+            || self.drag_zoom_start.is_some()
+            || (self.comparison_mode != ComparisonMode::None && !self.single_image_mode)
+        {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1655,6 +1702,37 @@ impl AppState {
                             [1.0, 1.0, 1.0, 1.0],
                             hud_text,
                         );
+                    }
+
+                    // Draw persistent comparison mode indicator in the top-right corner
+                    if self.comparison_mode != ComparisonMode::None && !self.single_image_mode {
+                        let win_size = window.inner_size();
+                        let padding = 10.0_f32;
+                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
+                        if let Some(_win) = ui
+                            .window("##mode_hud")
+                            .position(
+                                [win_size.width as f32 - padding, padding],
+                                imgui::Condition::Always,
+                            )
+                            .position_pivot([1.0, 0.0])
+                            .bg_alpha(0.6)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            let color = match self.comparison_mode {
+                                ComparisonMode::Flip => [1.0, 0.8, 0.2, 1.0],
+                                ComparisonMode::Overlay => [0.4, 0.8, 1.0, 1.0],
+                                ComparisonMode::AbsDiff => [1.0, 0.5, 0.5, 1.0],
+                                ComparisonMode::None => [1.0, 1.0, 1.0, 1.0],
+                            };
+                            ui.text_colored(color, self.comparison_mode.label());
+                        }
                     }
 
                     // Draw status-message toast in the bottom-left corner
@@ -1883,7 +1961,7 @@ impl AppState {
                     image1_size: [left_texture.width() as f32, left_texture.height() as f32],
                     image2_size: [right_texture.width() as f32, right_texture.height() as f32],
                     flip_diff_size,
-                    show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+                    comparison_mode: self.comparison_mode.as_f32(),
                     zoom_level: self.zoom_level,
                     zoom_center: [
                         self.fixed_zoom_center.0 + self.zoom_center_offset.0,
@@ -2016,10 +2094,11 @@ impl AppState {
                         self.config.format,
                         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
                     );
-                    let screenshot_prefix = if self.show_flip_diff {
-                        "screenshot_flip"
-                    } else {
-                        "screenshot_regular"
+                    let screenshot_prefix = match self.comparison_mode {
+                        ComparisonMode::None => "screenshot_regular",
+                        ComparisonMode::Flip => "screenshot_flip",
+                        ComparisonMode::Overlay => "screenshot_overlay",
+                        ComparisonMode::AbsDiff => "screenshot_absdiff",
                     };
                     let path = generate_output_filename(screenshot_prefix, "png");
                     let result_tx = self.screenshot_result_tx.clone();
@@ -2190,14 +2269,14 @@ impl AppState {
     }
 
     pub fn next_frame(&mut self) {
-        let frame_changed = self.player.write().next_frame(self.show_flip_diff);
+        let frame_changed = self.player.write().next_frame(self.comparison_mode == ComparisonMode::Flip);
         if frame_changed {
             self.load_and_update_textures();
         }
     }
 
     pub fn previous_frame(&mut self) {
-        let frame_changed = self.player.write().previous_frame(self.show_flip_diff);
+        let frame_changed = self.player.write().previous_frame(self.comparison_mode == ComparisonMode::Flip);
         if frame_changed {
             self.load_and_update_textures();
         }
@@ -2470,7 +2549,7 @@ impl AppState {
                 }
                 VirtualKeyCode::F => {
                     if !self.single_image_mode {
-                        self.toggle_flip_diff();
+                        self.cycle_comparison_mode();
                     }
                 }
                 VirtualKeyCode::Left | VirtualKeyCode::Right => {
@@ -2643,14 +2722,17 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
-    pub fn toggle_flip_diff(&mut self) {
-        self.show_flip_diff = !self.show_flip_diff;
-        if self.show_flip_diff {
+    pub fn cycle_comparison_mode(&mut self) {
+        self.comparison_mode = self.comparison_mode.cycle();
+        if self.comparison_mode == ComparisonMode::Flip {
             let (current_left, current_right) = self.player.read().current_images();
             self.player
                 .write()
                 .generate_flip_diff(current_left, current_right);
         }
+        let label = self.comparison_mode.label();
+        self.status_message = Some((format!("Comparison mode: {}", label), Instant::now()));
+        self.update_uniform_buffer();
     }
 
     pub fn toggle_image_source(&mut self, is_left: bool) {
@@ -2734,7 +2816,7 @@ impl AppState {
             image1_size,
             image2_size,
             flip_diff_size: [self.size.width as f32, self.size.height as f32],
-            show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+            comparison_mode: self.comparison_mode.as_f32(),
             zoom_level: self.zoom_level,
             zoom_center: [
                 self.fixed_zoom_center.0 + self.zoom_center_offset.0,
