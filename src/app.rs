@@ -758,6 +758,7 @@ pub struct AppState {
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
+    show_hud: bool,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1215,6 +1216,7 @@ impl AppState {
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
+            show_hud: true,
         })
     }
 
@@ -1413,7 +1415,7 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() {
+        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.show_hud {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1442,6 +1444,62 @@ impl AppState {
                             flip_stats.as_ref(),
                             self.single_image_mode,
                         );
+                    }
+
+                    // Draw persistent HUD in the top-right corner
+                    if self.show_hud {
+                        let player = self.player.read();
+                        let (left_index, _right_index) = player.current_images();
+                        let frame_total = player.frame_count1;
+                        let speed = player.playback_speed();
+                        let playing = player.is_playing();
+                        drop(player);
+
+                        let compare_mode = if self.single_image_mode {
+                            "Single"
+                        } else if self.show_flip_diff {
+                            "FLIP diff"
+                        } else if !self.show_image1 {
+                            "Right only"
+                        } else if !self.show_image2 {
+                            "Left only"
+                        } else {
+                            "Split"
+                        };
+
+                        let win_size = window.inner_size();
+                        let padding = 10.0_f32;
+                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
+                        if let Some(_win) = ui
+                            .window("##hud")
+                            .position(
+                                [win_size.width as f32 - padding, padding],
+                                imgui::Condition::Always,
+                            )
+                            .position_pivot([1.0, 0.0])
+                            .bg_alpha(0.6)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            let play_str = if playing { "▶" } else { "⏸" };
+                            ui.text_colored(
+                                [1.0, 1.0, 1.0, 1.0],
+                                format!(
+                                    "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                    left_index + 1,
+                                    frame_total,
+                                    play_str,
+                                    speed,
+                                    self.zoom_level,
+                                    compare_mode,
+                                ),
+                            );
+                        }
                     }
 
                     // Draw status-message toast in the bottom-left corner
@@ -1993,6 +2051,9 @@ impl AppState {
                 }
                 VirtualKeyCode::V => {
                     self.pixel_info_window.toggle();
+                }
+                VirtualKeyCode::H => {
+                    self.show_hud = !self.show_hud;
                 }
                 _ => {}
             }
