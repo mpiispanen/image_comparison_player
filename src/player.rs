@@ -244,6 +244,38 @@ pub struct DiffImageInfo {
     pub process_time: Duration,
 }
 
+/// Playback loop mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LoopMode {
+    /// Play forward and wrap back to the start (or loop-in point) at the end.
+    #[default]
+    Forward,
+    /// Play in reverse and wrap back to the end (or loop-out point) at the start.
+    Reverse,
+    /// Bounce back and forth between the start and end (or loop-in / loop-out points).
+    PingPong,
+}
+
+impl LoopMode {
+    /// Cycle to the next mode in the canonical order.
+    pub fn next(self) -> Self {
+        match self {
+            LoopMode::Forward => LoopMode::Reverse,
+            LoopMode::Reverse => LoopMode::PingPong,
+            LoopMode::PingPong => LoopMode::Forward,
+        }
+    }
+
+    /// Human-readable name shown in the HUD.
+    pub fn label(self) -> &'static str {
+        match self {
+            LoopMode::Forward => "Forward",
+            LoopMode::Reverse => "Reverse",
+            LoopMode::PingPong => "Ping-Pong",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct FlipStats {
     pub mean: f32,
@@ -296,6 +328,14 @@ pub struct Player {
     sorted_time_points: Vec<u64>,
     pub flip_diff_cache_metrics: Arc<CacheMetrics>,
     flip_diff_cache_capacity: usize,
+    /// Current loop playback mode.
+    loop_mode: Mutex<LoopMode>,
+    /// Optional loop-in time point (microseconds). When set, playback wraps here.
+    loop_in: Mutex<Option<u64>>,
+    /// Optional loop-out time point (microseconds). When set, playback wraps here.
+    loop_out: Mutex<Option<u64>>,
+    /// Direction used by Ping-Pong mode: `true` = forward, `false` = reverse.
+    ping_pong_forward: AtomicBool,
 }
 
 impl Player {
@@ -377,6 +417,10 @@ impl Player {
             sorted_time_points,
             flip_diff_cache_metrics: Arc::new(CacheMetrics::default()),
             flip_diff_cache_capacity,
+            loop_mode: Mutex::new(LoopMode::Forward),
+            loop_in: Mutex::new(None),
+            loop_out: Mutex::new(None),
+            ping_pong_forward: AtomicBool::new(true),
         }
     }
 
@@ -857,18 +901,125 @@ impl Player {
 
     fn advance_frame(&self, delta_micros: u128) -> bool {
         let current_time = self.current_time.load(Ordering::Relaxed);
-        let new_time = current_time.saturating_add(delta_micros as u64);
         let total_duration = self.total_duration();
+        let loop_mode = *self.loop_mode.lock();
+        let range_in = (*self.loop_in.lock()).unwrap_or(0);
+        let range_out = (*self.loop_out.lock()).unwrap_or(total_duration);
 
-        if new_time >= total_duration {
-            self.current_time.store(0, Ordering::Relaxed);
-            self.update_current_frames();
-            true
-        } else {
-            self.current_time.store(new_time, Ordering::Relaxed);
-            self.update_current_frames();
-            self.frame_changed.swap(false, Ordering::Relaxed)
+        let new_time = match loop_mode {
+            LoopMode::Forward => {
+                let t = current_time.saturating_add(delta_micros as u64);
+                if t >= range_out {
+                    range_in
+                } else {
+                    t
+                }
+            }
+            LoopMode::Reverse => {
+                if current_time <= range_in || current_time < delta_micros as u64 {
+                    // Wrap to the last time point at or before range_out.
+                    last_time_point_before(&self.sorted_time_points, range_out)
+                } else {
+                    current_time.saturating_sub(delta_micros as u64).max(range_in)
+                }
+            }
+            LoopMode::PingPong => {
+                let going_forward = self.ping_pong_forward.load(Ordering::Relaxed);
+                if going_forward {
+                    let t = current_time.saturating_add(delta_micros as u64);
+                    if t >= range_out {
+                        // Reverse direction and bounce.
+                        self.ping_pong_forward.store(false, Ordering::Relaxed);
+                        range_out.saturating_sub(t.saturating_sub(range_out))
+                            .max(range_in)
+                    } else {
+                        t
+                    }
+                } else if current_time <= range_in || current_time < delta_micros as u64 {
+                    // Reverse direction and bounce.
+                    self.ping_pong_forward.store(true, Ordering::Relaxed);
+                    let overshoot = (delta_micros as u64)
+                        .saturating_sub(current_time.saturating_sub(range_in));
+                    range_in.saturating_add(overshoot).min(range_out)
+                } else {
+                    current_time.saturating_sub(delta_micros as u64).max(range_in)
+                }
+            }
+        };
+
+        self.current_time.store(new_time, Ordering::Relaxed);
+        self.update_current_frames();
+        self.frame_changed.swap(false, Ordering::Relaxed)
+    }
+
+    // ── Loop mode & range public API ──────────────────────────────────────────
+
+    /// Return the current loop mode.
+    pub fn get_loop_mode(&self) -> LoopMode {
+        *self.loop_mode.lock()
+    }
+
+    /// Cycle to the next loop mode.
+    pub fn cycle_loop_mode(&self) {
+        let mut mode = self.loop_mode.lock();
+        *mode = mode.next();
+        // Reset ping-pong direction when switching modes.
+        self.ping_pong_forward.store(true, Ordering::Relaxed);
+    }
+
+    /// Return the current loop-in time point, if set.
+    pub fn get_loop_in(&self) -> Option<u64> {
+        *self.loop_in.lock()
+    }
+
+    /// Return the current loop-out time point, if set.
+    pub fn get_loop_out(&self) -> Option<u64> {
+        *self.loop_out.lock()
+    }
+
+    /// Set the loop-in point to the start time of the current frame.
+    pub fn set_loop_in(&self) {
+        let t = self.current_time.load(Ordering::Relaxed);
+        *self.loop_in.lock() = Some(t);
+        // Ensure loop_out is after loop_in.
+        let mut out = self.loop_out.lock();
+        if let Some(o) = *out {
+            if o <= t {
+                *out = None;
+            }
         }
+        // Reset ping-pong direction.
+        self.ping_pong_forward.store(true, Ordering::Relaxed);
+    }
+
+    /// Set the loop-out point to the end time of the current frame.
+    pub fn set_loop_out(&self) {
+        let t = self.current_time.load(Ordering::Relaxed);
+        // Snap to next time point so the current frame is fully included.
+        let out_t = next_time_point_forward(&self.sorted_time_points, t);
+        // If we wrapped (i.e., we were already at the last frame), use total duration.
+        let out_t = if out_t <= t {
+            self.total_duration()
+        } else {
+            out_t
+        };
+        *self.loop_out.lock() = Some(out_t);
+        // Ensure loop_in is before loop_out.
+        let mut inp = self.loop_in.lock();
+        if let Some(i) = *inp {
+            if i >= out_t {
+                *inp = None;
+            }
+        }
+        // Reset ping-pong direction.
+        self.ping_pong_forward.store(true, Ordering::Relaxed);
+    }
+
+    /// Clear both loop-in and loop-out points.
+    pub fn clear_loop_range(&self) {
+        *self.loop_in.lock() = None;
+        *self.loop_out.lock() = None;
+        self.ping_pong_forward.store(true, Ordering::Relaxed);
     }
 
     pub fn total_duration(&self) -> u64 {
@@ -1465,6 +1616,17 @@ fn next_time_point_backward(sorted_times: &[u64], current_time: u64) -> u64 {
     }
 }
 
+/// Return the last time point that is strictly less than `bound`.
+/// If `bound` is 0 or less than all points, returns 0.
+fn last_time_point_before(sorted_times: &[u64], bound: u64) -> u64 {
+    let pos = sorted_times.partition_point(|&t| t < bound);
+    if pos > 0 {
+        sorted_times[pos - 1]
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1618,5 +1780,49 @@ mod tests {
         assert_eq!(next_time_point_backward(&times, 200), 100);
         assert_eq!(next_time_point_backward(&times, 150), 100);
         assert_eq!(next_time_point_backward(&times, 100), 0);
+    }
+
+    // ── last_time_point_before ─────────────────────────────────────────────
+
+    #[test]
+    fn test_last_time_point_before_basic() {
+        let times = vec![0u64, 100, 200, 300];
+        assert_eq!(last_time_point_before(&times, 300), 200);
+        assert_eq!(last_time_point_before(&times, 200), 100);
+        assert_eq!(last_time_point_before(&times, 150), 100);
+        assert_eq!(last_time_point_before(&times, 100), 0);
+    }
+
+    #[test]
+    fn test_last_time_point_before_zero_bound() {
+        let times = vec![0u64, 100, 200];
+        assert_eq!(last_time_point_before(&times, 0), 0);
+    }
+
+    #[test]
+    fn test_last_time_point_before_empty() {
+        let times: Vec<u64> = vec![];
+        assert_eq!(last_time_point_before(&times, 100), 0);
+    }
+
+    // ── LoopMode ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_loop_mode_cycle() {
+        assert_eq!(LoopMode::Forward.next(), LoopMode::Reverse);
+        assert_eq!(LoopMode::Reverse.next(), LoopMode::PingPong);
+        assert_eq!(LoopMode::PingPong.next(), LoopMode::Forward);
+    }
+
+    #[test]
+    fn test_loop_mode_labels() {
+        assert_eq!(LoopMode::Forward.label(), "Forward");
+        assert_eq!(LoopMode::Reverse.label(), "Reverse");
+        assert_eq!(LoopMode::PingPong.label(), "Ping-Pong");
+    }
+
+    #[test]
+    fn test_loop_mode_default() {
+        assert_eq!(LoopMode::default(), LoopMode::Forward);
     }
 }

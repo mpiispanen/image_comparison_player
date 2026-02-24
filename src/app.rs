@@ -1,5 +1,6 @@
 use crate::image_loader;
 use crate::player::FlipStats;
+use crate::player::LoopMode;
 use crate::player::Player;
 use crate::player::PlayerConfig;
 use imgui::Condition;
@@ -615,7 +616,7 @@ impl HelpOverlay {
             return;
         }
         ui.window("Help - Keyboard & Mouse Controls")
-            .size([420.0, 380.0], Condition::FirstUseEver)
+            .size([420.0, 430.0], Condition::FirstUseEver)
             .position([60.0, 60.0], Condition::FirstUseEver)
             .resizable(true)
             .opened(&mut self.is_open)
@@ -625,6 +626,14 @@ impl HelpOverlay {
                 ui.text("  Space          Play / Pause");
                 ui.text("  Left / Right   Previous / Next frame");
                 ui.text("  [  /  ]        Decrease / Increase playback speed");
+                ui.dummy([0.0, 4.0]);
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Loop Mode & Range");
+                ui.separator();
+                ui.text("  M              Cycle loop mode (Forward/Reverse/Ping-Pong)");
+                ui.text("  ,              Set loop-in to current frame");
+                ui.text("  .              Set loop-out to current frame");
+                ui.text("  /              Clear loop range");
                 ui.dummy([0.0, 4.0]);
 
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Zoom & Pan");
@@ -1493,6 +1502,12 @@ impl AppState {
             || self.pixel_info_window.is_open
             || self.help_overlay.is_open
             || self.status_message.is_some()
+            || {
+                let p = self.player.read();
+                p.get_loop_mode() != LoopMode::Forward
+                    || p.get_loop_in().is_some()
+                    || p.get_loop_out().is_some()
+            }
         {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
@@ -1525,6 +1540,53 @@ impl AppState {
                     }
 
                     self.help_overlay.draw(ui, self.single_image_mode);
+
+                    // Draw loop state HUD in the top-right corner.
+                    {
+                        let p = self.player.read();
+                        let loop_mode = p.get_loop_mode();
+                        let loop_in = p.get_loop_in();
+                        let loop_out = p.get_loop_out();
+                        let total_duration = p.total_duration();
+                        drop(p);
+
+                        if loop_mode != LoopMode::Forward
+                            || loop_in.is_some()
+                            || loop_out.is_some()
+                        {
+                            let win_size = window.inner_size();
+                            let padding = 10.0_f32;
+                            let _token =
+                                ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
+                            if let Some(_win) = ui
+                                .window("##loop_hud")
+                                .position(
+                                    [win_size.width as f32 - padding, padding],
+                                    imgui::Condition::Always,
+                                )
+                                .position_pivot([1.0, 0.0])
+                                .bg_alpha(0.75)
+                                .no_decoration()
+                                .no_inputs()
+                                .movable(false)
+                                .no_nav()
+                                .focus_on_appearing(false)
+                                .always_auto_resize(true)
+                                .begin()
+                            {
+                                ui.text_colored(
+                                    [0.4, 0.9, 1.0, 1.0],
+                                    format!("Loop: {}", loop_mode.label()),
+                                );
+                                if loop_in.is_some() || loop_out.is_some() {
+                                    let in_ms = loop_in.unwrap_or(0) / 1000;
+                                    let out_ms =
+                                        loop_out.unwrap_or(total_duration) / 1000;
+                                    ui.text(format!("  {:.3}s – {:.3}s", in_ms as f32 / 1000.0, out_ms as f32 / 1000.0));
+                                }
+                            }
+                        }
+                    }
 
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
@@ -2107,6 +2169,18 @@ impl AppState {
                 }
                 VirtualKeyCode::H => {
                     self.help_overlay.toggle();
+                }
+                VirtualKeyCode::M => {
+                    self.player.write().cycle_loop_mode();
+                }
+                VirtualKeyCode::Comma => {
+                    self.player.write().set_loop_in();
+                }
+                VirtualKeyCode::Period => {
+                    self.player.write().set_loop_out();
+                }
+                VirtualKeyCode::Slash => {
+                    self.player.write().clear_loop_range();
                 }
                 _ => {}
             }
