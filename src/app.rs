@@ -34,6 +34,7 @@ struct UniformData {
     window_size: [f32; 2],
     show_image1: f32,
     show_image2: f32,
+    show_split_line: f32,
 }
 
 // SAFETY: UniformData is #[repr(C)] and all fields are f32 or [f32; N].
@@ -518,6 +519,7 @@ pub struct AppState {
     show_flip_diff: bool,
     show_image1: bool,
     show_image2: bool,
+    show_split_line: bool,
     zoom_level: f32,
     fixed_zoom_center: (f32, f32),
     swipe_start: Option<(f64, f64)>,
@@ -927,6 +929,7 @@ impl AppState {
             show_flip_diff: false,
             show_image1: true,
             show_image2: true,
+            show_split_line: true,
             flip_diff_receiver: Arc::new(Mutex::new(mpsc::channel().1)),
             zoom_level: 1.0,
             fixed_zoom_center: (0.5, 0.5),
@@ -1053,6 +1056,7 @@ impl AppState {
             window_size: [window_size.width as f32, window_size.height as f32],
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+            show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
         };
 
         debug!("Created texture view");
@@ -1283,6 +1287,7 @@ impl AppState {
                     window_size: [window_size.width as f32, window_size.height as f32],
                     show_image1: if self.show_image1 { 1.0 } else { 0.0 },
                     show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+                    show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
                 };
 
                 self.queue
@@ -1666,6 +1671,9 @@ impl AppState {
                 VirtualKeyCode::Key2 => {
                     self.toggle_image_source(false);
                 }
+                VirtualKeyCode::L => {
+                    self.toggle_split_line();
+                }
                 _ => {}
             }
         }
@@ -1739,6 +1747,11 @@ impl AppState {
         } else {
             self.show_image2 = !self.show_image2;
         }
+        self.update_uniform_buffer();
+    }
+
+    pub fn toggle_split_line(&mut self) {
+        self.show_split_line = !self.show_split_line;
         self.update_uniform_buffer();
     }
 
@@ -1818,6 +1831,7 @@ impl AppState {
             window_size: [self.size.width as f32, self.size.height as f32],
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+            show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
