@@ -601,6 +601,171 @@ impl PixelInfoWindow {
     }
 }
 
+struct HistogramWindow {
+    is_open: bool,
+    show_r: bool,
+    show_g: bool,
+    show_b: bool,
+    show_luma: bool,
+}
+
+impl HistogramWindow {
+    fn new() -> Self {
+        Self {
+            is_open: false,
+            show_r: true,
+            show_g: true,
+            show_b: true,
+            show_luma: true,
+        }
+    }
+
+    fn draw(
+        &mut self,
+        ui: &Ui,
+        left_hist: Option<&crate::player::HistogramData>,
+        right_hist: Option<&crate::player::HistogramData>,
+        single_image_mode: bool,
+    ) {
+        if !self.is_open {
+            return;
+        }
+        // 256 pixels wide: one pixel per histogram bin (0-255).
+        let hist_width = 256.0_f32;
+        let hist_height = 80.0_f32;
+
+        // Extract toggle state into locals so they can be captured by the closure.
+        let mut show_r = self.show_r;
+        let mut show_g = self.show_g;
+        let mut show_b = self.show_b;
+        let mut show_luma = self.show_luma;
+
+        ui.window("Histogram")
+            .size([hist_width + 24.0, 340.0], Condition::FirstUseEver)
+            .position([10.0, 490.0], Condition::FirstUseEver)
+            .resizable(true)
+            .always_auto_resize(false)
+            .build(|| {
+                ui.checkbox("R", &mut show_r);
+                ui.same_line();
+                ui.checkbox("G", &mut show_g);
+                ui.same_line();
+                ui.checkbox("B", &mut show_b);
+                ui.same_line();
+                ui.checkbox("L", &mut show_luma);
+
+                let draw_hist = |label: &str, hist: &crate::player::HistogramData| {
+                    ui.separator();
+                    ui.text(label);
+                    let draw_list = ui.get_window_draw_list();
+                    let window_pos = ui.window_pos();
+                    let cursor = ui.cursor_pos();
+                    let ox = window_pos[0] + cursor[0];
+                    let oy = window_pos[1] + cursor[1];
+
+                    // Background
+                    draw_list
+                        .add_rect([ox, oy], [ox + hist_width, oy + hist_height], [0.1, 0.1, 0.1, 1.0])
+                        .filled(true)
+                        .build();
+
+                    let bar_w = hist_width / 256.0;
+                    if show_r {
+                        for (i, &v) in hist.r.iter().enumerate() {
+                            let bh = v * hist_height;
+                            let x = ox + i as f32 * bar_w;
+                            draw_list
+                                .add_rect(
+                                    [x, oy + hist_height - bh],
+                                    [x + bar_w, oy + hist_height],
+                                    [0.9, 0.2, 0.2, 0.7],
+                                )
+                                .filled(true)
+                                .build();
+                        }
+                    }
+                    if show_g {
+                        for (i, &v) in hist.g.iter().enumerate() {
+                            let bh = v * hist_height;
+                            let x = ox + i as f32 * bar_w;
+                            draw_list
+                                .add_rect(
+                                    [x, oy + hist_height - bh],
+                                    [x + bar_w, oy + hist_height],
+                                    [0.2, 0.9, 0.2, 0.7],
+                                )
+                                .filled(true)
+                                .build();
+                        }
+                    }
+                    if show_b {
+                        for (i, &v) in hist.b.iter().enumerate() {
+                            let bh = v * hist_height;
+                            let x = ox + i as f32 * bar_w;
+                            draw_list
+                                .add_rect(
+                                    [x, oy + hist_height - bh],
+                                    [x + bar_w, oy + hist_height],
+                                    [0.2, 0.4, 0.9, 0.7],
+                                )
+                                .filled(true)
+                                .build();
+                        }
+                    }
+                    if show_luma {
+                        for (i, &v) in hist.luma.iter().enumerate() {
+                            let bh = v * hist_height;
+                            let x = ox + i as f32 * bar_w;
+                            draw_list
+                                .add_rect(
+                                    [x, oy + hist_height - bh],
+                                    [x + bar_w, oy + hist_height],
+                                    [0.9, 0.9, 0.9, 0.5],
+                                )
+                                .filled(true)
+                                .build();
+                        }
+                    }
+
+                    // Border
+                    draw_list
+                        .add_rect([ox, oy], [ox + hist_width, oy + hist_height], [0.5, 0.5, 0.5, 1.0])
+                        .build();
+
+                    ui.dummy([hist_width, hist_height + 2.0]);
+                };
+
+                if let Some(h) = left_hist {
+                    draw_hist(if single_image_mode { "Image" } else { "Left" }, h);
+                } else {
+                    ui.separator();
+                    ui.text(if single_image_mode { "Image" } else { "Left" });
+                    ui.text_disabled("(loading\u{2026})");
+                }
+
+                if !single_image_mode {
+                    if let Some(h) = right_hist {
+                        draw_hist("Right", h);
+                    } else {
+                        ui.separator();
+                        ui.text("Right");
+                        ui.text_disabled("(loading\u{2026})");
+                    }
+                }
+            });
+
+        // Write back updated toggle states.
+        self.show_r = show_r;
+        self.show_g = show_g;
+        self.show_b = show_b;
+        self.show_luma = show_luma;
+    }
+
+    fn toggle(&mut self) {
+        self.is_open = !self.is_open;
+    }
+}
+
 struct HelpOverlay {
     is_open: bool,
 }
@@ -650,6 +815,7 @@ impl HelpOverlay {
                 ui.text("  H              Toggle this help overlay");
                 ui.text("  C              Toggle cache debug window");
                 ui.text("  V              Toggle pixel info window");
+                ui.text("  N              Toggle histogram panel");
                 ui.dummy([0.0, 4.0]);
 
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
@@ -826,6 +992,7 @@ pub struct AppState {
     esc_key_down: bool,
     pixel_info_window: PixelInfoWindow,
     help_overlay: HelpOverlay,
+    histogram_window: HistogramWindow,
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
@@ -1286,6 +1453,7 @@ impl AppState {
             esc_key_down: false,
             pixel_info_window: PixelInfoWindow::new(),
             help_overlay: HelpOverlay::new(),
+            histogram_window: HistogramWindow::new(),
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
@@ -1492,6 +1660,7 @@ impl AppState {
         if self.cache_debug_window.is_open
             || self.pixel_info_window.is_open
             || self.help_overlay.is_open
+            || self.histogram_window.is_open
             || self.status_message.is_some()
         {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
@@ -1525,6 +1694,20 @@ impl AppState {
                     }
 
                     self.help_overlay.draw(ui, self.single_image_mode);
+
+                    if self.histogram_window.is_open {
+                        let player = self.player.read();
+                        let (left_index, right_index) = player.current_images();
+                        let hist_cache = player.histogram_cache.read();
+                        let left_hist = hist_cache.get(&(left_index, true));
+                        let right_hist = hist_cache.get(&(right_index, false));
+                        self.histogram_window.draw(
+                            ui,
+                            left_hist,
+                            right_hist,
+                            self.single_image_mode,
+                        );
+                    }
 
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
@@ -2104,6 +2287,9 @@ impl AppState {
                 }
                 VirtualKeyCode::V => {
                     self.pixel_info_window.toggle();
+                }
+                VirtualKeyCode::N => {
+                    self.histogram_window.toggle();
                 }
                 VirtualKeyCode::H => {
                     self.help_overlay.toggle();

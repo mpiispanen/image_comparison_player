@@ -253,6 +253,55 @@ pub struct FlipStats {
     pub p99: f32,
 }
 
+/// Per-channel (R, G, B) and luminance histogram with 256 bins each.
+/// Bins contain normalised counts in [0, 1] where 1.0 == the tallest bin.
+#[derive(Clone)]
+pub struct HistogramData {
+    pub r: [f32; 256],
+    pub g: [f32; 256],
+    pub b: [f32; 256],
+    pub luma: [f32; 256],
+}
+
+impl HistogramData {
+    /// Compute a histogram from a flat RGBA8 byte slice.
+    pub fn from_rgba8(data: &[u8]) -> Self {
+        let mut r = [0u64; 256];
+        let mut g = [0u64; 256];
+        let mut b = [0u64; 256];
+        let mut luma = [0u64; 256];
+
+        for chunk in data.chunks_exact(4) {
+            let rv = chunk[0] as usize;
+            let gv = chunk[1] as usize;
+            let bv = chunk[2] as usize;
+            r[rv] += 1;
+            g[gv] += 1;
+            b[bv] += 1;
+            // BT.709 luminance: L = 0.2126·R + 0.7152·G + 0.0722·B
+            // Fixed-point: coefficients scaled by 65536 → (13933, 46871, 4732); shift right 16.
+            let lv = (13933u32 * rv as u32 + 46871u32 * gv as u32 + 4732u32 * bv as u32) >> 16;
+            luma[lv.min(255) as usize] += 1;
+        }
+
+        let normalise = |bins: [u64; 256]| -> [f32; 256] {
+            let peak = bins.iter().copied().max().unwrap_or(1).max(1) as f32;
+            let mut out = [0.0f32; 256];
+            for (i, &v) in bins.iter().enumerate() {
+                out[i] = v as f32 / peak;
+            }
+            out
+        };
+
+        Self {
+            r: normalise(r),
+            g: normalise(g),
+            b: normalise(b),
+            luma: normalise(luma),
+        }
+    }
+}
+
 pub struct Player {
     pub config: PlayerConfig,
     current_time: AtomicU64,
@@ -296,6 +345,8 @@ pub struct Player {
     sorted_time_points: Vec<u64>,
     pub flip_diff_cache_metrics: Arc<CacheMetrics>,
     flip_diff_cache_capacity: usize,
+    /// Per-frame histogram data, keyed by (frame_index, is_left).
+    pub histogram_cache: Arc<RwLock<HashMap<(usize, bool), HistogramData>>>,
 }
 
 impl Player {
@@ -377,6 +428,7 @@ impl Player {
             sorted_time_points,
             flip_diff_cache_metrics: Arc::new(CacheMetrics::default()),
             flip_diff_cache_capacity,
+            histogram_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -643,6 +695,7 @@ impl Player {
             let frame_changed = Arc::clone(&self.frame_changed);
             let texture_timings = Arc::clone(&self.texture_timings);
             let texture_available_times = Arc::clone(&self.texture_available_times);
+            let histogram_cache = Arc::clone(&self.histogram_cache);
 
             let current_frame = if is_left {
                 self.current_frame1.load(Ordering::Relaxed)
@@ -702,6 +755,10 @@ impl Player {
                 }
 
                 frame_changed.store(true, Ordering::Relaxed);
+
+                // Compute and cache the histogram for this frame.
+                let histogram = HistogramData::from_rgba8(&image_data);
+                histogram_cache.write().insert((index, is_left), histogram);
 
                 let process_end = Instant::now();
                 let process_time = process_end - process_start;
@@ -1618,5 +1675,67 @@ mod tests {
         assert_eq!(next_time_point_backward(&times, 200), 100);
         assert_eq!(next_time_point_backward(&times, 150), 100);
         assert_eq!(next_time_point_backward(&times, 100), 0);
+    }
+
+    // ── HistogramData ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_histogram_all_zeros_empty_data() {
+        let hist = HistogramData::from_rgba8(&[]);
+        // No pixels → every bin is 0 except the normalised peak which stays 0.
+        assert!(hist.r.iter().all(|&v| v == 0.0));
+        assert!(hist.g.iter().all(|&v| v == 0.0));
+        assert!(hist.b.iter().all(|&v| v == 0.0));
+        assert!(hist.luma.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_histogram_single_red_pixel() {
+        // A single fully-red pixel: R=255, G=0, B=0, A=255
+        let data = vec![255u8, 0, 0, 255];
+        let hist = HistogramData::from_rgba8(&data);
+        // Red bin 255 should be peak (1.0), all others 0
+        assert_eq!(hist.r[255], 1.0);
+        assert!(hist.r[..255].iter().all(|&v| v == 0.0));
+        // Green: only bin 0 has a count
+        assert_eq!(hist.g[0], 1.0);
+        // Blue: only bin 0 has a count
+        assert_eq!(hist.b[0], 1.0);
+    }
+
+    #[test]
+    fn test_histogram_normalised_peak_is_one() {
+        // Two pixels: R=100 and R=200; bin 200 has more weight (still 1 pixel each,
+        // but equal weight makes both 1.0 after normalisation)
+        let data = vec![100u8, 0, 0, 255, 200, 0, 0, 255];
+        let hist = HistogramData::from_rgba8(&data);
+        // Both bins have count 1 → peak is 1 → both normalise to 1.0
+        assert_eq!(hist.r[100], 1.0);
+        assert_eq!(hist.r[200], 1.0);
+        // All other red bins are 0
+        for i in 0..256usize {
+            if i != 100 && i != 200 {
+                assert_eq!(hist.r[i], 0.0, "bin {} should be 0", i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_histogram_luma_bin_in_range() {
+        // Fully-white pixel: R=255, G=255, B=255
+        let data = vec![255u8, 255, 255, 255];
+        let hist = HistogramData::from_rgba8(&data);
+        // Luminance should map to the 255 bin
+        assert_eq!(hist.luma[255], 1.0);
+        assert!(hist.luma[..255].iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_histogram_bins_have_256_entries() {
+        let hist = HistogramData::from_rgba8(&[128, 64, 32, 255]);
+        assert_eq!(hist.r.len(), 256);
+        assert_eq!(hist.g.len(), 256);
+        assert_eq!(hist.b.len(), 256);
+        assert_eq!(hist.luma.len(), 256);
     }
 }
