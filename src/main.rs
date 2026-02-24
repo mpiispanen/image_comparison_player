@@ -7,6 +7,7 @@ use winit::{
     window::WindowBuilder,
 };
 mod app;
+mod batch;
 mod image_loader;
 mod player;
 mod test_images;
@@ -146,6 +147,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Frames per second (overrides input.txt durations)")
                 .default_value("30"),
         )
+        .arg(
+            Arg::new("batch")
+                .long("batch")
+                .action(ArgAction::SetTrue)
+                .help("Run in headless batch mode: compute diffs for all image pairs and exit"),
+        )
+        .arg(
+            Arg::new("output")
+                .long("output")
+                .action(ArgAction::Set)
+                .value_name("DIR")
+                .help("Output directory for batch mode diff images and metrics (required with --batch)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("diff_mode")
+                .long("diff-mode")
+                .action(ArgAction::Set)
+                .value_name("MODE")
+                .help("Diff algorithm used in batch mode: flip (default) or none")
+                .default_value("flip"),
+        )
         .get_matches();
 
     let test_mode = matches.get_flag("test_mode");
@@ -224,6 +247,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .parse()
         .unwrap_or(30.0);
+
+    // ── Batch / headless mode ─────────────────────────────────────────────
+    let batch_mode = matches.get_flag("batch");
+    if batch_mode {
+        let output_dir = matches
+            .get_one::<String>("output")
+            .ok_or("--output <DIR> is required when using --batch")?;
+
+        let diff_mode_str = matches.get_one::<String>("diff_mode").unwrap();
+        let diff_mode: batch::DiffMode = diff_mode_str.parse().map_err(|e: String| e)?;
+
+        let image_pairs = batch::collect_image_pairs(
+            dir1.as_deref(),
+            dir2.as_deref(),
+            images1.as_deref(),
+            images2.as_deref(),
+            fps,
+        )?;
+
+        info!("Batch mode: {} image pair(s), diff_mode={:?}, output='{}'",
+            image_pairs.len(), diff_mode, output_dir);
+
+        let config = batch::BatchConfig {
+            image_pairs,
+            output_dir: output_dir.clone(),
+            diff_mode,
+        };
+
+        match batch::run_batch(&config) {
+            Ok(results) => {
+                info!("Batch processing complete: {} frame(s) processed successfully", results.len());
+                return Ok(());
+            }
+            Err(e) => {
+                error!("Batch processing failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+    // ── End batch mode ────────────────────────────────────────────────────
 
     let (width, height) = parse_window_size(window_size)?;
 

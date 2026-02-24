@@ -42,6 +42,9 @@ The application accepts the following command-line arguments:
 --diff-preload-ahead <COUNT>  Number of diff images to preload ahead (default: 4)
 --diff-preload-behind <COUNT> Number of diff images to preload behind (default: 0)
 --fps <FPS>                   Frames per second (default: 30)
+--batch                       Run in headless batch mode (no window opened)
+--output <DIR>                Output directory for batch mode results (required with --batch)
+--diff-mode <MODE>            Diff algorithm for batch mode: flip (default) or none
 ```
 
 Left side requires either `--dir1` (directory) or `--images1` (explicit file list), but not both.
@@ -147,6 +150,42 @@ The application supports three methods of specifying input images:
      --images1 /path/to/img1.png /path/to/img2.png \
      --images2 /path/to/ref1.png /path/to/ref2.png
    ```
+
+## Batch / Headless Mode
+
+Use `--batch` to process image pairs without opening a window.  This is
+useful for CI pipelines and automated regression testing.
+
+```
+# Compare two directories and write FLIP diff PNGs + metrics CSV to ./out/
+./target/release/image_comparison_player \
+  --dir1 /path/to/reference \
+  --dir2 /path/to/render \
+  --batch \
+  --output ./out
+
+# Use explicit file lists
+./target/release/image_comparison_player \
+  --images1 ref1.png ref2.png \
+  --images2 cmp1.png cmp2.png \
+  --batch \
+  --output ./out \
+  --diff-mode flip
+
+# Skip diff computation (validate loading only)
+./target/release/image_comparison_player \
+  --dir1 /path/to/reference \
+  --dir2 /path/to/render \
+  --batch \
+  --output ./out \
+  --diff-mode none
+```
+
+Batch mode outputs:
+- `<output>/flip_diff_NNNNNN.png` — FLIP error map visualised with the magma colour LUT (one file per pair, when `--diff-mode flip`)
+- `<output>/metrics.csv` — per-frame FLIP statistics (mean, min, max, p95, p99)
+
+The process exits with code `0` on full success and `1` if any pair fails to process.
 
 ## Dependencies
 
