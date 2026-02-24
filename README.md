@@ -59,6 +59,8 @@ The application supports the following keyboard controls:
 - Esc: Exit the application
 - [ : Decrease playback speed
 - ] : Increase playback speed
+- Q: Zoom out
+- E: Zoom in
 - W: Move zoom center up
 - A: Move zoom center left
 - S: Move zoom center down
