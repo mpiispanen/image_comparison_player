@@ -600,6 +600,73 @@ impl PixelInfoWindow {
     }
 }
 
+struct HelpOverlay {
+    is_open: bool,
+}
+
+impl HelpOverlay {
+    fn new() -> Self {
+        Self { is_open: false }
+    }
+
+    fn draw(&mut self, ui: &Ui, single_image_mode: bool) {
+        if !self.is_open {
+            return;
+        }
+        ui.window("Help - Keyboard & Mouse Controls")
+            .size([420.0, 380.0], Condition::FirstUseEver)
+            .position([60.0, 60.0], Condition::FirstUseEver)
+            .resizable(true)
+            .opened(&mut self.is_open)
+            .build(|| {
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Playback");
+                ui.separator();
+                ui.text("  Space          Play / Pause");
+                ui.text("  Left / Right   Previous / Next frame");
+                ui.text("  [  /  ]        Decrease / Increase playback speed");
+                ui.dummy([0.0, 4.0]);
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Zoom & Pan");
+                ui.separator();
+                ui.text("  Scroll wheel   Zoom in / out");
+                ui.text("  Up / Down      Zoom in / out");
+                ui.text("  Q / E          Zoom out / in");
+                ui.text("  W A S D        Pan up / left / down / right");
+                ui.dummy([0.0, 4.0]);
+
+                if !single_image_mode {
+                    ui.text_colored([1.0, 0.85, 0.3, 1.0], "Comparison");
+                    ui.separator();
+                    ui.text("  Mouse move     Move split-line divider");
+                    ui.text("  F              Toggle FLIP diff overlay");
+                    ui.text("  1 / 2          Show only left / right image");
+                    ui.text("  P              Save FLIP diff image");
+                    ui.dummy([0.0, 4.0]);
+                }
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Windows & Overlays");
+                ui.separator();
+                ui.text("  ?              Toggle this help overlay");
+                ui.text("  C              Toggle cache debug window");
+                ui.text("  V              Toggle pixel info window");
+                ui.dummy([0.0, 4.0]);
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
+                ui.separator();
+                ui.text("  I              Save screenshot");
+                ui.text("  Esc            Close overlay / Quit");
+            });
+    }
+
+    fn toggle(&mut self) {
+        self.is_open = !self.is_open;
+    }
+
+    fn close(&mut self) {
+        self.is_open = false;
+    }
+}
+
 struct CacheRowParams {
     frame_count: usize,
     mouse_pos: (f32, f32),
@@ -755,6 +822,8 @@ pub struct AppState {
     screenshot_result_tx: mpsc::Sender<String>,
     single_image_mode: bool,
     pixel_info_window: PixelInfoWindow,
+    help_overlay: HelpOverlay,
+    modifiers: winit::event::ModifiersState,
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
@@ -1212,6 +1281,8 @@ impl AppState {
             screenshot_result_rx: Arc::new(Mutex::new(screenshot_result_rx)),
             single_image_mode,
             pixel_info_window: PixelInfoWindow::new(),
+            help_overlay: HelpOverlay::new(),
+            modifiers: winit::event::ModifiersState::empty(),
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
@@ -1413,7 +1484,7 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() {
+        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.help_overlay.is_open || self.status_message.is_some() {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1443,6 +1514,8 @@ impl AppState {
                             self.single_image_mode,
                         );
                     }
+
+                    self.help_overlay.draw(ui, self.single_image_mode);
 
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
@@ -1921,6 +1994,14 @@ impl AppState {
         }
 
         if let winit::event::Event::WindowEvent {
+            event: winit::event::WindowEvent::ModifiersChanged(state),
+            ..
+        } = event
+        {
+            self.modifiers = *state;
+        }
+
+        if let winit::event::Event::WindowEvent {
             event: winit::event::WindowEvent::CursorMoved { position, .. },
             ..
         } = event
@@ -1944,8 +2025,15 @@ impl AppState {
         {
             match keycode {
                 VirtualKeyCode::Escape => {
-                    // Exit the application when Esc is pressed
-                    process::exit(0);
+                    if self.help_overlay.is_open {
+                        self.help_overlay.close();
+                    } else {
+                        // Exit the application when Esc is pressed
+                        process::exit(0);
+                    }
+                }
+                VirtualKeyCode::Slash if self.modifiers.shift() => {
+                    self.help_overlay.toggle();
                 }
                 VirtualKeyCode::C => {
                     self.cache_debug_window.toggle();
