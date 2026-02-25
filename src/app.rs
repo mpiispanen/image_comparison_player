@@ -1575,20 +1575,6 @@ impl AppState {
 
                     self.help_overlay.draw(ui, self.single_image_mode);
 
-                    let ui_size = ui.io().display_size;
-                    let ui_width = ui_size[0];
-                    let ui_height = ui_size[1];
-                    let to_ui_x = if self.size.width > 0 {
-                        ui_width / self.size.width as f32
-                    } else {
-                        1.0
-                    };
-                    let to_ui_y = if self.size.height > 0 {
-                        ui_height / self.size.height as f32
-                    } else {
-                        1.0
-                    };
-
                     // Draw persistent HUD in the top-right corner
                     if self.show_hud {
                         let player = self.player.read();
@@ -1611,12 +1597,13 @@ impl AppState {
                             "Split"
                         };
 
+                        let win_size = window.inner_size();
                         let padding = 10.0_f32;
                         let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
                         if let Some(_win) = ui
                             .window("##hud")
                             .position(
-                                [ui_width - padding, padding],
+                                [win_size.width as f32 - padding, padding],
                                 imgui::Condition::Always,
                             )
                             .position_pivot([1.0, 0.0])
@@ -1666,12 +1653,13 @@ impl AppState {
                     if let Some((msg, set_at)) = &self.status_message {
                         let elapsed = set_at.elapsed().as_secs_f32();
                         let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
+                        let win_size = window.inner_size();
                         let padding = 10.0_f32;
                         let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
                         if let Some(_win) = ui
                             .window("##status_toast")
                             .position(
-                                [padding, ui_height - padding],
+                                [padding, win_size.height as f32 - padding],
                                 imgui::Condition::Always,
                             )
                             .position_pivot([0.0, 1.0])
@@ -1690,14 +1678,13 @@ impl AppState {
 
                     // Draw drag-zoom selection rectangle.
                     if let Some(start) = self.drag_zoom_start {
-                        let current = self.drag_zoom_current;
-                        let start_ui = (start.0 * to_ui_x, start.1 * to_ui_y);
-                        let current_ui = (current.0 * to_ui_x, current.1 * to_ui_y);
+                        let current =
+                            Self::constrain_drag_to_window_aspect(start, self.drag_zoom_current, self.size);
                         // ImGui expects min/max corners; normalize in case of up/left drags.
-                        let min_x = start_ui.0.min(current_ui.0);
-                        let max_x = start_ui.0.max(current_ui.0);
-                        let min_y = start_ui.1.min(current_ui.1);
-                        let max_y = start_ui.1.max(current_ui.1);
+                        let min_x = start.0.min(current.0);
+                        let max_x = start.0.max(current.0);
+                        let min_y = start.1.min(current.1);
+                        let max_y = start.1.max(current.1);
                         let draw_list = ui.get_foreground_draw_list();
                         // Semi-transparent yellow fill.
                         draw_list
@@ -1713,8 +1700,9 @@ impl AppState {
 
                     // Draw the "waiting for drop" overlay in the centre of the window.
                     if self.waiting_for_drop && !self.hovering_file {
-                        let cx = ui_width / 2.0;
-                        let cy = ui_height / 2.0;
+                        let win_size = window.inner_size();
+                        let cx = win_size.width as f32 / 2.0;
+                        let cy = win_size.height as f32 / 2.0;
                         let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([20.0, 16.0]));
                         if let Some(_win) = ui
                             .window("##drop_hint")
@@ -2558,7 +2546,8 @@ impl AppState {
                 }
                 winit::event::ElementState::Released => {
                     if let Some(start) = self.drag_zoom_start.take() {
-                        let current = self.drag_zoom_current;
+                        let current =
+                            Self::constrain_drag_to_window_aspect(start, self.drag_zoom_current, self.size);
                         let dx = (current.0 - start.0).abs();
                         let dy = (current.1 - start.1).abs();
                         if dx > MIN_DRAG_ZOOM_DISTANCE_PX || dy > MIN_DRAG_ZOOM_DISTANCE_PX {
@@ -2804,6 +2793,40 @@ impl AppState {
         
         self.zoom_center_offset = (offset_x, offset_y);
         self.update_uniform_buffer();
+    }
+
+    /// Constrain drag end-point so the selection box keeps the window aspect ratio.
+    fn constrain_drag_to_window_aspect(
+        start: (f32, f32),
+        end: (f32, f32),
+        window_size: winit::dpi::PhysicalSize<u32>,
+    ) -> (f32, f32) {
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let abs_dx = dx.abs();
+        let abs_dy = dy.abs();
+        if abs_dx <= f32::EPSILON && abs_dy <= f32::EPSILON {
+            return end;
+        }
+
+        let aspect = window_size.width as f32 / window_size.height.max(1) as f32;
+        let sign_x = if dx < 0.0 { -1.0 } else { 1.0 };
+        let sign_y = if dy < 0.0 { -1.0 } else { 1.0 };
+
+        let (new_abs_dx, new_abs_dy) = if abs_dy <= f32::EPSILON {
+            (abs_dx, abs_dx / aspect)
+        } else if abs_dx <= f32::EPSILON {
+            (abs_dy * aspect, abs_dy)
+        } else if abs_dx / abs_dy > aspect {
+            (abs_dx, abs_dx / aspect)
+        } else {
+            (abs_dy * aspect, abs_dy)
+        };
+
+        (
+            (start.0 + sign_x * new_abs_dx).clamp(0.0, window_size.width as f32),
+            (start.1 + sign_y * new_abs_dy).clamp(0.0, window_size.height as f32),
+        )
     }
 
     /// Apply a zoom that fits the drag rectangle defined by two screen-space positions.
