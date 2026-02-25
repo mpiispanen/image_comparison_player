@@ -36,11 +36,12 @@ struct UniformData {
     window_size: [f32; 2],
     show_image1: f32,
     show_image2: f32,
+    show_split_line: f32,
+    _padding: f32,
 }
 
-// SAFETY: UniformData is #[repr(C)] and all fields are f32 or [f32; N].
-// Every field has 4-byte size and 4-byte alignment, so #[repr(C)] introduces
-// no padding bytes between fields, making the struct valid for Pod.
+// SAFETY: UniformData is #[repr(C)] and all fields are plain f32 arrays/scalars.
+// `_padding` keeps the total size aligned with WGSL uniform layout expectations.
 unsafe impl bytemuck::Zeroable for UniformData {}
 unsafe impl bytemuck::Pod for UniformData {}
 
@@ -600,6 +601,73 @@ impl PixelInfoWindow {
     }
 }
 
+struct HelpOverlay {
+    is_open: bool,
+}
+
+impl HelpOverlay {
+    fn new() -> Self {
+        Self { is_open: false }
+    }
+
+    fn draw(&mut self, ui: &Ui, single_image_mode: bool) {
+        if !self.is_open {
+            return;
+        }
+        ui.window("Help - Keyboard & Mouse Controls")
+            .size([420.0, 380.0], Condition::FirstUseEver)
+            .position([60.0, 60.0], Condition::FirstUseEver)
+            .resizable(true)
+            .opened(&mut self.is_open)
+            .build(|| {
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Playback");
+                ui.separator();
+                ui.text("  Space          Play / Pause");
+                ui.text("  Left / Right   Previous / Next frame");
+                ui.text("  [  /  ]        Decrease / Increase playback speed");
+                ui.dummy([0.0, 4.0]);
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Zoom & Pan");
+                ui.separator();
+                ui.text("  Scroll wheel   Zoom in / out");
+                ui.text("  Up / Down      Zoom in / out");
+                ui.text("  Q / E          Zoom out / in");
+                ui.text("  W A S D        Pan up / left / down / right");
+                ui.dummy([0.0, 4.0]);
+
+                if !single_image_mode {
+                    ui.text_colored([1.0, 0.85, 0.3, 1.0], "Comparison");
+                    ui.separator();
+                    ui.text("  Mouse move     Move split-line divider");
+                    ui.text("  F              Toggle FLIP diff overlay");
+                    ui.text("  1 / 2          Show only left / right image");
+                    ui.text("  P              Save FLIP diff image");
+                    ui.dummy([0.0, 4.0]);
+                }
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Windows & Overlays");
+                ui.separator();
+                ui.text("  H              Toggle this help overlay");
+                ui.text("  C              Toggle cache debug window");
+                ui.text("  V              Toggle pixel info window");
+                ui.dummy([0.0, 4.0]);
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
+                ui.separator();
+                ui.text("  I              Save screenshot");
+                ui.text("  Esc            Close overlay / Quit");
+            });
+    }
+
+    fn toggle(&mut self) {
+        self.is_open = !self.is_open;
+    }
+
+    fn close(&mut self) {
+        self.is_open = false;
+    }
+}
+
 struct CacheRowParams {
     frame_count: usize,
     mouse_pos: (f32, f32),
@@ -742,6 +810,7 @@ pub struct AppState {
     show_flip_diff: bool,
     show_image1: bool,
     show_image2: bool,
+    show_split_line: bool,
     zoom_level: f32,
     fixed_zoom_center: (f32, f32),
     swipe_start: Option<(f64, f64)>,
@@ -755,7 +824,9 @@ pub struct AppState {
     screenshot_result_rx: Arc<Mutex<mpsc::Receiver<String>>>,
     screenshot_result_tx: mpsc::Sender<String>,
     single_image_mode: bool,
+    esc_key_down: bool,
     pixel_info_window: PixelInfoWindow,
+    help_overlay: HelpOverlay,
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
@@ -1223,6 +1294,7 @@ impl AppState {
             show_flip_diff: false,
             show_image1: true,
             show_image2: true,
+            show_split_line: true,
             flip_diff_receiver: Arc::new(Mutex::new(mpsc::channel().1)),
             zoom_level: 1.0,
             fixed_zoom_center: (0.5, 0.5),
@@ -1237,7 +1309,9 @@ impl AppState {
             screenshot_result_tx,
             screenshot_result_rx: Arc::new(Mutex::new(screenshot_result_rx)),
             single_image_mode,
+            esc_key_down: false,
             pixel_info_window: PixelInfoWindow::new(),
+            help_overlay: HelpOverlay::new(),
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
@@ -1363,6 +1437,8 @@ impl AppState {
             window_size: [window_size.width as f32, window_size.height as f32],
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+            show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
+            _padding: 0.0,
         };
 
         debug!("Created texture view");
@@ -1449,7 +1525,7 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop || self.hovering_file {
+        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop || self.hovering_file || self.help_overlay.is_open {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1479,6 +1555,8 @@ impl AppState {
                             self.single_image_mode,
                         );
                     }
+
+                    self.help_overlay.draw(ui, self.single_image_mode);
 
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
@@ -1696,6 +1774,8 @@ impl AppState {
                     window_size: [window_size.width as f32, window_size.height as f32],
                     show_image1: if self.show_image1 { 1.0 } else { 0.0 },
                     show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+                    show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
+                    _padding: 0.0,
                 };
 
                 self.queue
@@ -2226,6 +2306,23 @@ impl AppState {
                 winit::event::WindowEvent::KeyboardInput {
                     input:
                         winit::event::KeyboardInput {
+                            state: winit::event::ElementState::Released,
+                            virtual_keycode: Some(VirtualKeyCode::Escape),
+                            ..
+                        },
+                    ..
+                },
+            ..
+        } = event
+        {
+            self.esc_key_down = false;
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event:
+                winit::event::WindowEvent::KeyboardInput {
+                    input:
+                        winit::event::KeyboardInput {
                             state: winit::event::ElementState::Pressed,
                             virtual_keycode: Some(keycode),
                             ..
@@ -2237,8 +2334,15 @@ impl AppState {
         {
             match keycode {
                 VirtualKeyCode::Escape => {
-                    // Exit the application when Esc is pressed
-                    process::exit(0);
+                    if !self.esc_key_down {
+                        self.esc_key_down = true;
+                        if self.help_overlay.is_open {
+                            self.help_overlay.close();
+                        } else {
+                            // Exit the application when Esc is pressed
+                            process::exit(0);
+                        }
+                    }
                 }
                 VirtualKeyCode::C => {
                     self.cache_debug_window.toggle();
@@ -2284,8 +2388,14 @@ impl AppState {
                 VirtualKeyCode::Key2 => {
                     self.toggle_image_source(false);
                 }
+                VirtualKeyCode::L => {
+                    self.toggle_split_line();
+                }
                 VirtualKeyCode::V => {
                     self.pixel_info_window.toggle();
+                }
+                VirtualKeyCode::H => {
+                    self.help_overlay.toggle();
                 }
                 _ => {}
             }
@@ -2389,6 +2499,11 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
+    pub fn toggle_split_line(&mut self) {
+        self.show_split_line = !self.show_split_line;
+        self.update_uniform_buffer();
+    }
+
     fn handle_zoom(&mut self, delta: &winit::event::MouseScrollDelta) {
         let zoom_factor = match delta {
             winit::event::MouseScrollDelta::LineDelta(_, y) => {
@@ -2465,6 +2580,8 @@ impl AppState {
             window_size: [self.size.width as f32, self.size.height as f32],
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+            show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
+            _padding: 0.0,
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
