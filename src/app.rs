@@ -1613,81 +1613,72 @@ impl AppState {
                             "Split"
                         };
 
+                        let draw_list = ui.get_foreground_draw_list();
                         let padding = 10.0_f32;
-                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
-                        if let Some(_win) = ui
-                            .window("##hud")
-                            .position(
-                                [ui_width - padding, padding],
-                                imgui::Condition::Always,
+                        let inner_pad_x = 8.0_f32;
+                        let inner_pad_y = 6.0_f32;
+                        let play_str = if playing { ">" } else { "||" };
+                        let hud_text = if self.single_image_mode {
+                            format!(
+                                "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                left_index + 1,
+                                left_total,
+                                play_str,
+                                speed,
+                                self.zoom_level,
+                                compare_mode,
                             )
-                            .position_pivot([1.0, 0.0])
-                            .bg_alpha(0.6)
-                            .no_decoration()
-                            .no_inputs()
-                            .movable(false)
-                            .no_nav()
-                            .focus_on_appearing(false)
-                            .always_auto_resize(true)
-                            .begin()
-                        {
-                            let play_str = if playing { "▶" } else { "⏸" };
-                            if self.single_image_mode {
-                                ui.text_colored(
-                                    [1.0, 1.0, 1.0, 1.0],
-                                    format!(
-                                        "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
-                                        left_index + 1,
-                                        left_total,
-                                        play_str,
-                                        speed,
-                                        self.zoom_level,
-                                        compare_mode,
-                                    ),
-                                );
-                            } else {
-                                ui.text_colored(
-                                    [1.0, 1.0, 1.0, 1.0],
-                                    format!(
-                                        "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
-                                        left_index + 1,
-                                        left_total,
-                                        right_index + 1,
-                                        right_total,
-                                        play_str,
-                                        speed,
-                                        self.zoom_level,
-                                        compare_mode,
-                                    ),
-                                );
-                            }
-                        }
+                        } else {
+                            format!(
+                                "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                left_index + 1,
+                                left_total,
+                                right_index + 1,
+                                right_total,
+                                play_str,
+                                speed,
+                                self.zoom_level,
+                                compare_mode,
+                            )
+                        };
+                        let text_size = ui.calc_text_size(&hud_text);
+                        let box_w = text_size[0] + inner_pad_x * 2.0;
+                        let box_h = text_size[1] + inner_pad_y * 2.0;
+                        let box_min = [ui_width - padding - box_w, padding];
+                        let box_max = [ui_width - padding, padding + box_h];
+                        draw_list
+                            .add_rect(box_min, box_max, [0.0, 0.0, 0.0, 0.6])
+                            .filled(true)
+                            .build();
+                        draw_list.add_text(
+                            [box_min[0] + inner_pad_x, box_min[1] + inner_pad_y],
+                            [1.0, 1.0, 1.0, 1.0],
+                            hud_text,
+                        );
                     }
 
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
                         let elapsed = set_at.elapsed().as_secs_f32();
                         let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
+                        let draw_list = ui.get_foreground_draw_list();
                         let padding = 10.0_f32;
-                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
-                        if let Some(_win) = ui
-                            .window("##status_toast")
-                            .position(
-                                [padding, ui_height - padding],
-                                imgui::Condition::Always,
-                            )
-                            .position_pivot([0.0, 1.0])
-                            .bg_alpha(alpha * 0.75)
-                            .no_decoration()
-                            .no_inputs()
-                            .movable(false)
-                            .no_nav()
-                            .focus_on_appearing(false)
-                            .always_auto_resize(true)
-                            .begin()
-                        {
-                            ui.text_colored([1.0, 1.0, 1.0, alpha], msg.as_str());
-                        }
+                        let inner_pad_x = 8.0_f32;
+                        let inner_pad_y = 6.0_f32;
+                        let text_size = ui.calc_text_size(msg);
+                        let box_w = text_size[0] + inner_pad_x * 2.0;
+                        let box_h = text_size[1] + inner_pad_y * 2.0;
+                        let box_min = [padding, ui_height - padding - box_h];
+                        let box_max = [padding + box_w, ui_height - padding];
+                        draw_list
+                            .add_rect(box_min, box_max, [0.0, 0.0, 0.0, alpha * 0.75])
+                            .filled(true)
+                            .build();
+                        draw_list.add_text(
+                            [box_min[0] + inner_pad_x, box_min[1] + inner_pad_y],
+                            [1.0, 1.0, 1.0, alpha],
+                            msg.as_str(),
+                        );
                     }
 
                     // Draw drag-zoom selection rectangle.
