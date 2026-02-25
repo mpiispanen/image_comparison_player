@@ -1574,6 +1574,11 @@ impl AppState {
                     }
 
                     self.help_overlay.draw(ui, self.single_image_mode);
+                    let ui_scale = window.scale_factor() as f32;
+                    let to_ui = if ui_scale > 0.0 { 1.0 / ui_scale } else { 1.0 };
+                    let win_size = window.inner_size();
+                    let ui_width = win_size.width as f32 * to_ui;
+                    let ui_height = win_size.height as f32 * to_ui;
 
                     // Draw persistent HUD in the top-right corner
                     if self.show_hud {
@@ -1597,13 +1602,12 @@ impl AppState {
                             "Split"
                         };
 
-                        let win_size = window.inner_size();
                         let padding = 10.0_f32;
                         let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
                         if let Some(_win) = ui
                             .window("##hud")
                             .position(
-                                [win_size.width as f32 - padding, padding],
+                                [ui_width - padding, padding],
                                 imgui::Condition::Always,
                             )
                             .position_pivot([1.0, 0.0])
@@ -1653,13 +1657,12 @@ impl AppState {
                     if let Some((msg, set_at)) = &self.status_message {
                         let elapsed = set_at.elapsed().as_secs_f32();
                         let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
-                        let win_size = window.inner_size();
                         let padding = 10.0_f32;
                         let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
                         if let Some(_win) = ui
                             .window("##status_toast")
                             .position(
-                                [padding, win_size.height as f32 - padding],
+                                [padding, ui_height - padding],
                                 imgui::Condition::Always,
                             )
                             .position_pivot([0.0, 1.0])
@@ -1680,11 +1683,13 @@ impl AppState {
                     if let Some(start) = self.drag_zoom_start {
                         let current =
                             Self::constrain_drag_to_window_aspect(start, self.drag_zoom_current, self.size);
+                        let start_ui = (start.0 * to_ui, start.1 * to_ui);
+                        let current_ui = (current.0 * to_ui, current.1 * to_ui);
                         // ImGui expects min/max corners; normalize in case of up/left drags.
-                        let min_x = start.0.min(current.0);
-                        let max_x = start.0.max(current.0);
-                        let min_y = start.1.min(current.1);
-                        let max_y = start.1.max(current.1);
+                        let min_x = start_ui.0.min(current_ui.0);
+                        let max_x = start_ui.0.max(current_ui.0);
+                        let min_y = start_ui.1.min(current_ui.1);
+                        let max_y = start_ui.1.max(current_ui.1);
                         let draw_list = ui.get_foreground_draw_list();
                         // Semi-transparent yellow fill.
                         draw_list
@@ -1700,9 +1705,8 @@ impl AppState {
 
                     // Draw the "waiting for drop" overlay in the centre of the window.
                     if self.waiting_for_drop && !self.hovering_file {
-                        let win_size = window.inner_size();
-                        let cx = win_size.width as f32 / 2.0;
-                        let cy = win_size.height as f32 / 2.0;
+                        let cx = ui_width / 2.0;
+                        let cy = ui_height / 2.0;
                         let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([20.0, 16.0]));
                         if let Some(_win) = ui
                             .window("##drop_hint")
@@ -1726,11 +1730,10 @@ impl AppState {
 
                     // Show left/right drop-zone panels during file hover (or hover + waiting).
                     if self.hovering_file || (self.waiting_for_drop && !self.pending_drop_paths.is_empty()) {
-                        let win_size = window.inner_size();
-                        let w = win_size.width as f32;
-                        let h = win_size.height as f32;
+                        let w = ui_width;
+                        let h = ui_height;
                         let half = w / 2.0;
-                        let cx = self.mouse_position.0;
+                        let cx = self.mouse_position.0 * to_ui;
                         let over_left = cx < half;
 
                         let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([12.0, 10.0]));
