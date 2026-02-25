@@ -1259,9 +1259,19 @@ impl AppState {
 
         let mut imgui_context = imgui::Context::create();
         imgui_context.set_ini_filename(None); // Disable imgui.ini file
-        imgui_context
-            .fonts()
-            .add_font(&[imgui::FontSource::DefaultFontData { config: None }]);
+        let hidpi_factor = window.scale_factor() as f32;
+        imgui_context.io_mut().font_global_scale = if hidpi_factor > 0.0 {
+            1.0 / hidpi_factor
+        } else {
+            1.0
+        };
+        imgui_context.fonts().clear();
+        imgui_context.fonts().add_font(&[imgui::FontSource::DefaultFontData {
+            config: Some(imgui::FontConfig {
+                size_pixels: 16.0 * hidpi_factor.max(1.0),
+                ..imgui::FontConfig::default()
+            }),
+        }]);
         let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
         imgui_platform.attach_window(
             imgui_context.io_mut(),
@@ -2402,6 +2412,11 @@ impl AppState {
         } = event
         {
             self.surface_scale = scale_factor.ceil() as u32;
+            self.imgui_context.io_mut().font_global_scale = if *scale_factor > 0.0 {
+                1.0 / *scale_factor as f32
+            } else {
+                1.0
+            };
             self.resize(**new_inner_size);
         }
 
