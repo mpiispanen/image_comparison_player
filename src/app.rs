@@ -761,6 +761,7 @@ pub struct AppState {
     flip_error_value: Option<f32>,
     app_config: AppConfig,
     pending_drop_paths: Vec<std::path::PathBuf>,
+    waiting_for_drop: bool,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -815,12 +816,31 @@ impl AppState {
 
         let stored_config = app_config.clone();
 
+        // When no images are provided (drag-and-drop startup), create a 1×1 black
+        // placeholder so the Player initialises correctly.  It is replaced as soon
+        // as the user drops real files.
+        let no_images_provided =
+            app_config.dir1.is_none() && app_config.images1.as_ref().is_none_or(|v| v.is_empty());
+
+        let placeholder_dir = if no_images_provided {
+            let dir = std::env::temp_dir().join("icp_placeholder");
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join("placeholder.png");
+            if !path.exists() {
+                image::RgbaImage::new(1, 1).save(&path)?;
+            }
+            Some(dir)
+        } else {
+            None
+        };
+
         let (images1, image_len1) = if let Some(files) = &app_config.images1 {
             image_loader::load_image_paths_from_files(files, app_config.fps)?
-        } else {
-            let raw = app_config.dir1.as_deref()
-                .ok_or("dir1 is missing: provide --dir1 or --images1")?;
+        } else if let Some(raw) = app_config.dir1.as_deref() {
             let dir = std::fs::canonicalize(raw)?;
+            image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
+        } else {
+            let dir = placeholder_dir.as_ref().unwrap();
             image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
         };
         let (images2, image_len2) = if let Some(files) = &app_config.images2 {
@@ -1222,6 +1242,7 @@ impl AppState {
             flip_error_value: None,
             app_config: stored_config,
             pending_drop_paths: Vec::new(),
+            waiting_for_drop: no_images_provided,
         })
     }
 
@@ -1426,7 +1447,7 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() {
+        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1481,6 +1502,32 @@ impl AppState {
                             .begin()
                         {
                             ui.text_colored([1.0, 1.0, 1.0, alpha], msg.as_str());
+                        }
+                    }
+
+                    // Draw the "waiting for drop" overlay in the centre of the window.
+                    if self.waiting_for_drop {
+                        let win_size = window.inner_size();
+                        let cx = win_size.width as f32 / 2.0;
+                        let cy = win_size.height as f32 / 2.0;
+                        let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([20.0, 16.0]));
+                        if let Some(_win) = ui
+                            .window("##drop_hint")
+                            .position([cx, cy], imgui::Condition::Always)
+                            .position_pivot([0.5, 0.5])
+                            .bg_alpha(0.75)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            ui.text("Drop image files or folders here");
+                            ui.spacing();
+                            ui.text_colored([0.7, 0.7, 0.7, 1.0], "1 path \u{2192} single view");
+                            ui.text_colored([0.7, 0.7, 0.7, 1.0], "2 paths \u{2192} comparison view");
                         }
                     }
 
@@ -2016,6 +2063,7 @@ impl AppState {
 
         self.player = Arc::new(RwLock::new(new_player));
         self.single_image_mode = single_image_mode;
+        self.waiting_for_drop = false;
         self.show_flip_diff = false;
         *self.flip_diff_texture.lock() = None;
         self.zoom_level = 1.0;

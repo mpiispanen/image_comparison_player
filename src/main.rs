@@ -169,12 +169,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .get_many::<String>("images2")
             .map(|vals| vals.cloned().collect());
 
-        if dir1.is_none() && images1.as_ref().is_none_or(|v| v.is_empty()) {
-            return Err(
-                "Either --dir1 or --images1 (with at least one file) must be provided".into(),
-            );
-        }
-
         (dir1, dir2, images1, images2)
     };
 
@@ -230,9 +224,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         "Starting image comparison player with input1: {}, input2: {}, window size: {}x{}",
         dir1.as_deref()
-            .unwrap_or_else(|| images1.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("?")),
+            .unwrap_or_else(|| images1.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("<none>")),
         dir2.as_deref()
-            .unwrap_or_else(|| images2.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("<single image mode>")),
+            .unwrap_or_else(|| images2.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("<none>")),
         width,
         height
     );
