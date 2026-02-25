@@ -2489,7 +2489,7 @@ impl AppState {
                 VirtualKeyCode::I => {
                     self.request_screenshot();
                 }
-                VirtualKeyCode::O => {
+                VirtualKeyCode::U => {
                     self.save_combined_screenshot();
                 }
                 VirtualKeyCode::Key1 => {
