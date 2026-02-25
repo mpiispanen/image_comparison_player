@@ -3038,7 +3038,7 @@ impl AppState {
         } else {
             player.get_current_frame_image_data(right_index, false)
         };
-        let flip_diff = if self.show_flip_diff && !self.single_image_mode {
+        let flip_diff = if self.comparison_mode == ComparisonMode::Flip && !self.single_image_mode {
             player.get_flip_diff_raw_data(left_index, right_index)
         } else {
             None
