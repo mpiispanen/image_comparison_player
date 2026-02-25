@@ -662,6 +662,7 @@ impl HelpOverlay {
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
                 ui.separator();
                 ui.text("  I              Save screenshot");
+                ui.text("  O              Save combined screenshot (all sources side-by-side)");
                 ui.text("  Esc            Close overlay / Quit");
             });
     }
@@ -2488,6 +2489,9 @@ impl AppState {
                 VirtualKeyCode::I => {
                     self.request_screenshot();
                 }
+                VirtualKeyCode::O => {
+                    self.save_combined_screenshot();
+                }
                 VirtualKeyCode::Key1 => {
                     self.toggle_image_source(true);
                 }
@@ -2857,6 +2861,77 @@ impl AppState {
         self.screenshot_requested = true;
         self.status_message = Some(("Saving screenshot...".to_string(), Instant::now()));
     }
+
+    /// Save a combined image with all available sources (left, right, and optionally
+    /// FLIP diff) stitched side-by-side into a single PNG file.
+    pub fn save_combined_screenshot(&mut self) {
+        let player = self.player.read();
+        let (left_index, right_index) = player.current_images();
+
+        let left = player.get_current_frame_image_data(left_index, true);
+        let right = if self.single_image_mode {
+            None
+        } else {
+            player.get_current_frame_image_data(right_index, false)
+        };
+        let flip_diff = if self.show_flip_diff && !self.single_image_mode {
+            player.get_flip_diff_raw_data(left_index, right_index)
+        } else {
+            None
+        };
+        drop(player);
+
+        let mut panels: Vec<(Vec<u8>, u32, u32)> = Vec::new();
+        if let Some(l) = left {
+            panels.push(l);
+        }
+        if let Some(r) = right {
+            panels.push(r);
+        }
+        if let Some(d) = flip_diff {
+            panels.push(d);
+        }
+
+        if panels.is_empty() {
+            self.status_message = Some(("No images available for combined screenshot.".to_string(), Instant::now()));
+            return;
+        }
+
+        let (combined_pixels, combined_width, combined_height) = stitch_images_side_by_side(&panels);
+        let path = generate_output_filename("combined_screenshot", "png");
+        match image::save_buffer(&path, &combined_pixels, combined_width, combined_height, image::ColorType::Rgba8) {
+            Ok(_) => {
+                info!("Combined screenshot saved to {}", path);
+                self.status_message = Some((format!("Combined screenshot saved: {}", path), Instant::now()));
+            }
+            Err(e) => {
+                warn!("Failed to save combined screenshot: {}", e);
+                self.status_message = Some((format!("Failed to save combined screenshot: {}", e), Instant::now()));
+            }
+        }
+    }
+}
+
+/// Stitch multiple RGBA images side-by-side into a single image.
+/// Each element is `(pixels, width, height)`. The output height equals the
+/// tallest input; shorter panels are padded with transparent black rows at
+/// the bottom.
+fn stitch_images_side_by_side(panels: &[(Vec<u8>, u32, u32)]) -> (Vec<u8>, u32, u32) {
+    let total_width: u32 = panels.iter().map(|(_, w, _)| w).sum();
+    let max_height: u32 = panels.iter().map(|(_, _, h)| *h).max().unwrap_or(0);
+    let mut combined = vec![0u8; (total_width * max_height * 4) as usize];
+    let mut x_offset = 0u32;
+    for (data, width, height) in panels {
+        for row in 0..*height {
+            let src_start = (row * width * 4) as usize;
+            let src_end = src_start + (width * 4) as usize;
+            let dst_start = (row * total_width * 4 + x_offset * 4) as usize;
+            combined[dst_start..dst_start + (width * 4) as usize]
+                .copy_from_slice(&data[src_start..src_end]);
+        }
+        x_offset += width;
+    }
+    (combined, total_width, max_height)
 }
 
 /// Generate a timestamped output file path in the current directory.
@@ -2870,7 +2945,7 @@ fn generate_output_filename(prefix: &str, extension: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::generate_output_filename;
+    use super::{generate_output_filename, stitch_images_side_by_side};
 
     #[test]
     fn test_generate_output_filename_format() {
@@ -2958,6 +3033,51 @@ mod tests {
         }
 
         assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    }
+
+    /// Verifies that `stitch_images_side_by_side` places two 1×1 panels next to each other.
+    #[test]
+    fn test_stitch_two_1x1_images() {
+        // Panel 1: a single red pixel
+        let red: Vec<u8> = vec![255, 0, 0, 255];
+        // Panel 2: a single blue pixel
+        let blue: Vec<u8> = vec![0, 0, 255, 255];
+        let panels = vec![(red.clone(), 1u32, 1u32), (blue.clone(), 1u32, 1u32)];
+        let (combined, width, height) = stitch_images_side_by_side(&panels);
+        assert_eq!(width, 2, "combined width should be 2");
+        assert_eq!(height, 1, "combined height should be 1");
+        assert_eq!(&combined[0..4], &red[..], "first pixel should be red");
+        assert_eq!(&combined[4..8], &blue[..], "second pixel should be blue");
+    }
+
+    /// Verifies that `stitch_images_side_by_side` pads shorter panels with transparent rows.
+    #[test]
+    fn test_stitch_images_height_padding() {
+        // Panel 1: 1×2 (green column)
+        let green_top: Vec<u8> = vec![0, 255, 0, 255, 0, 255, 0, 255]; // 2 rows
+        // Panel 2: 1×1 (red pixel — shorter than panel 1)
+        let red: Vec<u8> = vec![255, 0, 0, 255];
+        let panels = vec![(green_top, 1u32, 2u32), (red, 1u32, 1u32)];
+        let (combined, width, height) = stitch_images_side_by_side(&panels);
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+        // Row 0: green | red
+        assert_eq!(&combined[0..4], &[0, 255, 0, 255], "row0 col0 should be green");
+        assert_eq!(&combined[4..8], &[255, 0, 0, 255], "row0 col1 should be red");
+        // Row 1: green | transparent (zero-initialised)
+        assert_eq!(&combined[8..12], &[0, 255, 0, 255], "row1 col0 should be green");
+        assert_eq!(&combined[12..16], &[0, 0, 0, 0], "row1 col1 should be transparent padding");
+    }
+
+    /// Verifies that `stitch_images_side_by_side` with a single panel is a no-op copy.
+    #[test]
+    fn test_stitch_single_panel() {
+        let pixels: Vec<u8> = (0..16).collect(); // 2×2 RGBA
+        let panels = vec![(pixels.clone(), 2u32, 2u32)];
+        let (combined, width, height) = stitch_images_side_by_side(&panels);
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+        assert_eq!(combined, pixels);
     }
 
     /// Tests for the drag-and-drop path loading helper used by reload_from_dropped_paths.

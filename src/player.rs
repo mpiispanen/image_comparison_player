@@ -1,5 +1,5 @@
 use image::GenericImageView;
-use log::debug;
+use log::{debug, warn};
 use memmap2::Mmap;
 use nv_flip::{flip, magma_lut, FlipImageRgb8, FlipPool};
 use parking_lot::{Mutex, RwLock};
@@ -1275,6 +1275,29 @@ impl Player {
     /// for the given left/right frame pair, if it has been computed.
     pub fn get_flip_diff_raw_data(&self, left_index: usize, right_index: usize) -> Option<(Vec<u8>, u32, u32)> {
         self.flip_diff_raw_data.read().get(&(left_index, right_index)).cloned()
+    }
+
+    /// Load and return the raw RGBA pixel data for a specific frame from disk.
+    /// Returns `(pixels, width, height)` on success, or `None` if the path is
+    /// out-of-range or the image cannot be decoded.
+    pub fn get_current_frame_image_data(&self, index: usize, is_left: bool) -> Option<(Vec<u8>, u32, u32)> {
+        let image_data = if is_left {
+            &self.config.image_data1
+        } else {
+            &self.config.image_data2
+        };
+        let path = &image_data.get(index)?.0;
+        match image::open(path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (width, height) = rgba.dimensions();
+                Some((rgba.into_raw(), width, height))
+            }
+            Err(e) => {
+                warn!("Failed to load image '{}' for combined screenshot: {}", path, e);
+                None
+            }
+        }
     }
 }
 
