@@ -662,7 +662,7 @@ impl HelpOverlay {
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
                 ui.separator();
                 ui.text("  I              Save screenshot");
-                ui.text("  O              Save combined screenshot (all sources side-by-side)");
+                ui.text("  U              Save combined screenshot (all sources side-by-side)");
                 ui.text("  Esc            Close overlay / Quit");
             });
     }
@@ -1259,6 +1259,9 @@ impl AppState {
 
         let mut imgui_context = imgui::Context::create();
         imgui_context.set_ini_filename(None); // Disable imgui.ini file
+        imgui_context
+            .fonts()
+            .add_font(&[imgui::FontSource::DefaultFontData { config: None }]);
         let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
         imgui_platform.attach_window(
             imgui_context.io_mut(),
@@ -1572,6 +1575,20 @@ impl AppState {
 
                     self.help_overlay.draw(ui, self.single_image_mode);
 
+                    let ui_size = ui.io().display_size;
+                    let ui_width = ui_size[0];
+                    let ui_height = ui_size[1];
+                    let to_ui_x = if self.size.width > 0 {
+                        ui_width / self.size.width as f32
+                    } else {
+                        1.0
+                    };
+                    let to_ui_y = if self.size.height > 0 {
+                        ui_height / self.size.height as f32
+                    } else {
+                        1.0
+                    };
+
                     // Draw persistent HUD in the top-right corner
                     if self.show_hud {
                         let player = self.player.read();
@@ -1594,13 +1611,12 @@ impl AppState {
                             "Split"
                         };
 
-                        let win_size = window.inner_size();
                         let padding = 10.0_f32;
                         let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
                         if let Some(_win) = ui
                             .window("##hud")
                             .position(
-                                [win_size.width as f32 - padding, padding],
+                                [ui_width - padding, padding],
                                 imgui::Condition::Always,
                             )
                             .position_pivot([1.0, 0.0])
@@ -1650,13 +1666,12 @@ impl AppState {
                     if let Some((msg, set_at)) = &self.status_message {
                         let elapsed = set_at.elapsed().as_secs_f32();
                         let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
-                        let win_size = window.inner_size();
                         let padding = 10.0_f32;
                         let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
                         if let Some(_win) = ui
                             .window("##status_toast")
                             .position(
-                                [padding, win_size.height as f32 - padding],
+                                [padding, ui_height - padding],
                                 imgui::Condition::Always,
                             )
                             .position_pivot([0.0, 1.0])
@@ -1676,11 +1691,13 @@ impl AppState {
                     // Draw drag-zoom selection rectangle.
                     if let Some(start) = self.drag_zoom_start {
                         let current = self.drag_zoom_current;
+                        let start_ui = (start.0 * to_ui_x, start.1 * to_ui_y);
+                        let current_ui = (current.0 * to_ui_x, current.1 * to_ui_y);
                         // ImGui expects min/max corners; normalize in case of up/left drags.
-                        let min_x = start.0.min(current.0);
-                        let max_x = start.0.max(current.0);
-                        let min_y = start.1.min(current.1);
-                        let max_y = start.1.max(current.1);
+                        let min_x = start_ui.0.min(current_ui.0);
+                        let max_x = start_ui.0.max(current_ui.0);
+                        let min_y = start_ui.1.min(current_ui.1);
+                        let max_y = start_ui.1.max(current_ui.1);
                         let draw_list = ui.get_foreground_draw_list();
                         // Semi-transparent yellow fill.
                         draw_list
@@ -1696,9 +1713,8 @@ impl AppState {
 
                     // Draw the "waiting for drop" overlay in the centre of the window.
                     if self.waiting_for_drop && !self.hovering_file {
-                        let win_size = window.inner_size();
-                        let cx = win_size.width as f32 / 2.0;
-                        let cy = win_size.height as f32 / 2.0;
+                        let cx = ui_width / 2.0;
+                        let cy = ui_height / 2.0;
                         let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([20.0, 16.0]));
                         if let Some(_win) = ui
                             .window("##drop_hint")
