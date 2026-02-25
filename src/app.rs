@@ -1963,7 +1963,7 @@ impl AppState {
         };
 
         let (images2, single_image_mode) = if count == 2 {
-            match load_path(&paths[1]) {
+            match load_images_from_path(&paths[1]) {
                 Ok(imgs) if !imgs.is_empty() => (imgs, false),
                 Ok(_) => {
                     self.status_message = Some((
@@ -2507,30 +2507,12 @@ mod tests {
         use crate::image_loader;
         use std::fs;
 
-        struct TempDir {
-            path: std::path::PathBuf,
-        }
-
-        impl TempDir {
-            fn new(name: &str) -> Self {
-                let path = std::env::temp_dir().join("icp_tests").join(name);
-                fs::create_dir_all(&path).unwrap();
-                Self { path }
-            }
-        }
-
-        impl Drop for TempDir {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.path);
-            }
-        }
-
         /// Loading a single image file via load_image_paths_from_files gives 1 entry.
         #[test]
         fn test_drop_single_image_file() {
-            let dir = TempDir::new("drop_single_image_file");
+            let dir = tempfile::TempDir::new().unwrap();
             let img = image::RgbaImage::new(4, 4);
-            let img_path = dir.path.join("frame.png");
+            let img_path = dir.path().join("frame.png");
             img.save(&img_path).unwrap();
 
             let fps = 30.0;
@@ -2547,14 +2529,14 @@ mod tests {
         /// Loading a directory with images uses load_image_paths and returns entries.
         #[test]
         fn test_drop_directory_with_images() {
-            let dir = TempDir::new("drop_directory_with_images");
+            let dir = tempfile::TempDir::new().unwrap();
             for i in 0..3u32 {
                 let img = image::RgbaImage::new(4, 4);
-                img.save(dir.path.join(format!("{}.png", i))).unwrap();
+                img.save(dir.path().join(format!("{}.png", i))).unwrap();
             }
 
             let fps = 30.0;
-            let result = image_loader::load_image_paths(&dir.path.to_string_lossy(), fps);
+            let result = image_loader::load_image_paths(&dir.path().to_string_lossy(), fps);
             assert!(result.is_ok(), "should load from directory");
             let (imgs, count) = result.unwrap();
             assert_eq!(count, 3);
@@ -2590,8 +2572,8 @@ mod tests {
         /// Dropping a non-image file fails with a meaningful error.
         #[test]
         fn test_drop_non_image_file() {
-            let dir = TempDir::new("drop_non_image_file");
-            let txt_path = dir.path.join("notes.txt");
+            let dir = tempfile::TempDir::new().unwrap();
+            let txt_path = dir.path().join("notes.txt");
             fs::write(&txt_path, "not an image").unwrap();
 
             let fps = 30.0;
@@ -2605,9 +2587,9 @@ mod tests {
         /// An empty directory produces no images.
         #[test]
         fn test_drop_empty_directory() {
-            let dir = TempDir::new("drop_empty_directory");
+            let dir = tempfile::TempDir::new().unwrap();
             let fps = 30.0;
-            let result = image_loader::load_image_paths(&dir.path.to_string_lossy(), fps);
+            let result = image_loader::load_image_paths(&dir.path().to_string_lossy(), fps);
             // Should succeed but return 0 images
             assert!(result.is_ok());
             let (imgs, count) = result.unwrap();
