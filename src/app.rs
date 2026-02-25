@@ -639,6 +639,7 @@ impl HelpOverlay {
                     ui.text_colored([1.0, 0.85, 0.3, 1.0], "Comparison");
                     ui.separator();
                     ui.text("  Mouse move     Move split-line divider");
+                    ui.text("  L              Toggle split-line divider");
                     ui.text("  F              Toggle FLIP diff overlay");
                     ui.text("  1 / 2          Show only left / right image");
                     ui.text("  P              Save FLIP diff image");
@@ -648,6 +649,7 @@ impl HelpOverlay {
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Windows & Overlays");
                 ui.separator();
                 ui.text("  H              Toggle this help overlay");
+                ui.text("  O              Toggle HUD (frame/speed/zoom/mode)");
                 ui.text("  C              Toggle cache debug window");
                 ui.text("  V              Toggle pixel info window");
                 ui.dummy([0.0, 4.0]);
@@ -830,6 +832,7 @@ pub struct AppState {
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
+    show_hud: bool,
     app_config: AppConfig,
     pending_drop_paths: Vec<std::path::PathBuf>,
     waiting_for_drop: bool,
@@ -1315,6 +1318,7 @@ impl AppState {
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
+            show_hud: true,
             app_config: stored_config,
             pending_drop_paths: Vec::new(),
             waiting_for_drop: no_images_provided,
@@ -1525,7 +1529,7 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop || self.hovering_file || self.help_overlay.is_open {
+        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop || self.hovering_file || self.help_overlay.is_open || self.show_hud {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1557,6 +1561,80 @@ impl AppState {
                     }
 
                     self.help_overlay.draw(ui, self.single_image_mode);
+
+                    // Draw persistent HUD in the top-right corner
+                    if self.show_hud {
+                        let player = self.player.read();
+                        let (left_index, right_index) = player.current_images();
+                        let left_total = player.frame_count1;
+                        let right_total = player.frame_count2;
+                        let speed = player.playback_speed();
+                        let playing = player.is_playing();
+                        drop(player);
+
+                        let compare_mode = if self.single_image_mode {
+                            "Single"
+                        } else if self.show_flip_diff {
+                            "FLIP diff"
+                        } else if !self.show_image1 {
+                            "Right only"
+                        } else if !self.show_image2 {
+                            "Left only"
+                        } else {
+                            "Split"
+                        };
+
+                        let win_size = window.inner_size();
+                        let padding = 10.0_f32;
+                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
+                        if let Some(_win) = ui
+                            .window("##hud")
+                            .position(
+                                [win_size.width as f32 - padding, padding],
+                                imgui::Condition::Always,
+                            )
+                            .position_pivot([1.0, 0.0])
+                            .bg_alpha(0.6)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            let play_str = if playing { "▶" } else { "⏸" };
+                            if self.single_image_mode {
+                                ui.text_colored(
+                                    [1.0, 1.0, 1.0, 1.0],
+                                    format!(
+                                        "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                        left_index + 1,
+                                        left_total,
+                                        play_str,
+                                        speed,
+                                        self.zoom_level,
+                                        compare_mode,
+                                    ),
+                                );
+                            } else {
+                                ui.text_colored(
+                                    [1.0, 1.0, 1.0, 1.0],
+                                    format!(
+                                        "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                        left_index + 1,
+                                        left_total,
+                                        right_index + 1,
+                                        right_total,
+                                        play_str,
+                                        speed,
+                                        self.zoom_level,
+                                        compare_mode,
+                                    ),
+                                );
+                            }
+                        }
+                    }
 
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
@@ -2391,6 +2469,9 @@ impl AppState {
                 }
                 VirtualKeyCode::H => {
                     self.help_overlay.toggle();
+                }
+                VirtualKeyCode::O => {
+                    self.show_hud = !self.show_hud;
                 }
                 _ => {}
             }

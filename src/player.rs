@@ -847,6 +847,14 @@ impl Player {
         }
     }
 
+    pub fn playback_speed(&self) -> f32 {
+        self.playback_speed
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.is_playing.load(Ordering::Relaxed)
+    }
+
     pub fn decrease_playback_speed(&mut self) {
         self.playback_speed = (self.playback_speed - 0.25).max(0.25);
     }
