@@ -40,11 +40,13 @@ struct UniformData {
     show_image1: f32,
     show_image2: f32,
     show_split_line: f32,
-    _padding: f32,
+    peek_active: f32,  // 1.0 when peek zoom is held (Z key)
+    peek_factor: f32,  // peek magnification factor
+    peek_radius: f32,  // peek window radius in screen pixels
 }
 
 // SAFETY: UniformData is #[repr(C)] and all fields are plain f32 arrays/scalars.
-// `_padding` keeps the total size aligned with WGSL uniform layout expectations.
+// Layout matches the WGSL Uniforms struct exactly (80 bytes, 8-byte aligned).
 unsafe impl bytemuck::Zeroable for UniformData {}
 unsafe impl bytemuck::Pod for UniformData {}
 
@@ -707,8 +709,12 @@ impl HelpOverlay {
                 ui.text("  Up / Down      Zoom in / out");
                 ui.text("  Q / E          Zoom out / in");
                 ui.text("  W A S D        Pan up / left / down / right");
+<<<<<<< HEAD
                 ui.text("  Left drag      Zoom to dragged region");
                 ui.text("  R              Reset zoom to full frame");
+=======
+                ui.text("  Z (hold)       Peek zoom magnifier");
+>>>>>>> 363cb2b (Add hold-to-peek zoom magnifier feature (Z key))
                 ui.dummy([0.0, 4.0]);
 
                 if !single_image_mode {
@@ -916,6 +922,9 @@ pub struct AppState {
     pending_drop_paths: Vec<std::path::PathBuf>,
     waiting_for_drop: bool,
     hovering_file: bool,
+    peek_zoom_active: bool,
+    peek_zoom_factor: f32,
+    peek_zoom_radius: f32,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1418,6 +1427,9 @@ impl AppState {
             pending_drop_paths: Vec::new(),
             waiting_for_drop: no_images_provided,
             hovering_file: false,
+            peek_zoom_active: false,
+            peek_zoom_factor: 4.0,
+            peek_zoom_radius: 100.0,
         })
     }
 
@@ -1537,7 +1549,9 @@ impl AppState {
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
-            _padding: 0.0,
+            peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
+            peek_factor: self.peek_zoom_factor,
+            peek_radius: self.peek_zoom_radius,
         };
 
         debug!("Created texture view");
@@ -2004,7 +2018,9 @@ impl AppState {
                     show_image1: if self.show_image1 { 1.0 } else { 0.0 },
                     show_image2: if self.show_image2 { 1.0 } else { 0.0 },
                     show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
-                    _padding: 0.0,
+                    peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
+                    peek_factor: self.peek_zoom_factor,
+                    peek_radius: self.peek_zoom_radius,
                 };
 
                 self.queue
@@ -2540,7 +2556,7 @@ impl AppState {
                     input:
                         winit::event::KeyboardInput {
                             state: winit::event::ElementState::Released,
-                            virtual_keycode: Some(VirtualKeyCode::Escape),
+                            virtual_keycode: Some(keycode),
                             ..
                         },
                     ..
@@ -2548,7 +2564,15 @@ impl AppState {
             ..
         } = event
         {
-            self.esc_key_down = false;
+            match keycode {
+                VirtualKeyCode::Escape => {
+                    self.esc_key_down = false;
+                }
+                VirtualKeyCode::Z => {
+                    self.peek_zoom_active = false;
+                }
+                _ => {}
+            }
         }
 
         if let winit::event::Event::WindowEvent {
@@ -2641,6 +2665,9 @@ impl AppState {
                 }
                 VirtualKeyCode::O => {
                     self.show_hud = !self.show_hud;
+                }
+                VirtualKeyCode::Z => {
+                    self.peek_zoom_active = true;
                 }
                 _ => {}
             }
@@ -2859,7 +2886,9 @@ impl AppState {
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
-            _padding: 0.0,
+            peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
+            peek_factor: self.peek_zoom_factor,
+            peek_radius: self.peek_zoom_radius,
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
