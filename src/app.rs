@@ -1929,24 +1929,25 @@ impl AppState {
             return;
         }
 
-        let load_path = |p: &std::path::PathBuf| -> Result<Vec<(String, u64, u64)>, String> {
-            if p.is_dir() {
-                image_loader::load_image_paths(&p.to_string_lossy(), fps)
+        let load_images_from_path =
+            |p: &std::path::PathBuf| -> Result<Vec<(String, u64, u64)>, String> {
+                if p.is_dir() {
+                    image_loader::load_image_paths(&p.to_string_lossy(), fps)
+                        .map(|(imgs, _)| imgs)
+                        .map_err(|e| e.to_string())
+                } else if p.is_file() {
+                    image_loader::load_image_paths_from_files(
+                        &[p.to_string_lossy().into_owned()],
+                        fps,
+                    )
                     .map(|(imgs, _)| imgs)
                     .map_err(|e| e.to_string())
-            } else if p.is_file() {
-                image_loader::load_image_paths_from_files(
-                    &[p.to_string_lossy().into_owned()],
-                    fps,
-                )
-                .map(|(imgs, _)| imgs)
-                .map_err(|e| e.to_string())
-            } else {
-                Err(format!("Path not found: {}", p.display()))
-            }
-        };
+                } else {
+                    Err(format!("Path not found: {}", p.display()))
+                }
+            };
 
-        let images1 = match load_path(&paths[0]) {
+        let images1 = match load_images_from_path(&paths[0]) {
             Ok(imgs) if !imgs.is_empty() => imgs,
             Ok(_) => {
                 self.status_message = Some((
