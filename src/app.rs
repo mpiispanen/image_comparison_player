@@ -627,7 +627,7 @@ impl PixelInfoWindow {
                         left_color[3].abs_diff(right_color[3]),
                     ];
                     ui.text(format!(
-                        "Overlay (50/50): #{:02X}{:02X}{:02X}  ({}, {}, {}, {})",
+                        "Blend 0.5*(A+B): #{:02X}{:02X}{:02X}  ({}, {}, {}, {})",
                         overlay_color[0],
                         overlay_color[1],
                         overlay_color[2],
@@ -637,7 +637,7 @@ impl PixelInfoWindow {
                         overlay_color[3]
                     ));
                     ui.text(format!(
-                        "Abs Diff (raw):  #{:02X}{:02X}{:02X}  ({}, {}, {}, {})",
+                        "|A-B| (raw, 8-bit): #{:02X}{:02X}{:02X}  ({}, {}, {}, {})",
                         abs_diff_color[0],
                         abs_diff_color[1],
                         abs_diff_color[2],
