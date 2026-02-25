@@ -42,6 +42,7 @@ The application accepts the following command-line arguments:
 --diff-preload-ahead <COUNT>  Number of diff images to preload ahead (default: 4)
 --diff-preload-behind <COUNT> Number of diff images to preload behind (default: 0)
 --fps <FPS>                   Frames per second (default: 30)
+--peek-zoom-factor <FACTOR>   Magnification factor for hold-to-peek zoom (default: 4.0)
 ```
 
 Left side requires either `--dir1` (directory) or `--images1` (explicit file list), but not both.
@@ -68,6 +69,7 @@ The application supports the following keyboard controls:
 - A: Move zoom center left
 - S: Move zoom center down
 - D: Move zoom center right
+- - / =: Decrease / Increase peek magnifier zoom factor
 - P: Save the current FLIP diff image to a PNG file
 - I: Save a screenshot of the current window to a PNG file (`screenshot_regular_*` or `screenshot_flip_*` depending on FLIP mode)
 - L: Toggle the split line between images on/off

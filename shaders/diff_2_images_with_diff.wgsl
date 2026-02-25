@@ -21,6 +21,9 @@ struct Uniforms {
     show_image1: f32,
     show_image2: f32,
     show_split_line: f32,
+    peek_active: f32,
+    peek_factor: f32,
+    peek_radius: f32,
 }
 
 @group(1) @binding(0)
@@ -81,6 +84,41 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Calculate alpha based on whether the zoomed coordinates are within bounds
     let alpha = 1.0 - step(1.0, max(abs(zoomed_tex_coords.x - 0.5), abs(zoomed_tex_coords.y - 0.5)) * 2.0);
+
+    // Peek zoom magnifier: active while Z is held
+    if (uniforms.peek_active > 0.5) {
+        let w_ar = uniforms.window_size.x / uniforms.window_size.y;
+        let i_ar = uniforms.image1_size.x / uniforms.image1_size.y;
+        let sx = select(1.0, i_ar / w_ar, w_ar > i_ar);
+        let sy = select(w_ar / i_ar, 1.0, w_ar > i_ar);
+        let rw = sx * uniforms.window_size.x;
+        let rh = sy * uniforms.window_size.y;
+        let xo = (uniforms.window_size.x - rw) / 2.0;
+        let yo = (uniforms.window_size.y - rh) / 2.0;
+        let cx = xo + uniforms.cursor_x * rw;
+        let cy = yo + uniforms.cursor_y * rh;
+        let dx = in.clip_position.x - cx;
+        let dy = in.clip_position.y - cy;
+        let dist = sqrt(dx * dx + dy * dy);
+        if (dist < uniforms.peek_radius) {
+            // White border ring (2 px)
+            if (dist > uniforms.peek_radius - 2.0) {
+                return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+            }
+            // Magnify: contract screen offset by peek_factor to zoom in
+            let peek_sx = cx + dx / uniforms.peek_factor;
+            let peek_sy = cy + dy / uniforms.peek_factor;
+            let tc = vec2((peek_sx - xo) / rw, (peek_sy - yo) / rh);
+            // Apply main zoom on top of peek zoom
+            let zoom_ofs = (tc - uniforms.zoom_center) / uniforms.zoom_level;
+            let ztc = clamp(uniforms.zoom_center + zoom_ofs, vec2(0.0), vec2(1.0));
+            let p1 = textureSampleLevel(t_diffuse, s_diffuse, ztc, 0.0);
+            let p2 = textureSampleLevel(t_diffuse2, s_diffuse2, ztc, 0.0);
+            let t_p = both_shown * step(uniforms.cursor_x, tc.x) + only_image2;
+            let peek_color = mix(p1 * uniforms.show_image1, p2 * uniforms.show_image2, t_p);
+            return vec4<f32>(peek_color.rgb, peek_color.a);
+        }
+    }
 
     // Add a 1-pixel-wide white line at the split position using screen-space coordinates
     // so the line stays a constant width regardless of image resolution or window size.
