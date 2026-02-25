@@ -255,8 +255,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;
 
-    let mut initialized = false;
-
     // Target ~60 fps. The event loop wakes on any window event (e.g. mouse
     // movement) so the split line responds immediately, while sleeping between
     // frames when idle to avoid burning CPU/GPU with an unthrottled busy loop.
@@ -266,9 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(next_frame_time);
 
-        if initialized {
-            app_state.handle_event(&window, &event);
-        }
+        app_state.handle_event(&window, &event);
 
         match event {
             Event::WindowEvent {
@@ -280,7 +276,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::RedrawRequested(_) => {
                 app_state.update();
-                initialized = true;
                 next_frame_time = Instant::now() + target_frame_time;
                 match app_state.render(&window) {
                     Ok(_) => {}

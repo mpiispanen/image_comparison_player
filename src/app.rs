@@ -20,6 +20,36 @@ use winit::event::WindowEvent;
 use winit::window::Window as WinitWindow;
 
 const APP_TITLE: &str = "Image Comparison Player";
+const MAX_ZOOM_LEVEL: f32 = 10.0;
+const MIN_DRAG_ZOOM_DISTANCE_PX: f32 = 10.0;
+const MIN_DRAG_ZOOM_UV_SIZE: f32 = 0.01;
+
+fn constrain_drag_to_display_aspect(
+    start: (f32, f32),
+    end: (f32, f32),
+    display_aspect: f32,
+) -> (f32, f32) {
+    let mut dx = end.0 - start.0;
+    let mut dy = end.1 - start.1;
+    if dx.abs() < f32::EPSILON && dy.abs() < f32::EPSILON {
+        return end;
+    }
+
+    let sx: f32 = if dx >= 0.0 { 1.0 } else { -1.0 };
+    let sy: f32 = if dy >= 0.0 { 1.0 } else { -1.0 };
+
+    if dy.abs() < f32::EPSILON {
+        dy = dx.abs() / display_aspect * sy;
+    } else if dx.abs() < f32::EPSILON {
+        dx = dy.abs() * display_aspect * sx;
+    } else if dx.abs() / dy.abs() > display_aspect {
+        dy = dx.abs() / display_aspect * sy;
+    } else {
+        dx = dy.abs() * display_aspect * sx;
+    }
+
+    (start.0 + dx, start.1 + dy)
+}
 
 #[allow(dead_code)]
 #[repr(C)]
@@ -633,6 +663,7 @@ impl HelpOverlay {
                 ui.text("  Up / Down      Zoom in / out");
                 ui.text("  Q / E          Zoom out / in");
                 ui.text("  W A S D        Pan up / left / down / right");
+                ui.text("  Left drag      Zoom to dragged region");
                 ui.dummy([0.0, 4.0]);
 
                 if !single_image_mode {
@@ -656,6 +687,7 @@ impl HelpOverlay {
 
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
                 ui.separator();
+                ui.text("  R              Quick reset view (zoom/pan)");
                 ui.text("  I              Save screenshot");
                 ui.text("  Esc            Close overlay / Quit");
             });
@@ -837,6 +869,10 @@ pub struct AppState {
     pending_drop_paths: Vec<std::path::PathBuf>,
     waiting_for_drop: bool,
     hovering_file: bool,
+    hovered_drop_paths: Vec<std::path::PathBuf>,
+    single_drop_to_left: bool,
+    drag_zoom_start: Option<(f32, f32)>,
+    drag_zoom_current: (f32, f32),
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1323,6 +1359,10 @@ impl AppState {
             pending_drop_paths: Vec::new(),
             waiting_for_drop: no_images_provided,
             hovering_file: false,
+            hovered_drop_paths: Vec::new(),
+            single_drop_to_left: true,
+            drag_zoom_start: None,
+            drag_zoom_current: (0.0, 0.0),
         })
     }
 
@@ -1514,7 +1554,9 @@ impl AppState {
         // Pick up any pending screenshot result from the background thread early so the
         // toast can be rendered in this same frame.
         while let Ok(msg) = self.screenshot_result_rx.lock().try_recv() {
-            self.status_message = Some((msg, Instant::now()));
+            if !msg.trim().is_empty() {
+                self.status_message = Some((msg, Instant::now()));
+            }
         }
 
         // Expire the status message after 3 seconds
@@ -1529,9 +1571,18 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop || self.hovering_file || self.help_overlay.is_open || self.show_hud {
+        if self.cache_debug_window.is_open
+            || self.pixel_info_window.is_open
+            || self.status_message.is_some()
+            || self.waiting_for_drop
+            || self.hovering_file
+            || self.help_overlay.is_open
+            || self.show_hud
+            || self.drag_zoom_start.is_some()
+        {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
+                    let display_aspect = self.size.width as f32 / self.size.height as f32;
                     let ui = self.imgui_context.frame();
 
                     if self.cache_debug_window.is_open {
@@ -1560,114 +1611,40 @@ impl AppState {
                         );
                     }
 
-                    self.help_overlay.draw(ui, self.single_image_mode);
-
-                    // Draw persistent HUD in the top-right corner
-                    if self.show_hud {
-                        let player = self.player.read();
-                        let (left_index, right_index) = player.current_images();
-                        let left_total = player.frame_count1;
-                        let right_total = player.frame_count2;
-                        let speed = player.playback_speed();
-                        let playing = player.is_playing();
-                        drop(player);
-
-                        let compare_mode = if self.single_image_mode {
-                            "Single"
-                        } else if self.show_flip_diff {
-                            "FLIP diff"
-                        } else if !self.show_image1 {
-                            "Right only"
-                        } else if !self.show_image2 {
-                            "Left only"
-                        } else {
-                            "Split"
-                        };
-
-                        let win_size = window.inner_size();
-                        let padding = 10.0_f32;
-                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
-                        if let Some(_win) = ui
-                            .window("##hud")
-                            .position(
-                                [win_size.width as f32 - padding, padding],
-                                imgui::Condition::Always,
-                            )
-                            .position_pivot([1.0, 0.0])
-                            .bg_alpha(0.6)
-                            .no_decoration()
-                            .no_inputs()
-                            .movable(false)
-                            .no_nav()
-                            .focus_on_appearing(false)
-                            .always_auto_resize(true)
-                            .begin()
-                        {
-                            let play_str = if playing { "▶" } else { "⏸" };
-                            if self.single_image_mode {
-                                ui.text_colored(
-                                    [1.0, 1.0, 1.0, 1.0],
-                                    format!(
-                                        "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
-                                        left_index + 1,
-                                        left_total,
-                                        play_str,
-                                        speed,
-                                        self.zoom_level,
-                                        compare_mode,
-                                    ),
-                                );
-                            } else {
-                                ui.text_colored(
-                                    [1.0, 1.0, 1.0, 1.0],
-                                    format!(
-                                        "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
-                                        left_index + 1,
-                                        left_total,
-                                        right_index + 1,
-                                        right_total,
-                                        play_str,
-                                        speed,
-                                        self.zoom_level,
-                                        compare_mode,
-                                    ),
-                                );
-                            }
-                        }
-                    }
-
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
-                        let elapsed = set_at.elapsed().as_secs_f32();
-                        let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
-                        let win_size = window.inner_size();
-                        let padding = 10.0_f32;
-                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
-                        if let Some(_win) = ui
-                            .window("##status_toast")
-                            .position(
-                                [padding, win_size.height as f32 - padding],
-                                imgui::Condition::Always,
-                            )
-                            .position_pivot([0.0, 1.0])
-                            .bg_alpha(alpha * 0.75)
-                            .no_decoration()
-                            .no_inputs()
-                            .movable(false)
-                            .no_nav()
-                            .focus_on_appearing(false)
-                            .always_auto_resize(true)
-                            .begin()
-                        {
-                            ui.text_colored([1.0, 1.0, 1.0, alpha], msg.as_str());
+                        if !msg.trim().is_empty() {
+                            let elapsed = set_at.elapsed().as_secs_f32();
+                            let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
+                            let win_size = window.inner_size();
+                            let padding = 10.0_f32;
+                            let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
+                            if let Some(_win) = ui
+                                .window("Status##status_toast")
+                                .position(
+                                    [padding, win_size.height as f32 - padding],
+                                    imgui::Condition::Always,
+                                )
+                                .position_pivot([0.0, 1.0])
+                                .bg_alpha(alpha * 0.75)
+                                .no_decoration()
+                                .no_inputs()
+                                .movable(false)
+                                .no_nav()
+                                .focus_on_appearing(false)
+                                .always_auto_resize(true)
+                                .begin()
+                            {
+                                ui.text(msg.as_str());
+                            }
                         }
                     }
 
                     // Draw the "waiting for drop" overlay in the centre of the window.
                     if self.waiting_for_drop && !self.hovering_file {
-                        let win_size = window.inner_size();
-                        let cx = win_size.width as f32 / 2.0;
-                        let cy = win_size.height as f32 / 2.0;
+                        let display_size = ui.io().display_size;
+                        let cx = display_size[0] / 2.0;
+                        let cy = display_size[1] / 2.0;
                         let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([20.0, 16.0]));
                         if let Some(_win) = ui
                             .window("##drop_hint")
@@ -1689,14 +1666,18 @@ impl AppState {
                         }
                     }
 
-                    // Show left/right drop-zone panels during file hover (or hover + waiting).
-                    if self.hovering_file || (self.waiting_for_drop && !self.pending_drop_paths.is_empty()) {
-                        let win_size = window.inner_size();
-                        let w = win_size.width as f32;
-                        let h = win_size.height as f32;
+                    // Show left/right drop-zone panels only during startup drag target selection.
+                    if self.waiting_for_drop && self.hovering_file && !self.hovered_drop_paths.is_empty() {
+                        let display_size = ui.io().display_size;
+                        let w = display_size[0];
+                        let h = display_size[1];
                         let half = w / 2.0;
                         let cx = self.mouse_position.0;
-                        let over_left = cx < half;
+                        let over_left = if self.hovering_file {
+                            self.single_drop_to_left
+                        } else {
+                            cx < half
+                        };
 
                         let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([12.0, 10.0]));
 
@@ -1747,6 +1728,80 @@ impl AppState {
                             ui.text_colored(text_col, label);
                         }
                     }
+
+                    if self.show_hud {
+                        let player = self.player.read();
+                        let (left_index, right_index) = player.current_images();
+                        let left_total = player.frame_count1;
+                        let right_total = player.frame_count2;
+                        let speed = player.playback_speed();
+                        let playing = player.is_playing();
+                        drop(player);
+
+                        let compare_mode = if self.single_image_mode {
+                            "Single"
+                        } else if self.show_flip_diff {
+                            "FLIP diff"
+                        } else if !self.show_image1 {
+                            "Right only"
+                        } else if !self.show_image2 {
+                            "Left only"
+                        } else {
+                            "Split"
+                        };
+
+                        let padding = 10.0_f32;
+                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
+                        if let Some(_win) = ui
+                            .window("HUD##persistent_hud")
+                            .position([padding, padding], imgui::Condition::Always)
+                            .bg_alpha(0.6)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            let play_str = if playing { "Play" } else { "Pause" };
+                            if self.single_image_mode {
+                                ui.text(format!(
+                                    "Frame: {}/{}",
+                                    left_index + 1,
+                                    left_total
+                                ));
+                            } else {
+                                ui.text(format!("L: {}/{}", left_index + 1, left_total));
+                                ui.text(format!("R: {}/{}", right_index + 1, right_total));
+                            }
+                            ui.text(format!("Playback: {} {:.2}x", play_str, speed));
+                            ui.text(format!("Zoom: {:.1}x", self.zoom_level));
+                            ui.text(format!("Mode: {}", compare_mode));
+                        }
+                    }
+
+                    if let Some(start) = self.drag_zoom_start {
+                        let current =
+                            constrain_drag_to_display_aspect(start, self.drag_zoom_current, display_aspect);
+                        let scale = ui.io().display_framebuffer_scale;
+                        let sx = if scale[0] > 0.0 { scale[0] } else { 1.0 };
+                        let sy = if scale[1] > 0.0 { scale[1] } else { 1.0 };
+                        let start_ui = [start.0 / sx, start.1 / sy];
+                        let current_ui = [current.0 / sx, current.1 / sy];
+                        let draw_list = ui.get_foreground_draw_list();
+                        draw_list
+                            .add_rect(start_ui, current_ui, [1.0, 1.0, 0.0, 0.15])
+                            .filled(true)
+                            .build();
+                        draw_list
+                            .add_rect(start_ui, current_ui, [1.0, 1.0, 0.0, 0.9])
+                            .thickness(1.5)
+                            .build();
+                    }
+
+                    // Draw help last so it stays on top of transient overlays.
+                    self.help_overlay.draw(ui, self.single_image_mode);
 
                     should_render_imgui = true;
                     self.imgui_platform.prepare_render(ui, window);
@@ -2217,7 +2272,7 @@ impl AppState {
             };
 
         // Determine which half the cursor is in at the time of the drop.
-        let drop_on_left = self.mouse_position.0 < self.size.width as f32 / 2.0;
+        let drop_on_left = self.single_drop_to_left;
 
         // Build final (images1, images2, single_image_mode) based on count + cursor position.
         let (images1, images2, single_image_mode, display_msg) = if count == 2 {
@@ -2372,6 +2427,9 @@ impl AppState {
         } = event
         {
             self.update_mouse_position(position.x as f32, position.y as f32);
+            if self.drag_zoom_start.is_some() {
+                self.drag_zoom_current = (position.x as f32, position.y as f32);
+            }
         }
 
         if let winit::event::Event::WindowEvent {
@@ -2380,7 +2438,7 @@ impl AppState {
                     input:
                         winit::event::KeyboardInput {
                             state: winit::event::ElementState::Released,
-                            virtual_keycode: Some(VirtualKeyCode::Escape),
+                            virtual_keycode: Some(keycode),
                             ..
                         },
                     ..
@@ -2388,7 +2446,12 @@ impl AppState {
             ..
         } = event
         {
-            self.esc_key_down = false;
+            match keycode {
+                VirtualKeyCode::Escape => {
+                    self.esc_key_down = false;
+                }
+                _ => {}
+            }
         }
 
         if let winit::event::Event::WindowEvent {
@@ -2452,6 +2515,9 @@ impl AppState {
                 VirtualKeyCode::P => {
                     self.save_flip_diff_image();
                 }
+                VirtualKeyCode::R => {
+                    self.quick_reset_view();
+                }
                 VirtualKeyCode::I => {
                     self.request_screenshot();
                 }
@@ -2481,6 +2547,40 @@ impl AppState {
             self.handle_zoom(delta);
         }
 
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::MouseInput {
+                button: winit::event::MouseButton::Left,
+                state,
+                ..
+            },
+            ..
+        } = event
+        {
+            match state {
+                winit::event::ElementState::Pressed => {
+                    if !self.imgui_context.io().want_capture_mouse {
+                        self.drag_zoom_start = Some(self.mouse_position);
+                        self.drag_zoom_current = self.mouse_position;
+                    }
+                }
+                winit::event::ElementState::Released => {
+                    if let Some(start) = self.drag_zoom_start.take() {
+                        let current =
+                            constrain_drag_to_display_aspect(
+                                start,
+                                self.drag_zoom_current,
+                                self.size.width as f32 / self.size.height as f32,
+                            );
+                        let dx = (current.0 - start.0).abs();
+                        let dy = (current.1 - start.1).abs();
+                        if dx > MIN_DRAG_ZOOM_DISTANCE_PX || dy > MIN_DRAG_ZOOM_DISTANCE_PX {
+                            self.apply_drag_zoom(start, current);
+                        }
+                    }
+                }
+            }
+        }
+
         if let winit::event::Event::WindowEvent { event: WindowEvent::Touch(touch), .. } = event {
             self.handle_touch(touch);
         }
@@ -2492,14 +2592,18 @@ impl AppState {
         {
             self.pending_drop_paths.push(path.clone());
             self.hovering_file = false;
+            self.hovered_drop_paths.clear();
         }
 
         if let winit::event::Event::WindowEvent {
-            event: WindowEvent::HoveredFile(_),
+            event: WindowEvent::HoveredFile(path),
             ..
         } = event
         {
             self.hovering_file = true;
+            if !self.hovered_drop_paths.contains(path) {
+                self.hovered_drop_paths.push(path.clone());
+            }
         }
 
         if let winit::event::Event::WindowEvent {
@@ -2507,8 +2611,8 @@ impl AppState {
             ..
         } = event
         {
-            self.pending_drop_paths.clear();
             self.hovering_file = false;
+            self.hovered_drop_paths.clear();
         }
 
         self.imgui_platform
@@ -2547,6 +2651,7 @@ impl AppState {
         let y_offset = (self.size.height as f32 - render_height) / 2.0;
 
         self.mouse_position = (x, y);
+        self.single_drop_to_left = x < self.size.width as f32 / 2.0;
         self.cursor_x = if self.single_image_mode {
             render_width
         } else {
@@ -2580,6 +2685,13 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
+    fn quick_reset_view(&mut self) {
+        self.zoom_level = 1.0;
+        self.fixed_zoom_center = (0.5, 0.5);
+        self.zoom_center_offset = (0.0, 0.0);
+        self.update_uniform_buffer();
+    }
+
     fn handle_zoom(&mut self, delta: &winit::event::MouseScrollDelta) {
         let zoom_factor = match delta {
             winit::event::MouseScrollDelta::LineDelta(_, y) => {
@@ -2590,7 +2702,7 @@ impl AppState {
             }
         };
 
-        let new_zoom_level = (self.zoom_level * zoom_factor).clamp(1.0, 10.0);
+        let new_zoom_level = (self.zoom_level * zoom_factor).clamp(1.0, MAX_ZOOM_LEVEL);
 
         // Convert cursor position to texture coordinates [0, 1] using render dimensions.
         let (render_width, render_height) = self.compute_render_dimensions();
@@ -2630,6 +2742,40 @@ impl AppState {
 
         self.update_uniform_buffer();
     }
+
+    fn apply_drag_zoom(&mut self, start: (f32, f32), end: (f32, f32)) {
+        let (render_width, render_height) = self.compute_render_dimensions();
+        let x_offset = (self.size.width as f32 - render_width) / 2.0;
+        let y_offset = (self.size.height as f32 - render_height) / 2.0;
+
+        let u1 = ((start.0 - x_offset) / render_width).clamp(0.0, 1.0);
+        let v1 = ((start.1 - y_offset) / render_height).clamp(0.0, 1.0);
+        let u2 = ((end.0 - x_offset) / render_width).clamp(0.0, 1.0);
+        let v2 = ((end.1 - y_offset) / render_height).clamp(0.0, 1.0);
+
+        let (u1, u2) = (u1.min(u2), u1.max(u2));
+        let (v1, v2) = (v1.min(v2), v1.max(v2));
+        let du = u2 - u1;
+        let dv = v2 - v1;
+        if du < MIN_DRAG_ZOOM_UV_SIZE || dv < MIN_DRAG_ZOOM_UV_SIZE {
+            return;
+        }
+
+        let new_zoom_level = (1.0 / du).min(1.0 / dv).clamp(1.0, MAX_ZOOM_LEVEL);
+        let new_center_x = (u1 + u2) / 2.0;
+        let new_center_y = (v1 + v2) / 2.0;
+
+        let max_offset_x = (1.0 - 1.0 / new_zoom_level) / 2.0;
+        let max_offset_y = (1.0 - 1.0 / new_zoom_level) / 2.0;
+        let clamped_center_x = new_center_x.clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
+        let clamped_center_y = new_center_y.clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
+
+        self.zoom_level = new_zoom_level;
+        self.fixed_zoom_center = (clamped_center_x, clamped_center_y);
+        self.zoom_center_offset = (0.0, 0.0);
+        self.update_uniform_buffer();
+    }
+
 
     fn update_uniform_buffer(&self) {
         let player = self.player.read();
