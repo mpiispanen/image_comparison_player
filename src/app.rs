@@ -709,12 +709,9 @@ impl HelpOverlay {
                 ui.text("  Up / Down      Zoom in / out");
                 ui.text("  Q / E          Zoom out / in");
                 ui.text("  W A S D        Pan up / left / down / right");
-<<<<<<< HEAD
                 ui.text("  Left drag      Zoom to dragged region");
                 ui.text("  R              Reset zoom to full frame");
-=======
                 ui.text("  Z (hold)       Peek zoom magnifier");
->>>>>>> 363cb2b (Add hold-to-peek zoom magnifier feature (Z key))
                 ui.dummy([0.0, 4.0]);
 
                 if !single_image_mode {
