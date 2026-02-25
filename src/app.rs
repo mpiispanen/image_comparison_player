@@ -1268,7 +1268,7 @@ impl AppState {
         imgui_context.fonts().clear();
         imgui_context.fonts().add_font(&[imgui::FontSource::DefaultFontData {
             config: Some(imgui::FontConfig {
-                size_pixels: 16.0 * hidpi_factor.max(1.0),
+                size_pixels: 18.0 * hidpi_factor.max(1.0),
                 ..imgui::FontConfig::default()
             }),
         }]);
