@@ -644,6 +644,7 @@ impl HelpOverlay {
                     ui.text_colored([1.0, 0.85, 0.3, 1.0], "Comparison");
                     ui.separator();
                     ui.text("  Mouse move     Move split-line divider");
+                    ui.text("  L              Toggle split-line divider");
                     ui.text("  F              Toggle FLIP diff overlay");
                     ui.text("  1 / 2          Show only left / right image");
                     ui.text("  P              Save FLIP diff image");
@@ -653,6 +654,7 @@ impl HelpOverlay {
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Windows & Overlays");
                 ui.separator();
                 ui.text("  H              Toggle this help overlay");
+                ui.text("  O              Toggle HUD (frame/speed/zoom/mode)");
                 ui.text("  C              Toggle cache debug window");
                 ui.text("  V              Toggle pixel info window");
                 ui.dummy([0.0, 4.0]);
@@ -772,6 +774,7 @@ fn read_two_texture_pixels(
 type FlipDiffReceiver = Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
 type FlipDiffTexture = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
 
+#[derive(Clone)]
 pub struct AppConfig {
     pub dir1: Option<String>,
     pub dir2: Option<String>,
@@ -836,6 +839,11 @@ pub struct AppState {
     flip_error_value: Option<f32>,
     drag_zoom_start: Option<(f32, f32)>,
     drag_zoom_current: (f32, f32),
+    show_hud: bool,
+    app_config: AppConfig,
+    pending_drop_paths: Vec<std::path::PathBuf>,
+    waiting_for_drop: bool,
+    hovering_file: bool,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -888,12 +896,33 @@ impl AppState {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         info!("Initializing AppState");
 
+        let stored_config = app_config.clone();
+
+        // When no images are provided (drag-and-drop startup), create a 1×1 black
+        // placeholder so the Player initialises correctly.  It is replaced as soon
+        // as the user drops real files.
+        let no_images_provided =
+            app_config.dir1.is_none() && app_config.images1.as_ref().is_none_or(|v| v.is_empty());
+
+        let placeholder_dir = if no_images_provided {
+            let dir = std::env::temp_dir().join("icp_placeholder");
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join("placeholder.png");
+            if !path.exists() {
+                image::RgbaImage::new(1, 1).save(&path)?;
+            }
+            Some(dir)
+        } else {
+            None
+        };
+
         let (images1, image_len1) = if let Some(files) = &app_config.images1 {
             image_loader::load_image_paths_from_files(files, app_config.fps)?
-        } else {
-            let raw = app_config.dir1.as_deref()
-                .ok_or("dir1 is missing: provide --dir1 or --images1")?;
+        } else if let Some(raw) = app_config.dir1.as_deref() {
             let dir = std::fs::canonicalize(raw)?;
+            image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
+        } else {
+            let dir = placeholder_dir.as_ref().unwrap();
             image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
         };
         let (images2, image_len2) = if let Some(files) = &app_config.images2 {
@@ -1298,6 +1327,11 @@ impl AppState {
             flip_error_value: None,
             drag_zoom_start: None,
             drag_zoom_current: (0.0, 0.0),
+            show_hud: true,
+            app_config: stored_config,
+            pending_drop_paths: Vec::new(),
+            waiting_for_drop: no_images_provided,
+            hovering_file: false,
         })
     }
 
@@ -1315,6 +1349,12 @@ impl AppState {
     }
 
     pub fn update(&mut self) {
+        // Process any pending drag-and-drop paths accumulated since the last frame.
+        if !self.pending_drop_paths.is_empty() {
+            let paths = std::mem::take(&mut self.pending_drop_paths);
+            self.reload_from_dropped_paths(paths);
+        }
+
         let now = Instant::now();
         let delta = now.duration_since(self.last_update);
         self.last_update = now;
@@ -1498,12 +1538,7 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open
-            || self.pixel_info_window.is_open
-            || self.help_overlay.is_open
-            || self.status_message.is_some()
-            || self.drag_zoom_start.is_some()
-        {
+        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop || self.hovering_file || self.help_overlay.is_open || self.show_hud || self.drag_zoom_start.is_some() {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1535,6 +1570,80 @@ impl AppState {
                     }
 
                     self.help_overlay.draw(ui, self.single_image_mode);
+
+                    // Draw persistent HUD in the top-right corner
+                    if self.show_hud {
+                        let player = self.player.read();
+                        let (left_index, right_index) = player.current_images();
+                        let left_total = player.frame_count1;
+                        let right_total = player.frame_count2;
+                        let speed = player.playback_speed();
+                        let playing = player.is_playing();
+                        drop(player);
+
+                        let compare_mode = if self.single_image_mode {
+                            "Single"
+                        } else if self.show_flip_diff {
+                            "FLIP diff"
+                        } else if !self.show_image1 {
+                            "Right only"
+                        } else if !self.show_image2 {
+                            "Left only"
+                        } else {
+                            "Split"
+                        };
+
+                        let win_size = window.inner_size();
+                        let padding = 10.0_f32;
+                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
+                        if let Some(_win) = ui
+                            .window("##hud")
+                            .position(
+                                [win_size.width as f32 - padding, padding],
+                                imgui::Condition::Always,
+                            )
+                            .position_pivot([1.0, 0.0])
+                            .bg_alpha(0.6)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            let play_str = if playing { "▶" } else { "⏸" };
+                            if self.single_image_mode {
+                                ui.text_colored(
+                                    [1.0, 1.0, 1.0, 1.0],
+                                    format!(
+                                        "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                        left_index + 1,
+                                        left_total,
+                                        play_str,
+                                        speed,
+                                        self.zoom_level,
+                                        compare_mode,
+                                    ),
+                                );
+                            } else {
+                                ui.text_colored(
+                                    [1.0, 1.0, 1.0, 1.0],
+                                    format!(
+                                        "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                        left_index + 1,
+                                        left_total,
+                                        right_index + 1,
+                                        right_total,
+                                        play_str,
+                                        speed,
+                                        self.zoom_level,
+                                        compare_mode,
+                                    ),
+                                );
+                            }
+                        }
+                    }
 
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
@@ -1577,6 +1686,89 @@ impl AppState {
                             .add_rect([start.0, start.1], [current.0, current.1], [1.0, 1.0, 0.0, 0.9])
                             .thickness(1.5)
                             .build();
+                    // Draw the "waiting for drop" overlay in the centre of the window.
+                    if self.waiting_for_drop && !self.hovering_file {
+                        let win_size = window.inner_size();
+                        let cx = win_size.width as f32 / 2.0;
+                        let cy = win_size.height as f32 / 2.0;
+                        let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([20.0, 16.0]));
+                        if let Some(_win) = ui
+                            .window("##drop_hint")
+                            .position([cx, cy], imgui::Condition::Always)
+                            .position_pivot([0.5, 0.5])
+                            .bg_alpha(0.75)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            ui.text("Drop image files or folders here");
+                            ui.spacing();
+                            ui.text_colored([0.7, 0.7, 0.7, 1.0], "1 path \u{2192} single view");
+                            ui.text_colored([0.7, 0.7, 0.7, 1.0], "2 paths \u{2192} comparison view");
+                        }
+                    }
+
+                    // Show left/right drop-zone panels during file hover (or hover + waiting).
+                    if self.hovering_file || (self.waiting_for_drop && !self.pending_drop_paths.is_empty()) {
+                        let win_size = window.inner_size();
+                        let w = win_size.width as f32;
+                        let h = win_size.height as f32;
+                        let half = w / 2.0;
+                        let cx = self.mouse_position.0;
+                        let over_left = cx < half;
+
+                        let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([12.0, 10.0]));
+
+                        // Left panel
+                        let left_alpha: f32 = if over_left { 0.55 } else { 0.25 };
+                        if let Some(_win) = ui
+                            .window("##drop_left")
+                            .position([0.0, 0.0], imgui::Condition::Always)
+                            .size([half, h], imgui::Condition::Always)
+                            .bg_alpha(left_alpha)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .begin()
+                        {
+                            // Centre the label inside the panel
+                            let label = if self.waiting_for_drop { "Drop here" } else { "Left" };
+                            let label_size = ui.calc_text_size(label);
+                            let pad_x = (half - label_size[0]).max(0.0) / 2.0;
+                            let pad_y = (h - label_size[1]).max(0.0) / 2.0;
+                            ui.set_cursor_pos([pad_x, pad_y]);
+                            let text_col = if over_left { [1.0, 1.0, 1.0, 1.0] } else { [0.8, 0.8, 0.8, 0.7] };
+                            ui.text_colored(text_col, label);
+                        }
+
+                        // Right panel
+                        let right_alpha: f32 = if over_left { 0.25 } else { 0.55 };
+                        if let Some(_win) = ui
+                            .window("##drop_right")
+                            .position([half, 0.0], imgui::Condition::Always)
+                            .size([half, h], imgui::Condition::Always)
+                            .bg_alpha(right_alpha)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .begin()
+                        {
+                            let label = if self.waiting_for_drop { "Drop here" } else { "Right" };
+                            let label_size = ui.calc_text_size(label);
+                            let pad_x = (half - label_size[0]).max(0.0) / 2.0;
+                            let pad_y = (h - label_size[1]).max(0.0) / 2.0;
+                            ui.set_cursor_pos([pad_x, pad_y]);
+                            let text_col = if over_left { [0.8, 0.8, 0.8, 0.7] } else { [1.0, 1.0, 1.0, 1.0] };
+                            ui.text_colored(text_col, label);
+                        }
                     }
 
                     should_render_imgui = true;
@@ -2007,6 +2199,173 @@ impl AppState {
         self.player.write().process_loaded_textures();
     }
 
+    /// Load images from a set of dropped paths and replace the current player.
+    ///
+    /// * 1 path + cursor on left  → replace left slot only (or single-input if no images yet)
+    /// * 1 path + cursor on right → replace right slot only (or single-input if no images yet)
+    /// * 2 paths → left path → left slot, right path → right slot
+    /// * 0 or >2 paths → show an error status message and do nothing
+    fn reload_from_dropped_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.hovering_file = false;
+
+        let fps = self.app_config.fps;
+
+        let count = paths.len();
+        if count == 0 || count > 2 {
+            if count > 2 {
+                self.status_message = Some((
+                    "Drop 1 or 2 paths to load images".to_string(),
+                    Instant::now(),
+                ));
+            }
+            return;
+        }
+
+        let load_images_from_path =
+            |p: &std::path::PathBuf| -> Result<Vec<(String, u64, u64)>, String> {
+                if p.is_dir() {
+                    image_loader::load_image_paths(&p.to_string_lossy(), fps)
+                        .map(|(imgs, _)| imgs)
+                        .map_err(|e| e.to_string())
+                } else if p.is_file() {
+                    image_loader::load_image_paths_from_files(
+                        &[p.to_string_lossy().into_owned()],
+                        fps,
+                    )
+                    .map(|(imgs, _)| imgs)
+                    .map_err(|e| e.to_string())
+                } else {
+                    Err(format!("Path not found: {}", p.display()))
+                }
+            };
+
+        // Determine which half the cursor is in at the time of the drop.
+        let drop_on_left = self.mouse_position.0 < self.size.width as f32 / 2.0;
+
+        // Build final (images1, images2, single_image_mode) based on count + cursor position.
+        let (images1, images2, single_image_mode, display_msg) = if count == 2 {
+            // Two paths: first → left, second → right, regardless of cursor position.
+            let imgs1 = match load_images_from_path(&paths[0]) {
+                Ok(v) if !v.is_empty() => v,
+                Ok(_) => {
+                    self.status_message = Some((
+                        format!("No images found in: {}", paths[0].display()),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    self.status_message =
+                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    return;
+                }
+            };
+            let imgs2 = match load_images_from_path(&paths[1]) {
+                Ok(v) if !v.is_empty() => v,
+                Ok(_) => {
+                    self.status_message = Some((
+                        format!("No images found in: {}", paths[1].display()),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    self.status_message =
+                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    return;
+                }
+            };
+            let msg = format!(
+                "Loaded left: {} | right: {}",
+                paths[0].file_name().map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| paths[0].to_string_lossy().into_owned()),
+                paths[1].file_name().map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| paths[1].to_string_lossy().into_owned()),
+            );
+            (imgs1, imgs2, false, msg)
+        } else {
+            // One path: use cursor position to decide which slot to fill.
+            let dropped = match load_images_from_path(&paths[0]) {
+                Ok(v) if !v.is_empty() => v,
+                Ok(_) => {
+                    self.status_message = Some((
+                        format!("No images found in: {}", paths[0].display()),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    self.status_message =
+                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    return;
+                }
+            };
+
+            let name = paths[0].file_name().map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| paths[0].to_string_lossy().into_owned());
+
+            if self.waiting_for_drop {
+                // No prior images — just open in single-input mode.
+                let msg = format!("Loaded: {}", name);
+                (dropped.clone(), dropped, true, msg)
+            } else if drop_on_left {
+                // Replace left slot; keep existing right.
+                let existing_right = self.player.read().config.image_data2.clone();
+                let (imgs2, sim) = if existing_right.is_empty() {
+                    (dropped.clone(), true)
+                } else {
+                    (existing_right, false)
+                };
+                let msg = format!("Loaded left: {}", name);
+                (dropped, imgs2, sim, msg)
+            } else {
+                // Replace right slot; keep existing left.
+                let existing_left = self.player.read().config.image_data1.clone();
+                let msg = format!("Loaded right: {}", name);
+                (existing_left, dropped, false, msg)
+            }
+        };
+
+        let new_player = Player::new(
+            PlayerConfig {
+                image_data1: images1,
+                image_data2: images2,
+                cache_size: self.app_config.cache_size,
+                preload_ahead: self.app_config.preload_ahead,
+                preload_behind: self.app_config.preload_behind,
+                num_load_threads: self.app_config.num_load_threads,
+                num_process_threads: self.app_config.num_process_threads,
+                num_flip_diff_threads: self.app_config.num_flip_diff_threads,
+                diff_preload_ahead: self.app_config.diff_preload_ahead,
+                diff_preload_behind: self.app_config.diff_preload_behind,
+                single_image_mode,
+            },
+            Arc::clone(&self.queue),
+            Arc::clone(&self.device),
+        );
+
+        info!(
+            "Reloading player from dropped path(s): {}",
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        self.player = Arc::new(RwLock::new(new_player));
+        self.single_image_mode = single_image_mode;
+        self.waiting_for_drop = false;
+        self.show_flip_diff = false;
+        *self.flip_diff_texture.lock() = None;
+        self.zoom_level = 1.0;
+        self.fixed_zoom_center = (0.5, 0.5);
+        self.zoom_center_offset = (0.0, 0.0);
+
+        self.status_message = Some((display_msg, Instant::now()));
+        self.load_and_update_textures();
+    }
+
     pub fn handle_event<T>(
         &mut self,
         window: &winit::window::Window,
@@ -2143,6 +2502,9 @@ impl AppState {
                     self.zoom_center_offset = (0.0, 0.0);
                     self.update_uniform_buffer();
                 }
+                VirtualKeyCode::O => {
+                    self.show_hud = !self.show_hud;
+                }
                 _ => {}
             }
         }
@@ -2182,6 +2544,32 @@ impl AppState {
 
         if let winit::event::Event::WindowEvent { event: WindowEvent::Touch(touch), .. } = event {
             self.handle_touch(touch);
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::DroppedFile(path),
+            ..
+        } = event
+        {
+            self.pending_drop_paths.push(path.clone());
+            self.hovering_file = false;
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::HoveredFile(_),
+            ..
+        } = event
+        {
+            self.hovering_file = true;
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::HoveredFileCancelled,
+            ..
+        } = event
+        {
+            self.pending_drop_paths.clear();
+            self.hovering_file = false;
         }
 
         self.imgui_platform
@@ -2563,5 +2951,101 @@ mod tests {
         }
 
         assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    }
+
+    /// Tests for the drag-and-drop path loading helper used by reload_from_dropped_paths.
+    mod drop_tests {
+        use crate::image_loader;
+        use std::fs;
+
+        /// Loading a single image file via load_image_paths_from_files gives 1 entry.
+        #[test]
+        fn test_drop_single_image_file() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let img = image::RgbaImage::new(4, 4);
+            let img_path = dir.path().join("frame.png");
+            img.save(&img_path).unwrap();
+
+            let fps = 30.0;
+            let result = image_loader::load_image_paths_from_files(
+                &[img_path.to_string_lossy().into_owned()],
+                fps,
+            );
+            assert!(result.is_ok(), "should load single image file");
+            let (imgs, count) = result.unwrap();
+            assert_eq!(count, 1);
+            assert_eq!(imgs.len(), 1);
+        }
+
+        /// Loading a directory with images uses load_image_paths and returns entries.
+        #[test]
+        fn test_drop_directory_with_images() {
+            let dir = tempfile::TempDir::new().unwrap();
+            for i in 0..3u32 {
+                let img = image::RgbaImage::new(4, 4);
+                img.save(dir.path().join(format!("{}.png", i))).unwrap();
+            }
+
+            let fps = 30.0;
+            let result = image_loader::load_image_paths(&dir.path().to_string_lossy(), fps);
+            assert!(result.is_ok(), "should load from directory");
+            let (imgs, count) = result.unwrap();
+            assert_eq!(count, 3);
+            assert_eq!(imgs.len(), 3);
+        }
+
+        /// Dropping a non-existent path fails with a meaningful error.
+        #[test]
+        fn test_drop_nonexistent_path() {
+            let fps = 30.0;
+            let bad_path = std::path::PathBuf::from("/nonexistent/path/that/does/not/exist");
+            let result = if bad_path.is_dir() {
+                image_loader::load_image_paths(&bad_path.to_string_lossy(), fps)
+                    .map(|(v, _)| v)
+                    .map_err(|e| e.to_string())
+            } else if bad_path.is_file() {
+                image_loader::load_image_paths_from_files(
+                    &[bad_path.to_string_lossy().into_owned()],
+                    fps,
+                )
+                .map(|(v, _)| v)
+                .map_err(|e| e.to_string())
+            } else {
+                Err(format!("Path not found: {}", bad_path.display()))
+            };
+            assert!(result.is_err(), "should fail for nonexistent path");
+            assert!(
+                result.unwrap_err().contains("not found"),
+                "error message should mention 'not found'"
+            );
+        }
+
+        /// Dropping a non-image file fails with a meaningful error.
+        #[test]
+        fn test_drop_non_image_file() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let txt_path = dir.path().join("notes.txt");
+            fs::write(&txt_path, "not an image").unwrap();
+
+            let fps = 30.0;
+            let result = image_loader::load_image_paths_from_files(
+                &[txt_path.to_string_lossy().into_owned()],
+                fps,
+            );
+            assert!(result.is_err(), "should fail for non-image file");
+        }
+
+        /// An empty directory produces no images.
+        #[test]
+        fn test_drop_empty_directory() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let fps = 30.0;
+            let result = image_loader::load_image_paths(&dir.path().to_string_lossy(), fps);
+            // Should succeed but return 0 images
+            assert!(result.is_ok());
+            let (imgs, count) = result.unwrap();
+            assert_eq!(count, 0);
+            assert!(imgs.is_empty());
+        }
     }
 }

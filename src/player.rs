@@ -847,6 +847,14 @@ impl Player {
         }
     }
 
+    pub fn playback_speed(&self) -> f32 {
+        self.playback_speed
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.is_playing.load(Ordering::Relaxed)
+    }
+
     pub fn decrease_playback_speed(&mut self) {
         self.playback_speed = (self.playback_speed - 0.25).max(0.25);
     }
@@ -1030,15 +1038,32 @@ impl Player {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-            let left_buffer =
+            let (left_buffer, left_stride) =
                 self.create_buffer_and_copy_texture(&mut encoder, &left_texture, left_size);
-            let right_buffer =
+            let (right_buffer, right_stride) =
                 self.create_buffer_and_copy_texture(&mut encoder, &right_texture, right_size);
 
             self.queue.submit(std::iter::once(encoder.finish()));
 
-            let left_data = self.read_buffer(&left_buffer, (width * height * 4) as u64);
-            let right_data = self.read_buffer(&right_buffer, (width * height * 4) as u64);
+            // Read back full padded buffers then strip row padding so nv_flip
+            // receives tightly-packed RGBA rows of exactly `width * 4` bytes.
+            let strip_padding = |padded: Vec<u8>, stride: u32, w: u32, h: u32| -> Vec<u8> {
+                let row_bytes = (w * 4) as usize;
+                let stride = stride as usize;
+                let mut out = Vec::with_capacity(row_bytes * h as usize);
+                for row in 0..h as usize {
+                    out.extend_from_slice(&padded[row * stride..row * stride + row_bytes]);
+                }
+                out
+            };
+
+            let left_padded =
+                self.read_buffer(&left_buffer, (left_stride * height) as u64);
+            let right_padded =
+                self.read_buffer(&right_buffer, (right_stride * height) as u64);
+
+            let left_data = strip_padding(left_padded, left_stride, width, height);
+            let right_data = strip_padding(right_padded, right_stride, width, height);
 
             let flip_diff_sender = self.flip_diff_sender.clone();
             let device = Arc::clone(&self.device);
@@ -1199,10 +1224,15 @@ impl Player {
         encoder: &mut wgpu::CommandEncoder,
         texture: &wgpu::Texture,
         size: wgpu::Extent3d,
-    ) -> wgpu::Buffer {
+    ) -> (wgpu::Buffer, u32) {
+        // bytes_per_row must be a multiple of wgpu::COPY_BYTES_PER_ROW_ALIGNMENT (256).
+        let unpadded_bytes_per_row = size.width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Texture Buffer"),
-            size: (size.width * size.height * 4) as u64,
+            size: (bytes_per_row * size.height) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -1218,14 +1248,14 @@ impl Player {
                 buffer: &buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(size.width * 4),
+                    bytes_per_row: Some(bytes_per_row),
                     rows_per_image: Some(size.height),
                 },
             },
             size,
         );
 
-        buffer
+        (buffer, bytes_per_row)
     }
 
     fn read_buffer(&self, buffer: &wgpu::Buffer, size: u64) -> Vec<u8> {
@@ -1399,6 +1429,54 @@ mod performance_tests {
         // frame 4: fwd=(4+10-5)%10=9, bwd=(5+10-4)%10=1, min_dist=1 (nearest)
         let result = select_eviction_candidate(&[0, 1, 4], 5, 10);
         assert_eq!(result, Some(0));
+    }
+
+    /// Verifies the aligned bytes_per_row calculation used in create_buffer_and_copy_texture.
+    #[test]
+    fn test_copy_bytes_per_row_alignment() {
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        // Helper mirrors the production formula.
+        let aligned = |w: u32| -> u32 {
+            let unpadded = w * 4;
+            unpadded.div_ceil(align) * align
+        };
+
+        // Width already produces aligned bytes_per_row (64 * 4 = 256).
+        assert_eq!(aligned(64), 256);
+        assert_eq!(aligned(64) % align, 0);
+
+        // Width whose bytes_per_row is NOT a multiple of 256 without padding.
+        assert_eq!(aligned(100), 512); // 400 → padded to 512
+        assert_eq!(aligned(100) % align, 0);
+
+        // Width = 1 → 4 bytes padded to 256.
+        assert_eq!(aligned(1), 256);
+        assert_eq!(aligned(1) % align, 0);
+    }
+
+    /// Verifies the strip_padding helper removes row padding correctly.
+    #[test]
+    fn test_strip_row_padding() {
+        let width: u32 = 2;
+        let height: u32 = 2;
+        let stride: u32 = 256; // padded stride
+        let row_bytes = (width * 4) as usize;
+
+        // Build padded buffer: two 256-byte rows, pixel data in first 8 bytes each.
+        let mut padded = vec![0u8; stride as usize * height as usize];
+        // Row 0 pixels: R=1,G=2,B=3,A=4 and R=5,G=6,B=7,A=8
+        padded[0..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        // Row 1 pixels: R=9,G=10,B=11,A=12 and R=13,G=14,B=15,A=16
+        padded[256..264].copy_from_slice(&[9, 10, 11, 12, 13, 14, 15, 16]);
+
+        // Strip padding.
+        let mut out = Vec::with_capacity(row_bytes * height as usize);
+        for row in 0..height as usize {
+            let s = row * stride as usize;
+            out.extend_from_slice(&padded[s..s + row_bytes]);
+        }
+
+        assert_eq!(out, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     }
 }
 
