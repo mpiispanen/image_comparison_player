@@ -2243,11 +2243,6 @@ impl AppState {
             Arc::clone(&self.device),
         );
 
-        if let Err(e) = new_player.load_initial_textures() {
-            self.status_message = Some((format!("Failed to load images: {}", e), Instant::now()));
-            return;
-        }
-
         info!(
             "Reloading player from dropped path(s): {}",
             paths
