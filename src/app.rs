@@ -2022,19 +2022,19 @@ impl AppState {
         self.fixed_zoom_center = (0.5, 0.5);
         self.zoom_center_offset = (0.0, 0.0);
 
-        let path_display = |p: &std::path::PathBuf| -> String {
+        let format_path_name = |p: &std::path::PathBuf| -> String {
             p.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| p.to_string_lossy().into_owned())
         };
 
         let msg = if single_image_mode {
-            format!("Loaded: {}", path_display(&paths[0]))
+            format!("Loaded: {}", format_path_name(&paths[0]))
         } else {
             format!(
                 "Loaded: {} | {}",
-                path_display(&paths[0]),
-                path_display(&paths[1])
+                format_path_name(&paths[0]),
+                format_path_name(&paths[1])
             )
         };
         self.status_message = Some((msg, Instant::now()));
