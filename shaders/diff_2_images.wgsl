@@ -129,8 +129,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // Apply main zoom on top of peek zoom
             let zoom_ofs = (tc - uniforms.zoom_center) / uniforms.zoom_level;
             let ztc = clamp(uniforms.zoom_center + zoom_ofs, vec2(0.0), vec2(1.0));
-            let p1 = textureSample(t_diffuse1, s_diffuse1, ztc);
-            let p2 = textureSample(t_diffuse2, s_diffuse2, ztc);
+            let p1 = textureSampleLevel(t_diffuse1, s_diffuse1, ztc, 0.0);
+            let p2 = textureSampleLevel(t_diffuse2, s_diffuse2, ztc, 0.0);
             let t_p = both_shown * step(uniforms.cursor_x, tc.x) + only_image2;
             let peek_color = mix(p1 * uniforms.show_image1, p2 * uniforms.show_image2, t_p);
             return vec4<f32>(peek_color.rgb, peek_color.a);

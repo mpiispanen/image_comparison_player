@@ -146,6 +146,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Frames per second (overrides input.txt durations)")
                 .default_value("30"),
         )
+        .arg(
+            Arg::new("peek_zoom_factor")
+                .long("peek-zoom-factor")
+                .action(ArgAction::Set)
+                .value_name("FACTOR")
+                .help("Magnification factor for hold-to-peek zoom (Z key)")
+                .default_value("4.0"),
+        )
         .get_matches();
 
     let test_mode = matches.get_flag("test_mode");
@@ -218,6 +226,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .parse()
         .unwrap_or(30.0);
+    let peek_zoom_factor: f32 = matches
+        .get_one::<String>("peek_zoom_factor")
+        .unwrap()
+        .parse()
+        .unwrap_or(4.0);
 
     let (width, height) = parse_window_size(window_size)?;
 
@@ -251,6 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diff_preload_ahead,
         diff_preload_behind,
         fps,
+        peek_zoom_factor,
     };
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;
