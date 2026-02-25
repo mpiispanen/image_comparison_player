@@ -20,6 +20,9 @@ use winit::event::WindowEvent;
 use winit::window::Window as WinitWindow;
 
 const APP_TITLE: &str = "Image Comparison Player";
+const MAX_ZOOM_LEVEL: f32 = 10.0;
+const MIN_DRAG_ZOOM_DISTANCE_PX: f32 = 10.0;
+const MIN_DRAG_ZOOM_UV_SIZE: f32 = 0.01;
 
 #[allow(dead_code)]
 #[repr(C)]
@@ -633,6 +636,8 @@ impl HelpOverlay {
                 ui.text("  Up / Down      Zoom in / out");
                 ui.text("  Q / E          Zoom out / in");
                 ui.text("  W A S D        Pan up / left / down / right");
+                ui.text("  Left drag      Zoom to dragged region");
+                ui.text("  R              Reset zoom to full frame");
                 ui.dummy([0.0, 4.0]);
 
                 if !single_image_mode {
@@ -832,6 +837,8 @@ pub struct AppState {
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
     flip_error_value: Option<f32>,
+    drag_zoom_start: Option<(f32, f32)>,
+    drag_zoom_current: (f32, f32),
     show_hud: bool,
     app_config: AppConfig,
     pending_drop_paths: Vec<std::path::PathBuf>,
@@ -1318,6 +1325,8 @@ impl AppState {
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
             flip_error_value: None,
+            drag_zoom_start: None,
+            drag_zoom_current: (0.0, 0.0),
             show_hud: true,
             app_config: stored_config,
             pending_drop_paths: Vec::new(),
@@ -1529,7 +1538,7 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop || self.hovering_file || self.help_overlay.is_open || self.show_hud {
+        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop || self.hovering_file || self.help_overlay.is_open || self.show_hud || self.drag_zoom_start.is_some() {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1661,6 +1670,27 @@ impl AppState {
                         {
                             ui.text_colored([1.0, 1.0, 1.0, alpha], msg.as_str());
                         }
+                    }
+
+                    // Draw drag-zoom selection rectangle.
+                    if let Some(start) = self.drag_zoom_start {
+                        let current = self.drag_zoom_current;
+                        // ImGui expects min/max corners; normalize in case of up/left drags.
+                        let min_x = start.0.min(current.0);
+                        let max_x = start.0.max(current.0);
+                        let min_y = start.1.min(current.1);
+                        let max_y = start.1.max(current.1);
+                        let draw_list = ui.get_foreground_draw_list();
+                        // Semi-transparent yellow fill.
+                        draw_list
+                            .add_rect([min_x, min_y], [max_x, max_y], [1.0, 1.0, 0.0, 0.15])
+                            .filled(true)
+                            .build();
+                        // Solid yellow outline.
+                        draw_list
+                            .add_rect([min_x, min_y], [max_x, max_y], [1.0, 1.0, 0.0, 0.9])
+                            .thickness(1.5)
+                            .build();
                     }
 
                     // Draw the "waiting for drop" overlay in the centre of the window.
@@ -2372,6 +2402,9 @@ impl AppState {
         } = event
         {
             self.update_mouse_position(position.x as f32, position.y as f32);
+            if self.drag_zoom_start.is_some() {
+                self.drag_zoom_current = (position.x as f32, position.y as f32);
+            }
         }
 
         if let winit::event::Event::WindowEvent {
@@ -2470,6 +2503,12 @@ impl AppState {
                 VirtualKeyCode::H => {
                     self.help_overlay.toggle();
                 }
+                VirtualKeyCode::R => {
+                    self.zoom_level = 1.0;
+                    self.fixed_zoom_center = (0.5, 0.5);
+                    self.zoom_center_offset = (0.0, 0.0);
+                    self.update_uniform_buffer();
+                }
                 VirtualKeyCode::O => {
                     self.show_hud = !self.show_hud;
                 }
@@ -2479,6 +2518,35 @@ impl AppState {
 
         if let winit::event::Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } = event {
             self.handle_zoom(delta);
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::MouseInput {
+                button: winit::event::MouseButton::Left,
+                state,
+                ..
+            },
+            ..
+        } = event
+        {
+            match state {
+                winit::event::ElementState::Pressed => {
+                    if !self.imgui_context.io().want_capture_mouse {
+                        self.drag_zoom_start = Some(self.mouse_position);
+                        self.drag_zoom_current = self.mouse_position;
+                    }
+                }
+                winit::event::ElementState::Released => {
+                    if let Some(start) = self.drag_zoom_start.take() {
+                        let current = self.drag_zoom_current;
+                        let dx = (current.0 - start.0).abs();
+                        let dy = (current.1 - start.1).abs();
+                        if dx > MIN_DRAG_ZOOM_DISTANCE_PX || dy > MIN_DRAG_ZOOM_DISTANCE_PX {
+                            self.apply_drag_zoom(start, current);
+                        }
+                    }
+                }
+            }
         }
 
         if let winit::event::Event::WindowEvent { event: WindowEvent::Touch(touch), .. } = event {
@@ -2590,7 +2658,7 @@ impl AppState {
             }
         };
 
-        let new_zoom_level = (self.zoom_level * zoom_factor).clamp(1.0, 10.0);
+        let new_zoom_level = (self.zoom_level * zoom_factor).clamp(1.0, MAX_ZOOM_LEVEL);
 
         // Convert cursor position to texture coordinates [0, 1] using render dimensions.
         let (render_width, render_height) = self.compute_render_dimensions();
@@ -2715,6 +2783,44 @@ impl AppState {
         offset_y = offset_y.clamp(-max_offset_y, max_offset_y);
         
         self.zoom_center_offset = (offset_x, offset_y);
+        self.update_uniform_buffer();
+    }
+
+    /// Apply a zoom that fits the drag rectangle defined by two screen-space positions.
+    fn apply_drag_zoom(&mut self, start: (f32, f32), end: (f32, f32)) {
+        let (render_width, render_height) = self.compute_render_dimensions();
+        let x_offset = (self.size.width as f32 - render_width) / 2.0;
+        let y_offset = (self.size.height as f32 - render_height) / 2.0;
+
+        // Convert screen coordinates to normalised image UV [0, 1].
+        let u1 = ((start.0 - x_offset) / render_width).clamp(0.0, 1.0);
+        let v1 = ((start.1 - y_offset) / render_height).clamp(0.0, 1.0);
+        let u2 = ((end.0 - x_offset) / render_width).clamp(0.0, 1.0);
+        let v2 = ((end.1 - y_offset) / render_height).clamp(0.0, 1.0);
+
+        let (u1, u2) = (u1.min(u2), u1.max(u2));
+        let (v1, v2) = (v1.min(v2), v1.max(v2));
+
+        let du = u2 - u1;
+        let dv = v2 - v1;
+
+        if du < MIN_DRAG_ZOOM_UV_SIZE || dv < MIN_DRAG_ZOOM_UV_SIZE {
+            return;
+        }
+
+        // Choose the zoom level that fully shows the rectangle.
+        let new_zoom_level = (1.0_f32 / du).min(1.0 / dv).clamp(1.0, MAX_ZOOM_LEVEL);
+        let new_center_x = (u1 + u2) / 2.0;
+        let new_center_y = (v1 + v2) / 2.0;
+
+        let max_offset_x = (1.0 - 1.0 / new_zoom_level) / 2.0;
+        let max_offset_y = (1.0 - 1.0 / new_zoom_level) / 2.0;
+        let clamped_center_x = new_center_x.clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
+        let clamped_center_y = new_center_y.clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
+
+        self.zoom_level = new_zoom_level;
+        self.fixed_zoom_center = (clamped_center_x, clamped_center_y);
+        self.zoom_center_offset = (0.0, 0.0);
         self.update_uniform_buffer();
     }
 
