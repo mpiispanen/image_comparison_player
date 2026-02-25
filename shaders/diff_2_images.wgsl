@@ -82,26 +82,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let mode = uniforms.comparison_mode;
 
-    // Alpha Overlay mode (2): blend both images 50/50
-    if mode == MODE_OVERLAY {
-        let overlay_color = mix(color1, color2, 0.5);
-        return vec4<f32>(overlay_color.rgb, overlay_color.a * alpha);
-    }
-
-    // Absolute Difference mode (3): per-channel |image1 - image2|, amplified
-    if mode == MODE_ABS_DIFF {
-        let diff = abs(color1 - color2);
-        let amplified = clamp(diff.rgb * 10.0, vec3(0.0), vec3(1.0));
-        return vec4<f32>(amplified, alpha);
-    }
-
-    // Normal split-screen mode (0) or fallback
     // Determine split factor based on which images are enabled
     let both_shown = uniforms.show_image1 * uniforms.show_image2;
     let only_image2 = (1.0 - uniforms.show_image1) * uniforms.show_image2;
     let t = both_shown * step(uniforms.cursor_x, in.tex_coords.x) + only_image2;
-
     let mixed_color = mix(color1 * uniforms.show_image1, color2 * uniforms.show_image2, t);
+
+    // Overlay/Abs Diff are shown below cursor_y so you can compare against originals interactively.
+    if mode == MODE_OVERLAY || mode == MODE_ABS_DIFF {
+        let overlay_color = mix(color1, color2, 0.5);
+        let diff = abs(color1 - color2);
+        let abs_diff_color = vec4<f32>(clamp(diff.rgb * 10.0, vec3(0.0), vec3(1.0)), 1.0);
+        let mode_color = select(abs_diff_color, overlay_color, mode == MODE_OVERLAY);
+        let show_mode = step(uniforms.cursor_y, in.tex_coords.y);
+        let combined = mix(mixed_color, mode_color, show_mode);
+        return vec4<f32>(combined.rgb, combined.a * alpha);
+    }
 
     // Add a 1-pixel-wide white line at the split position using screen-space coordinates
     // so the line stays a constant width regardless of image resolution or window size.
@@ -111,7 +107,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let render_width_fs = scale_x_fs * uniforms.window_size.x;
     let x_offset_fs = (uniforms.window_size.x - render_width_fs) / 2.0;
     let cursor_screen_x = x_offset_fs + uniforms.cursor_x * render_width_fs;
-    if (both_shown > 0.5 && uniforms.show_split_line > 0.5 && abs(in.clip_position.x - cursor_screen_x) < 1.0) {
+    let in_original_region = mode <= MODE_FLIP || in.tex_coords.y < uniforms.cursor_y;
+    if (both_shown > 0.5 && uniforms.show_split_line > 0.5 && in_original_region && abs(in.clip_position.x - cursor_screen_x) < 1.0) {
         return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the line
     }
 

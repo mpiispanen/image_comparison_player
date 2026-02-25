@@ -614,6 +614,39 @@ impl PixelInfoWindow {
                 }
 
                 if !single_image_mode {
+                    let overlay_color = [
+                        ((left_color[0] as u16 + right_color[0] as u16) / 2) as u8,
+                        ((left_color[1] as u16 + right_color[1] as u16) / 2) as u8,
+                        ((left_color[2] as u16 + right_color[2] as u16) / 2) as u8,
+                        ((left_color[3] as u16 + right_color[3] as u16) / 2) as u8,
+                    ];
+                    let abs_diff_color = [
+                        left_color[0].abs_diff(right_color[0]),
+                        left_color[1].abs_diff(right_color[1]),
+                        left_color[2].abs_diff(right_color[2]),
+                        left_color[3].abs_diff(right_color[3]),
+                    ];
+                    ui.text(format!(
+                        "Overlay (50/50): #{:02X}{:02X}{:02X}  ({}, {}, {}, {})",
+                        overlay_color[0],
+                        overlay_color[1],
+                        overlay_color[2],
+                        overlay_color[0],
+                        overlay_color[1],
+                        overlay_color[2],
+                        overlay_color[3]
+                    ));
+                    ui.text(format!(
+                        "Abs Diff (raw):  #{:02X}{:02X}{:02X}  ({}, {}, {}, {})",
+                        abs_diff_color[0],
+                        abs_diff_color[1],
+                        abs_diff_color[2],
+                        abs_diff_color[0],
+                        abs_diff_color[1],
+                        abs_diff_color[2],
+                        abs_diff_color[3]
+                    ));
+
                     if let Some(error) = flip_error {
                         ui.text(format!("FLIP error @ pixel: {:.4}", error));
                     } else {
