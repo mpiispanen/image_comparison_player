@@ -528,6 +528,7 @@ impl PixelInfoWindow {
     fn draw(
         &self,
         ui: &Ui,
+        hovered_pixel: (u32, u32),
         left_color: [u8; 4],
         right_color: [u8; 4],
         flip_error: Option<f32>,
@@ -659,6 +660,7 @@ impl PixelInfoWindow {
                     }
                 }
 
+                ui.text(format!("Hovered pixel: ({}, {})", hovered_pixel.0, hovered_pixel.1));
                 ui.separator();
 
                 // FLIP error metrics
@@ -916,6 +918,7 @@ pub struct AppState {
     help_overlay: HelpOverlay,
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
+    hovered_pixel: (u32, u32),
     flip_error_value: Option<f32>,
     drag_zoom_start: Option<(f32, f32)>,
     drag_zoom_current: (f32, f32),
@@ -1422,6 +1425,7 @@ impl AppState {
             help_overlay: HelpOverlay::new(),
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
+            hovered_pixel: (0, 0),
             flip_error_value: None,
             drag_zoom_start: None,
             drag_zoom_current: (0.0, 0.0),
@@ -1673,6 +1677,7 @@ impl AppState {
                             .cloned();
                         self.pixel_info_window.draw(
                             ui,
+                            self.hovered_pixel,
                             self.left_pixel_color,
                             self.right_pixel_color,
                             self.flip_error_value,
@@ -1717,7 +1722,7 @@ impl AppState {
                         let play_str = if playing { ">" } else { "||" };
                         let hud_text = if self.single_image_mode {
                             format!(
-                                "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}  H: Help",
                                 left_index + 1,
                                 left_total,
                                 play_str,
@@ -1727,7 +1732,7 @@ impl AppState {
                             )
                         } else {
                             format!(
-                                "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}  H: Help",
                                 left_index + 1,
                                 left_total,
                                 right_index + 1,
@@ -1811,8 +1816,7 @@ impl AppState {
 
                     // Draw drag-zoom selection rectangle.
                     if let Some(start) = self.drag_zoom_start {
-                        let current =
-                            Self::constrain_drag_to_window_aspect(start, self.drag_zoom_current, self.size);
+                        let current = self.drag_zoom_current;
                         let start_ui = (start.0 * to_ui, start.1 * to_ui);
                         let current_ui = (current.0 * to_ui, current.1 * to_ui);
                         // ImGui expects min/max corners; normalize in case of up/left drags.
@@ -2082,6 +2086,7 @@ impl AppState {
                 .min(left_texture.width().saturating_sub(1));
             let py = ((zoomed_v * left_texture.height() as f32) as u32)
                 .min(left_texture.height().saturating_sub(1));
+            self.hovered_pixel = (px, py);
             let [lc, rc] = read_two_texture_pixels(
                 &self.device,
                 &self.queue,
@@ -2548,8 +2553,11 @@ impl AppState {
         } = event
         {
             self.update_mouse_position(position.x as f32, position.y as f32);
-            if self.drag_zoom_start.is_some() {
-                self.drag_zoom_current = (position.x as f32, position.y as f32);
+            if let Some(start) = self.drag_zoom_start {
+                self.drag_zoom_current = self.constrain_drag_to_window_aspect(
+                    start,
+                    (position.x as f32, position.y as f32),
+                );
             }
         }
 
@@ -2694,14 +2702,14 @@ impl AppState {
             match state {
                 winit::event::ElementState::Pressed => {
                     if !self.imgui_context.io().want_capture_mouse {
-                        self.drag_zoom_start = Some(self.mouse_position);
-                        self.drag_zoom_current = self.mouse_position;
+                        let start = self.clamp_to_render_rect(self.mouse_position);
+                        self.drag_zoom_start = Some(start);
+                        self.drag_zoom_current = start;
                     }
                 }
                 winit::event::ElementState::Released => {
                     if let Some(start) = self.drag_zoom_start.take() {
-                        let current =
-                            Self::constrain_drag_to_window_aspect(start, self.drag_zoom_current, self.size);
+                        let current = self.constrain_drag_to_window_aspect(start, self.drag_zoom_current);
                         let dx = (current.0 - start.0).abs();
                         let dy = (current.1 - start.1).abs();
                         if dx > MIN_DRAG_ZOOM_DISTANCE_PX || dy > MIN_DRAG_ZOOM_DISTANCE_PX {
@@ -2771,11 +2779,23 @@ impl AppState {
         }
     }
 
-    pub fn update_mouse_position(&mut self, x: f32, y: f32) {
+    fn compute_render_rect(&self) -> (f32, f32, f32, f32) {
         let (render_width, render_height) = self.compute_render_dimensions();
-
         let x_offset = (self.size.width as f32 - render_width) / 2.0;
         let y_offset = (self.size.height as f32 - render_height) / 2.0;
+        (x_offset, y_offset, render_width, render_height)
+    }
+
+    fn clamp_to_render_rect(&self, position: (f32, f32)) -> (f32, f32) {
+        let (x_offset, y_offset, render_width, render_height) = self.compute_render_rect();
+        (
+            position.0.clamp(x_offset, x_offset + render_width),
+            position.1.clamp(y_offset, y_offset + render_height),
+        )
+    }
+
+    pub fn update_mouse_position(&mut self, x: f32, y: f32) {
+        let (x_offset, y_offset, render_width, render_height) = self.compute_render_rect();
 
         self.mouse_position = (x, y);
         self.cursor_x = if self.single_image_mode {
@@ -2964,12 +2984,11 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
-    /// Constrain drag end-point so the selection box keeps the window aspect ratio.
-    fn constrain_drag_to_window_aspect(
-        start: (f32, f32),
-        end: (f32, f32),
-        window_size: winit::dpi::PhysicalSize<u32>,
-    ) -> (f32, f32) {
+    /// Constrain drag end-point so the selection box keeps the render-area aspect ratio.
+    fn constrain_drag_to_window_aspect(&self, start: (f32, f32), end: (f32, f32)) -> (f32, f32) {
+        let (x_offset, y_offset, render_width, render_height) = self.compute_render_rect();
+        let start = self.clamp_to_render_rect(start);
+        let end = self.clamp_to_render_rect(end);
         let dx = end.0 - start.0;
         let dy = end.1 - start.1;
         let abs_dx = dx.abs();
@@ -2978,7 +2997,7 @@ impl AppState {
             return end;
         }
 
-        let aspect = window_size.width as f32 / window_size.height.max(1) as f32;
+        let aspect = render_width / render_height.max(1.0);
         let sign_x = if dx < 0.0 { -1.0 } else { 1.0 };
         let sign_y = if dy < 0.0 { -1.0 } else { 1.0 };
 
@@ -2992,17 +3011,41 @@ impl AppState {
             (abs_dy * aspect, abs_dy)
         };
 
+        let max_abs_dx = if sign_x > 0.0 {
+            (x_offset + render_width) - start.0
+        } else {
+            start.0 - x_offset
+        };
+        let max_abs_dy = if sign_y > 0.0 {
+            (y_offset + render_height) - start.1
+        } else {
+            start.1 - y_offset
+        };
+        let scale_x = if new_abs_dx > f32::EPSILON {
+            max_abs_dx / new_abs_dx
+        } else {
+            1.0
+        };
+        let scale_y = if new_abs_dy > f32::EPSILON {
+            max_abs_dy / new_abs_dy
+        } else {
+            1.0
+        };
+        let scale = scale_x.min(scale_y).clamp(0.0, 1.0);
+        let constrained_abs_dx = new_abs_dx * scale;
+        let constrained_abs_dy = new_abs_dy * scale;
+
         (
-            (start.0 + sign_x * new_abs_dx).clamp(0.0, window_size.width as f32),
-            (start.1 + sign_y * new_abs_dy).clamp(0.0, window_size.height as f32),
+            start.0 + sign_x * constrained_abs_dx,
+            start.1 + sign_y * constrained_abs_dy,
         )
     }
 
     /// Apply a zoom that fits the drag rectangle defined by two screen-space positions.
     fn apply_drag_zoom(&mut self, start: (f32, f32), end: (f32, f32)) {
-        let (render_width, render_height) = self.compute_render_dimensions();
-        let x_offset = (self.size.width as f32 - render_width) / 2.0;
-        let y_offset = (self.size.height as f32 - render_height) / 2.0;
+        let (x_offset, y_offset, render_width, render_height) = self.compute_render_rect();
+        let start = self.clamp_to_render_rect(start);
+        let end = self.clamp_to_render_rect(end);
 
         // Convert screen coordinates to normalised image UV [0, 1].
         let u1 = ((start.0 - x_offset) / render_width).clamp(0.0, 1.0);
