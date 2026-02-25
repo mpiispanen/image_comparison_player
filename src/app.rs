@@ -1274,8 +1274,9 @@ impl AppState {
             ..Default::default()
         };
 
-        let imgui_renderer =
+        let mut imgui_renderer =
             imgui_wgpu::Renderer::new(&mut imgui_context, &device, &queue, imgui_renderer_config);
+        imgui_renderer.reload_font_texture(&mut imgui_context, &device, &queue);
 
         let cache_debug_window = CacheDebugWindow::new();
 
