@@ -1650,7 +1650,7 @@ impl AppState {
 
                         let compare_mode = if self.single_image_mode {
                             "Single"
-                        } else if self.show_flip_diff {
+                        } else if self.comparison_mode == ComparisonMode::Flip {
                             "FLIP diff"
                         } else if !self.show_image1 {
                             "Right only"
@@ -2452,7 +2452,7 @@ impl AppState {
         self.player = Arc::new(RwLock::new(new_player));
         self.single_image_mode = single_image_mode;
         self.waiting_for_drop = false;
-        self.show_flip_diff = false;
+        self.comparison_mode = ComparisonMode::None;
         *self.flip_diff_texture.lock() = None;
         self.zoom_level = 1.0;
         self.fixed_zoom_center = (0.5, 0.5);
