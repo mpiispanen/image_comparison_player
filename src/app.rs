@@ -762,6 +762,7 @@ pub struct AppState {
     app_config: AppConfig,
     pending_drop_paths: Vec<std::path::PathBuf>,
     waiting_for_drop: bool,
+    hovering_file: bool,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1243,6 +1244,7 @@ impl AppState {
             app_config: stored_config,
             pending_drop_paths: Vec::new(),
             waiting_for_drop: no_images_provided,
+            hovering_file: false,
         })
     }
 
@@ -1447,7 +1449,7 @@ impl AppState {
             window.set_title(APP_TITLE);
         }
 
-        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop {
+        if self.cache_debug_window.is_open || self.pixel_info_window.is_open || self.status_message.is_some() || self.waiting_for_drop || self.hovering_file {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
@@ -1506,7 +1508,7 @@ impl AppState {
                     }
 
                     // Draw the "waiting for drop" overlay in the centre of the window.
-                    if self.waiting_for_drop {
+                    if self.waiting_for_drop && !self.hovering_file {
                         let win_size = window.inner_size();
                         let cx = win_size.width as f32 / 2.0;
                         let cy = win_size.height as f32 / 2.0;
@@ -1528,6 +1530,65 @@ impl AppState {
                             ui.spacing();
                             ui.text_colored([0.7, 0.7, 0.7, 1.0], "1 path \u{2192} single view");
                             ui.text_colored([0.7, 0.7, 0.7, 1.0], "2 paths \u{2192} comparison view");
+                        }
+                    }
+
+                    // Show left/right drop-zone panels during file hover (or hover + waiting).
+                    if self.hovering_file || (self.waiting_for_drop && !self.pending_drop_paths.is_empty()) {
+                        let win_size = window.inner_size();
+                        let w = win_size.width as f32;
+                        let h = win_size.height as f32;
+                        let half = w / 2.0;
+                        let cx = self.mouse_position.0;
+                        let over_left = cx < half;
+
+                        let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([12.0, 10.0]));
+
+                        // Left panel
+                        let left_alpha: f32 = if over_left { 0.55 } else { 0.25 };
+                        if let Some(_win) = ui
+                            .window("##drop_left")
+                            .position([0.0, 0.0], imgui::Condition::Always)
+                            .size([half, h], imgui::Condition::Always)
+                            .bg_alpha(left_alpha)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .begin()
+                        {
+                            // Centre the label inside the panel
+                            let label = if self.waiting_for_drop { "Drop here" } else { "Left" };
+                            let label_size = ui.calc_text_size(label);
+                            let pad_x = (half - label_size[0]).max(0.0) / 2.0;
+                            let pad_y = (h - label_size[1]).max(0.0) / 2.0;
+                            ui.set_cursor_pos([pad_x, pad_y]);
+                            let text_col = if over_left { [1.0, 1.0, 1.0, 1.0] } else { [0.8, 0.8, 0.8, 0.7] };
+                            ui.text_colored(text_col, label);
+                        }
+
+                        // Right panel
+                        let right_alpha: f32 = if over_left { 0.25 } else { 0.55 };
+                        if let Some(_win) = ui
+                            .window("##drop_right")
+                            .position([half, 0.0], imgui::Condition::Always)
+                            .size([half, h], imgui::Condition::Always)
+                            .bg_alpha(right_alpha)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .begin()
+                        {
+                            let label = if self.waiting_for_drop { "Drop here" } else { "Right" };
+                            let label_size = ui.calc_text_size(label);
+                            let pad_x = (half - label_size[0]).max(0.0) / 2.0;
+                            let pad_y = (h - label_size[1]).max(0.0) / 2.0;
+                            ui.set_cursor_pos([pad_x, pad_y]);
+                            let text_col = if over_left { [0.8, 0.8, 0.8, 0.7] } else { [1.0, 1.0, 1.0, 1.0] };
+                            ui.text_colored(text_col, label);
                         }
                     }
 
@@ -1959,10 +2020,13 @@ impl AppState {
 
     /// Load images from a set of dropped paths and replace the current player.
     ///
-    /// * 1 path → single-input mode (left side only)
-    /// * 2 paths → comparison mode (left and right sides)
+    /// * 1 path + cursor on left  → replace left slot only (or single-input if no images yet)
+    /// * 1 path + cursor on right → replace right slot only (or single-input if no images yet)
+    /// * 2 paths → left path → left slot, right path → right slot
     /// * 0 or >2 paths → show an error status message and do nothing
     fn reload_from_dropped_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.hovering_file = false;
+
         let fps = self.app_config.fps;
 
         let count = paths.len();
@@ -1994,24 +2058,29 @@ impl AppState {
                 }
             };
 
-        let images1 = match load_images_from_path(&paths[0]) {
-            Ok(imgs) if !imgs.is_empty() => imgs,
-            Ok(_) => {
-                self.status_message = Some((
-                    format!("No images found in: {}", paths[0].display()),
-                    Instant::now(),
-                ));
-                return;
-            }
-            Err(e) => {
-                self.status_message = Some((format!("Invalid drop: {}", e), Instant::now()));
-                return;
-            }
-        };
+        // Determine which half the cursor is in at the time of the drop.
+        let drop_on_left = self.mouse_position.0 < self.size.width as f32 / 2.0;
 
-        let (images2, single_image_mode) = if count == 2 {
-            match load_images_from_path(&paths[1]) {
-                Ok(imgs) if !imgs.is_empty() => (imgs, false),
+        // Build final (images1, images2, single_image_mode) based on count + cursor position.
+        let (images1, images2, single_image_mode, display_msg) = if count == 2 {
+            // Two paths: first → left, second → right, regardless of cursor position.
+            let imgs1 = match load_images_from_path(&paths[0]) {
+                Ok(v) if !v.is_empty() => v,
+                Ok(_) => {
+                    self.status_message = Some((
+                        format!("No images found in: {}", paths[0].display()),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    self.status_message =
+                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    return;
+                }
+            };
+            let imgs2 = match load_images_from_path(&paths[1]) {
+                Ok(v) if !v.is_empty() => v,
                 Ok(_) => {
                     self.status_message = Some((
                         format!("No images found in: {}", paths[1].display()),
@@ -2024,9 +2093,56 @@ impl AppState {
                         Some((format!("Invalid drop: {}", e), Instant::now()));
                     return;
                 }
-            }
+            };
+            let msg = format!(
+                "Loaded left: {} | right: {}",
+                paths[0].file_name().map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| paths[0].to_string_lossy().into_owned()),
+                paths[1].file_name().map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| paths[1].to_string_lossy().into_owned()),
+            );
+            (imgs1, imgs2, false, msg)
         } else {
-            (images1.clone(), true)
+            // One path: use cursor position to decide which slot to fill.
+            let dropped = match load_images_from_path(&paths[0]) {
+                Ok(v) if !v.is_empty() => v,
+                Ok(_) => {
+                    self.status_message = Some((
+                        format!("No images found in: {}", paths[0].display()),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    self.status_message =
+                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    return;
+                }
+            };
+
+            let name = paths[0].file_name().map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| paths[0].to_string_lossy().into_owned());
+
+            if self.waiting_for_drop {
+                // No prior images — just open in single-input mode.
+                let msg = format!("Loaded: {}", name);
+                (dropped.clone(), dropped, true, msg)
+            } else if drop_on_left {
+                // Replace left slot; keep existing right.
+                let existing_right = self.player.read().config.image_data2.clone();
+                let (imgs2, sim) = if existing_right.is_empty() {
+                    (dropped.clone(), true)
+                } else {
+                    (existing_right, false)
+                };
+                let msg = format!("Loaded left: {}", name);
+                (dropped, imgs2, sim, msg)
+            } else {
+                // Replace right slot; keep existing left.
+                let existing_left = self.player.read().config.image_data1.clone();
+                let msg = format!("Loaded right: {}", name);
+                (existing_left, dropped, false, msg)
+            }
         };
 
         let new_player = Player::new(
@@ -2070,22 +2186,7 @@ impl AppState {
         self.fixed_zoom_center = (0.5, 0.5);
         self.zoom_center_offset = (0.0, 0.0);
 
-        let format_path_name = |p: &std::path::PathBuf| -> String {
-            p.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| p.to_string_lossy().into_owned())
-        };
-
-        let msg = if single_image_mode {
-            format!("Loaded: {}", format_path_name(&paths[0]))
-        } else {
-            format!(
-                "Loaded: {} | {}",
-                format_path_name(&paths[0]),
-                format_path_name(&paths[1])
-            )
-        };
-        self.status_message = Some((msg, Instant::now()));
+        self.status_message = Some((display_msg, Instant::now()));
         self.load_and_update_textures();
     }
 
@@ -2204,6 +2305,15 @@ impl AppState {
         } = event
         {
             self.pending_drop_paths.push(path.clone());
+            self.hovering_file = false;
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::HoveredFile(_),
+            ..
+        } = event
+        {
+            self.hovering_file = true;
         }
 
         if let winit::event::Event::WindowEvent {
@@ -2212,6 +2322,7 @@ impl AppState {
         } = event
         {
             self.pending_drop_paths.clear();
+            self.hovering_file = false;
         }
 
         self.imgui_platform
