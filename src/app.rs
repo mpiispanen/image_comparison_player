@@ -662,6 +662,7 @@ impl HelpOverlay {
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
                 ui.separator();
                 ui.text("  I              Save screenshot");
+                ui.text("  U              Save combined screenshot (all sources side-by-side)");
                 ui.text("  Esc            Close overlay / Quit");
             });
     }
@@ -1258,6 +1259,19 @@ impl AppState {
 
         let mut imgui_context = imgui::Context::create();
         imgui_context.set_ini_filename(None); // Disable imgui.ini file
+        let hidpi_factor = window.scale_factor() as f32;
+        imgui_context.io_mut().font_global_scale = if hidpi_factor > 0.0 {
+            1.0 / hidpi_factor
+        } else {
+            1.0
+        };
+        imgui_context.fonts().clear();
+        imgui_context.fonts().add_font(&[imgui::FontSource::DefaultFontData {
+            config: Some(imgui::FontConfig {
+                size_pixels: 18.0 * hidpi_factor.max(1.0),
+                ..imgui::FontConfig::default()
+            }),
+        }]);
         let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
         imgui_platform.attach_window(
             imgui_context.io_mut(),
@@ -1270,8 +1284,9 @@ impl AppState {
             ..Default::default()
         };
 
-        let imgui_renderer =
+        let mut imgui_renderer =
             imgui_wgpu::Renderer::new(&mut imgui_context, &device, &queue, imgui_renderer_config);
+        imgui_renderer.reload_font_texture(&mut imgui_context, &device, &queue);
 
         let cache_debug_window = CacheDebugWindow::new();
 
@@ -1570,6 +1585,11 @@ impl AppState {
                     }
 
                     self.help_overlay.draw(ui, self.single_image_mode);
+                    let ui_scale = window.scale_factor() as f32;
+                    let to_ui = if ui_scale > 0.0 { 1.0 / ui_scale } else { 1.0 };
+                    let win_size = window.inner_size();
+                    let ui_width = win_size.width as f32 * to_ui;
+                    let ui_height = win_size.height as f32 * to_ui;
 
                     // Draw persistent HUD in the top-right corner
                     if self.show_hud {
@@ -1593,93 +1613,85 @@ impl AppState {
                             "Split"
                         };
 
-                        let win_size = window.inner_size();
+                        let draw_list = ui.get_foreground_draw_list();
                         let padding = 10.0_f32;
-                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
-                        if let Some(_win) = ui
-                            .window("##hud")
-                            .position(
-                                [win_size.width as f32 - padding, padding],
-                                imgui::Condition::Always,
+                        let inner_pad_x = 8.0_f32;
+                        let inner_pad_y = 6.0_f32;
+                        let play_str = if playing { ">" } else { "||" };
+                        let hud_text = if self.single_image_mode {
+                            format!(
+                                "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                left_index + 1,
+                                left_total,
+                                play_str,
+                                speed,
+                                self.zoom_level,
+                                compare_mode,
                             )
-                            .position_pivot([1.0, 0.0])
-                            .bg_alpha(0.6)
-                            .no_decoration()
-                            .no_inputs()
-                            .movable(false)
-                            .no_nav()
-                            .focus_on_appearing(false)
-                            .always_auto_resize(true)
-                            .begin()
-                        {
-                            let play_str = if playing { "▶" } else { "⏸" };
-                            if self.single_image_mode {
-                                ui.text_colored(
-                                    [1.0, 1.0, 1.0, 1.0],
-                                    format!(
-                                        "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
-                                        left_index + 1,
-                                        left_total,
-                                        play_str,
-                                        speed,
-                                        self.zoom_level,
-                                        compare_mode,
-                                    ),
-                                );
-                            } else {
-                                ui.text_colored(
-                                    [1.0, 1.0, 1.0, 1.0],
-                                    format!(
-                                        "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
-                                        left_index + 1,
-                                        left_total,
-                                        right_index + 1,
-                                        right_total,
-                                        play_str,
-                                        speed,
-                                        self.zoom_level,
-                                        compare_mode,
-                                    ),
-                                );
-                            }
-                        }
+                        } else {
+                            format!(
+                                "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}",
+                                left_index + 1,
+                                left_total,
+                                right_index + 1,
+                                right_total,
+                                play_str,
+                                speed,
+                                self.zoom_level,
+                                compare_mode,
+                            )
+                        };
+                        let text_size = ui.calc_text_size(&hud_text);
+                        let box_w = text_size[0] + inner_pad_x * 2.0;
+                        let box_h = text_size[1] + inner_pad_y * 2.0;
+                        let box_min = [ui_width - padding - box_w, padding];
+                        let box_max = [ui_width - padding, padding + box_h];
+                        draw_list
+                            .add_rect(box_min, box_max, [0.0, 0.0, 0.0, 0.6])
+                            .filled(true)
+                            .build();
+                        draw_list.add_text(
+                            [box_min[0] + inner_pad_x, box_min[1] + inner_pad_y],
+                            [1.0, 1.0, 1.0, 1.0],
+                            hud_text,
+                        );
                     }
 
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
                         let elapsed = set_at.elapsed().as_secs_f32();
                         let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
-                        let win_size = window.inner_size();
+                        let draw_list = ui.get_foreground_draw_list();
                         let padding = 10.0_f32;
-                        let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
-                        if let Some(_win) = ui
-                            .window("##status_toast")
-                            .position(
-                                [padding, win_size.height as f32 - padding],
-                                imgui::Condition::Always,
-                            )
-                            .position_pivot([0.0, 1.0])
-                            .bg_alpha(alpha * 0.75)
-                            .no_decoration()
-                            .no_inputs()
-                            .movable(false)
-                            .no_nav()
-                            .focus_on_appearing(false)
-                            .always_auto_resize(true)
-                            .begin()
-                        {
-                            ui.text_colored([1.0, 1.0, 1.0, alpha], msg.as_str());
-                        }
+                        let inner_pad_x = 8.0_f32;
+                        let inner_pad_y = 6.0_f32;
+                        let text_size = ui.calc_text_size(msg);
+                        let box_w = text_size[0] + inner_pad_x * 2.0;
+                        let box_h = text_size[1] + inner_pad_y * 2.0;
+                        let box_min = [padding, ui_height - padding - box_h];
+                        let box_max = [padding + box_w, ui_height - padding];
+                        draw_list
+                            .add_rect(box_min, box_max, [0.0, 0.0, 0.0, alpha * 0.75])
+                            .filled(true)
+                            .build();
+                        draw_list.add_text(
+                            [box_min[0] + inner_pad_x, box_min[1] + inner_pad_y],
+                            [1.0, 1.0, 1.0, alpha],
+                            msg.as_str(),
+                        );
                     }
 
                     // Draw drag-zoom selection rectangle.
                     if let Some(start) = self.drag_zoom_start {
-                        let current = self.drag_zoom_current;
+                        let current =
+                            Self::constrain_drag_to_window_aspect(start, self.drag_zoom_current, self.size);
+                        let start_ui = (start.0 * to_ui, start.1 * to_ui);
+                        let current_ui = (current.0 * to_ui, current.1 * to_ui);
                         // ImGui expects min/max corners; normalize in case of up/left drags.
-                        let min_x = start.0.min(current.0);
-                        let max_x = start.0.max(current.0);
-                        let min_y = start.1.min(current.1);
-                        let max_y = start.1.max(current.1);
+                        let min_x = start_ui.0.min(current_ui.0);
+                        let max_x = start_ui.0.max(current_ui.0);
+                        let min_y = start_ui.1.min(current_ui.1);
+                        let max_y = start_ui.1.max(current_ui.1);
                         let draw_list = ui.get_foreground_draw_list();
                         // Semi-transparent yellow fill.
                         draw_list
@@ -1695,9 +1707,8 @@ impl AppState {
 
                     // Draw the "waiting for drop" overlay in the centre of the window.
                     if self.waiting_for_drop && !self.hovering_file {
-                        let win_size = window.inner_size();
-                        let cx = win_size.width as f32 / 2.0;
-                        let cy = win_size.height as f32 / 2.0;
+                        let cx = ui_width / 2.0;
+                        let cy = ui_height / 2.0;
                         let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([20.0, 16.0]));
                         if let Some(_win) = ui
                             .window("##drop_hint")
@@ -1721,11 +1732,10 @@ impl AppState {
 
                     // Show left/right drop-zone panels during file hover (or hover + waiting).
                     if self.hovering_file || (self.waiting_for_drop && !self.pending_drop_paths.is_empty()) {
-                        let win_size = window.inner_size();
-                        let w = win_size.width as f32;
-                        let h = win_size.height as f32;
+                        let w = ui_width;
+                        let h = ui_height;
                         let half = w / 2.0;
-                        let cx = self.mouse_position.0;
+                        let cx = self.mouse_position.0 * to_ui;
                         let over_left = cx < half;
 
                         let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([12.0, 10.0]));
@@ -2393,6 +2403,11 @@ impl AppState {
         } = event
         {
             self.surface_scale = scale_factor.ceil() as u32;
+            self.imgui_context.io_mut().font_global_scale = if *scale_factor > 0.0 {
+                1.0 / *scale_factor as f32
+            } else {
+                1.0
+            };
             self.resize(**new_inner_size);
         }
 
@@ -2488,6 +2503,9 @@ impl AppState {
                 VirtualKeyCode::I => {
                     self.request_screenshot();
                 }
+                VirtualKeyCode::U => {
+                    self.save_combined_screenshot();
+                }
                 VirtualKeyCode::Key1 => {
                     self.toggle_image_source(true);
                 }
@@ -2538,7 +2556,8 @@ impl AppState {
                 }
                 winit::event::ElementState::Released => {
                     if let Some(start) = self.drag_zoom_start.take() {
-                        let current = self.drag_zoom_current;
+                        let current =
+                            Self::constrain_drag_to_window_aspect(start, self.drag_zoom_current, self.size);
                         let dx = (current.0 - start.0).abs();
                         let dy = (current.1 - start.1).abs();
                         if dx > MIN_DRAG_ZOOM_DISTANCE_PX || dy > MIN_DRAG_ZOOM_DISTANCE_PX {
@@ -2786,6 +2805,40 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
+    /// Constrain drag end-point so the selection box keeps the window aspect ratio.
+    fn constrain_drag_to_window_aspect(
+        start: (f32, f32),
+        end: (f32, f32),
+        window_size: winit::dpi::PhysicalSize<u32>,
+    ) -> (f32, f32) {
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let abs_dx = dx.abs();
+        let abs_dy = dy.abs();
+        if abs_dx <= f32::EPSILON && abs_dy <= f32::EPSILON {
+            return end;
+        }
+
+        let aspect = window_size.width as f32 / window_size.height.max(1) as f32;
+        let sign_x = if dx < 0.0 { -1.0 } else { 1.0 };
+        let sign_y = if dy < 0.0 { -1.0 } else { 1.0 };
+
+        let (new_abs_dx, new_abs_dy) = if abs_dy <= f32::EPSILON {
+            (abs_dx, abs_dx / aspect)
+        } else if abs_dx <= f32::EPSILON {
+            (abs_dy * aspect, abs_dy)
+        } else if abs_dx / abs_dy > aspect {
+            (abs_dx, abs_dx / aspect)
+        } else {
+            (abs_dy * aspect, abs_dy)
+        };
+
+        (
+            (start.0 + sign_x * new_abs_dx).clamp(0.0, window_size.width as f32),
+            (start.1 + sign_y * new_abs_dy).clamp(0.0, window_size.height as f32),
+        )
+    }
+
     /// Apply a zoom that fits the drag rectangle defined by two screen-space positions.
     fn apply_drag_zoom(&mut self, start: (f32, f32), end: (f32, f32)) {
         let (render_width, render_height) = self.compute_render_dimensions();
@@ -2857,6 +2910,77 @@ impl AppState {
         self.screenshot_requested = true;
         self.status_message = Some(("Saving screenshot...".to_string(), Instant::now()));
     }
+
+    /// Save a combined image with all available sources (left, right, and optionally
+    /// FLIP diff) stitched side-by-side into a single PNG file.
+    pub fn save_combined_screenshot(&mut self) {
+        let player = self.player.read();
+        let (left_index, right_index) = player.current_images();
+
+        let left = player.get_current_frame_image_data(left_index, true);
+        let right = if self.single_image_mode {
+            None
+        } else {
+            player.get_current_frame_image_data(right_index, false)
+        };
+        let flip_diff = if self.show_flip_diff && !self.single_image_mode {
+            player.get_flip_diff_raw_data(left_index, right_index)
+        } else {
+            None
+        };
+        drop(player);
+
+        let mut panels: Vec<(Vec<u8>, u32, u32)> = Vec::new();
+        if let Some(l) = left {
+            panels.push(l);
+        }
+        if let Some(r) = right {
+            panels.push(r);
+        }
+        if let Some(d) = flip_diff {
+            panels.push(d);
+        }
+
+        if panels.is_empty() {
+            self.status_message = Some(("No images available for combined screenshot.".to_string(), Instant::now()));
+            return;
+        }
+
+        let (combined_pixels, combined_width, combined_height) = stitch_images_side_by_side(&panels);
+        let path = generate_output_filename("combined_screenshot", "png");
+        match image::save_buffer(&path, &combined_pixels, combined_width, combined_height, image::ColorType::Rgba8) {
+            Ok(_) => {
+                info!("Combined screenshot saved to {}", path);
+                self.status_message = Some((format!("Combined screenshot saved: {}", path), Instant::now()));
+            }
+            Err(e) => {
+                warn!("Failed to save combined screenshot: {}", e);
+                self.status_message = Some((format!("Failed to save combined screenshot: {}", e), Instant::now()));
+            }
+        }
+    }
+}
+
+/// Stitch multiple RGBA images side-by-side into a single image.
+/// Each element is `(pixels, width, height)`. The output height equals the
+/// tallest input; shorter panels are padded with transparent black rows at
+/// the bottom.
+fn stitch_images_side_by_side(panels: &[(Vec<u8>, u32, u32)]) -> (Vec<u8>, u32, u32) {
+    let total_width: u32 = panels.iter().map(|(_, w, _)| w).sum();
+    let max_height: u32 = panels.iter().map(|(_, _, h)| *h).max().unwrap_or(0);
+    let mut combined = vec![0u8; (total_width * max_height * 4) as usize];
+    let mut x_offset = 0u32;
+    for (data, width, height) in panels {
+        for row in 0..*height {
+            let src_start = (row * width * 4) as usize;
+            let src_end = src_start + (width * 4) as usize;
+            let dst_start = (row * total_width * 4 + x_offset * 4) as usize;
+            combined[dst_start..dst_start + (width * 4) as usize]
+                .copy_from_slice(&data[src_start..src_end]);
+        }
+        x_offset += width;
+    }
+    (combined, total_width, max_height)
 }
 
 /// Generate a timestamped output file path in the current directory.
@@ -2870,7 +2994,7 @@ fn generate_output_filename(prefix: &str, extension: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::generate_output_filename;
+    use super::{generate_output_filename, stitch_images_side_by_side};
 
     #[test]
     fn test_generate_output_filename_format() {
@@ -2958,6 +3082,51 @@ mod tests {
         }
 
         assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    }
+
+    /// Verifies that `stitch_images_side_by_side` places two 1×1 panels next to each other.
+    #[test]
+    fn test_stitch_two_1x1_images() {
+        // Panel 1: a single red pixel
+        let red: Vec<u8> = vec![255, 0, 0, 255];
+        // Panel 2: a single blue pixel
+        let blue: Vec<u8> = vec![0, 0, 255, 255];
+        let panels = vec![(red.clone(), 1u32, 1u32), (blue.clone(), 1u32, 1u32)];
+        let (combined, width, height) = stitch_images_side_by_side(&panels);
+        assert_eq!(width, 2, "combined width should be 2");
+        assert_eq!(height, 1, "combined height should be 1");
+        assert_eq!(&combined[0..4], &red[..], "first pixel should be red");
+        assert_eq!(&combined[4..8], &blue[..], "second pixel should be blue");
+    }
+
+    /// Verifies that `stitch_images_side_by_side` pads shorter panels with transparent rows.
+    #[test]
+    fn test_stitch_images_height_padding() {
+        // Panel 1: 1×2 (green column)
+        let green_top: Vec<u8> = vec![0, 255, 0, 255, 0, 255, 0, 255]; // 2 rows
+        // Panel 2: 1×1 (red pixel — shorter than panel 1)
+        let red: Vec<u8> = vec![255, 0, 0, 255];
+        let panels = vec![(green_top, 1u32, 2u32), (red, 1u32, 1u32)];
+        let (combined, width, height) = stitch_images_side_by_side(&panels);
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+        // Row 0: green | red
+        assert_eq!(&combined[0..4], &[0, 255, 0, 255], "row0 col0 should be green");
+        assert_eq!(&combined[4..8], &[255, 0, 0, 255], "row0 col1 should be red");
+        // Row 1: green | transparent (zero-initialised)
+        assert_eq!(&combined[8..12], &[0, 255, 0, 255], "row1 col0 should be green");
+        assert_eq!(&combined[12..16], &[0, 0, 0, 0], "row1 col1 should be transparent padding");
+    }
+
+    /// Verifies that `stitch_images_side_by_side` with a single panel is a no-op copy.
+    #[test]
+    fn test_stitch_single_panel() {
+        let pixels: Vec<u8> = (0..16).collect(); // 2×2 RGBA
+        let panels = vec![(pixels.clone(), 2u32, 2u32)];
+        let (combined, width, height) = stitch_images_side_by_side(&panels);
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+        assert_eq!(combined, pixels);
     }
 
     /// Tests for the drag-and-drop path loading helper used by reload_from_dropped_paths.
