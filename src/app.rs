@@ -1675,17 +1675,24 @@ impl AppState {
                     // Draw drag-zoom selection rectangle.
                     if let Some(start) = self.drag_zoom_start {
                         let current = self.drag_zoom_current;
+                        // ImGui expects min/max corners; normalize in case of up/left drags.
+                        let min_x = start.0.min(current.0);
+                        let max_x = start.0.max(current.0);
+                        let min_y = start.1.min(current.1);
+                        let max_y = start.1.max(current.1);
                         let draw_list = ui.get_foreground_draw_list();
                         // Semi-transparent yellow fill.
                         draw_list
-                            .add_rect([start.0, start.1], [current.0, current.1], [1.0, 1.0, 0.0, 0.15])
+                            .add_rect([min_x, min_y], [max_x, max_y], [1.0, 1.0, 0.0, 0.15])
                             .filled(true)
                             .build();
                         // Solid yellow outline.
                         draw_list
-                            .add_rect([start.0, start.1], [current.0, current.1], [1.0, 1.0, 0.0, 0.9])
+                            .add_rect([min_x, min_y], [max_x, max_y], [1.0, 1.0, 0.0, 0.9])
                             .thickness(1.5)
                             .build();
+                    }
+
                     // Draw the "waiting for drop" overlay in the centre of the window.
                     if self.waiting_for_drop && !self.hovering_file {
                         let win_size = window.inner_size();
