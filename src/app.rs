@@ -21,7 +21,9 @@ use winit::window::Window as WinitWindow;
 
 const APP_TITLE: &str = "Image Comparison Player";
 const MAX_ZOOM_LEVEL: f32 = 10.0;
-const MIN_DRAG_ZOOM_DISTANCE_PX: f32 = 10.0;
+/// Minimum drag distance (in screen pixels) to commit a drag action (zoom or marker creation).
+const MIN_DRAG_DISTANCE_PX: f32 = 10.0;
+const MIN_DRAG_ZOOM_DISTANCE_PX: f32 = MIN_DRAG_DISTANCE_PX;
 const MIN_DRAG_ZOOM_UV_SIZE: f32 = 0.01;
 const MIN_PEEK_ZOOM_FACTOR: f32 = 1.0;
 const MAX_PEEK_ZOOM_FACTOR: f32 = 16.0;
@@ -88,6 +90,158 @@ impl ComparisonMode {
             ComparisonMode::Overlay => "Alpha Overlay",
             ComparisonMode::AbsDiff => "Abs Diff",
         }
+    }
+}
+
+/// A single rectangular marker anchored in image UV space [0, 1].
+#[derive(Clone, Debug, PartialEq)]
+struct Marker {
+    id: usize,
+    /// UV x of the left edge.
+    x1: f32,
+    /// UV y of the top edge.
+    y1: f32,
+    /// UV x of the right edge.
+    x2: f32,
+    /// UV y of the bottom edge.
+    y2: f32,
+    /// Optional text annotation shown near the marker.
+    label: String,
+    /// RGBA display colour.
+    color: [f32; 4],
+}
+
+/// Manages a collection of rectangular marker overlays that can be drawn on top
+/// of the image and optionally included in screenshots.
+struct MarkerOverlay {
+    markers: Vec<Marker>,
+    next_id: usize,
+    /// Whether markers are globally visible (shown/hidden with M key).
+    visible: bool,
+    /// Whether the marker editor window is open (toggled with N key).
+    is_editor_open: bool,
+    /// When true the next left-click-drag on the image creates a new marker.
+    create_mode: bool,
+}
+
+impl MarkerOverlay {
+    fn new() -> Self {
+        Self {
+            markers: Vec::new(),
+            next_id: 0,
+            visible: true,
+            is_editor_open: false,
+            create_mode: false,
+        }
+    }
+
+    /// Add a new marker at the given image UV coordinates.
+    /// Coordinates are normalised (min/max) before storing.
+    fn add_marker(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
+        const COLORS: [[f32; 4]; 5] = [
+            [1.0, 0.27, 0.27, 1.0], // red
+            [1.0, 0.82, 0.0, 1.0],  // yellow
+            [0.0, 0.78, 1.0, 1.0],  // cyan
+            [0.27, 1.0, 0.27, 1.0], // green
+            [0.78, 0.27, 1.0, 1.0], // purple
+        ];
+        let color = COLORS[self.next_id % COLORS.len()];
+        let id = self.next_id;
+        self.next_id += 1;
+        self.markers.push(Marker {
+            id,
+            x1: x1.min(x2),
+            y1: y1.min(y2),
+            x2: x1.max(x2),
+            y2: y1.max(y2),
+            label: String::new(),
+            color,
+        });
+    }
+
+    /// Remove the marker with the given ID.
+    fn delete_marker(&mut self, id: usize) {
+        self.markers.retain(|m| m.id != id);
+    }
+
+    /// Draw the marker editor window.  Only visible when `is_editor_open` is true.
+    fn draw_editor(&mut self, ui: &Ui) {
+        if !self.is_editor_open {
+            return;
+        }
+        let mut is_open = self.is_editor_open;
+        ui.window("Markers")
+            .size([340.0, 300.0], Condition::FirstUseEver)
+            .position([10.0, 60.0], Condition::FirstUseEver)
+            .resizable(true)
+            .opened(&mut is_open)
+            .build(|| {
+                let mut vis = self.visible;
+                if ui.checkbox("Show [M]", &mut vis) {
+                    self.visible = vis;
+                }
+                ui.same_line();
+                let create_label = if self.create_mode { "Cancel" } else { "Add Marker" };
+                if ui.button(create_label) {
+                    self.create_mode = !self.create_mode;
+                }
+
+                if self.create_mode {
+                    ui.text_colored([1.0, 1.0, 0.3, 1.0], "Drag on image to draw marker");
+                } else {
+                    ui.dummy([0.0, ui.text_line_height()]);
+                }
+
+                ui.separator();
+
+                if self.markers.is_empty() {
+                    ui.text_disabled(
+                        "No markers yet. Click \"Add Marker\" and drag on the image.",
+                    );
+                    return;
+                }
+
+                let swatch_size = 14.0_f32;
+                let mut to_delete: Option<usize> = None;
+
+                for marker in &mut self.markers {
+                    // Small colour swatch via the window draw list.
+                    {
+                        let dl = ui.get_window_draw_list();
+                        let wp = ui.window_pos();
+                        let cp = ui.cursor_pos();
+                        let sx = wp[0] + cp[0];
+                        let sy = wp[1] + cp[1];
+                        dl.add_rect([sx, sy], [sx + swatch_size, sy + swatch_size], marker.color)
+                            .filled(true)
+                            .build();
+                        dl.add_rect(
+                            [sx, sy],
+                            [sx + swatch_size, sy + swatch_size],
+                            [1.0, 1.0, 1.0, 0.3],
+                        )
+                        .build();
+                    }
+                    ui.dummy([swatch_size + 2.0, swatch_size]);
+                    ui.same_line();
+
+                    // Editable label.
+                    ui.set_next_item_width(165.0);
+                    ui.input_text(format!("##lbl_{}", marker.id), &mut marker.label)
+                        .build();
+
+                    ui.same_line();
+
+                    if ui.small_button(format!("Del##del_{}", marker.id)) {
+                        to_delete = Some(marker.id);
+                    }
+                }
+
+                if let Some(id) = to_delete {
+                    self.delete_marker(id);
+                }
+            });
+        self.is_editor_open = is_open;
     }
 }
 
@@ -696,7 +850,7 @@ impl HelpOverlay {
             return;
         }
         ui.window("Help - Keyboard & Mouse Controls")
-            .size([420.0, 380.0], Condition::FirstUseEver)
+            .size([420.0, 410.0], Condition::FirstUseEver)
             .position([60.0, 60.0], Condition::FirstUseEver)
             .resizable(true)
             .opened(&mut self.is_open)
@@ -737,6 +891,8 @@ impl HelpOverlay {
                 ui.text("  O              Toggle HUD (frame/speed/zoom/mode)");
                 ui.text("  C              Toggle cache debug window");
                 ui.text("  V              Toggle pixel info window");
+                ui.text("  N              Toggle marker editor");
+                ui.text("  M              Toggle marker visibility");
                 ui.dummy([0.0, 4.0]);
 
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
@@ -930,6 +1086,11 @@ pub struct AppState {
     peek_zoom_active: bool,
     peek_zoom_factor: f32,
     peek_zoom_radius: f32,
+    marker_overlay: MarkerOverlay,
+    /// Start position (screen px) of an in-progress marker creation drag.
+    marker_drag_start: Option<(f32, f32)>,
+    /// Current end position (screen px) of an in-progress marker creation drag.
+    marker_drag_current: (f32, f32),
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1437,6 +1598,9 @@ impl AppState {
             peek_zoom_active: false,
             peek_zoom_factor,
             peek_zoom_radius: 100.0,
+            marker_overlay: MarkerOverlay::new(),
+            marker_drag_start: None,
+            marker_drag_current: (0.0, 0.0),
         })
     }
 
@@ -1653,6 +1817,9 @@ impl AppState {
             || self.hovering_file
             || self.show_hud
             || self.drag_zoom_start.is_some()
+            || self.marker_overlay.is_editor_open
+            || self.marker_drag_start.is_some()
+            || (self.marker_overlay.visible && !self.marker_overlay.markers.is_empty())
             || (self.comparison_mode != ComparisonMode::None && !self.single_image_mode)
         {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
@@ -1836,6 +2003,85 @@ impl AppState {
                             .thickness(1.5)
                             .build();
                     }
+
+                    // Draw marker creation preview while the user is dragging.
+                    if let Some(start) = self.marker_drag_start {
+                        let current = self.marker_drag_current;
+                        let min_x = start.0.min(current.0) * to_ui;
+                        let min_y = start.1.min(current.1) * to_ui;
+                        let max_x = start.0.max(current.0) * to_ui;
+                        let max_y = start.1.max(current.1) * to_ui;
+                        let draw_list = ui.get_foreground_draw_list();
+                        draw_list
+                            .add_rect([min_x, min_y], [max_x, max_y], [1.0, 0.5, 0.0, 0.2])
+                            .filled(true)
+                            .build();
+                        draw_list
+                            .add_rect([min_x, min_y], [max_x, max_y], [1.0, 0.5, 0.0, 0.9])
+                            .thickness(1.5)
+                            .build();
+                    }
+
+                    // Draw visible marker overlays over the image.
+                    if self.marker_overlay.visible && !self.marker_overlay.markers.is_empty() {
+                        let x_off = (window_size.width as f32 - render_width) / 2.0;
+                        let y_off = (window_size.height as f32 - render_height) / 2.0;
+                        let zoom_cx = self.fixed_zoom_center.0 + self.zoom_center_offset.0;
+                        let zoom_cy = self.fixed_zoom_center.1 + self.zoom_center_offset.1;
+                        let zoom = self.zoom_level;
+
+                        // Convert image UV [0,1] → screen px → UI px.
+                        let img_to_ui = |uv_x: f32, uv_y: f32| -> (f32, f32) {
+                            let sx = zoom_cx + (uv_x - zoom_cx) * zoom;
+                            let sy = zoom_cy + (uv_y - zoom_cy) * zoom;
+                            let px = (x_off + sx * render_width) * to_ui;
+                            let py = (y_off + sy * render_height) * to_ui;
+                            (px, py)
+                        };
+
+                        let draw_list = ui.get_foreground_draw_list();
+                        for marker in &self.marker_overlay.markers {
+                            let (sx1, sy1) = img_to_ui(marker.x1, marker.y1);
+                            let (sx2, sy2) = img_to_ui(marker.x2, marker.y2);
+
+                            // Semi-transparent fill.
+                            let fill = [
+                                marker.color[0],
+                                marker.color[1],
+                                marker.color[2],
+                                0.15,
+                            ];
+                            draw_list
+                                .add_rect([sx1, sy1], [sx2, sy2], fill)
+                                .filled(true)
+                                .build();
+
+                            // Solid outline.
+                            draw_list
+                                .add_rect([sx1, sy1], [sx2, sy2], marker.color)
+                                .thickness(2.0)
+                                .build();
+
+                            // Label text above the marker rectangle (if any).
+                            if !marker.label.is_empty() {
+                                let text_size = ui.calc_text_size(&marker.label);
+                                let lx = sx1;
+                                let ly = (sy1 - text_size[1] - 4.0).max(0.0);
+                                draw_list
+                                    .add_rect(
+                                        [lx - 2.0, ly],
+                                        [lx + text_size[0] + 4.0, ly + text_size[1] + 2.0],
+                                        [0.0, 0.0, 0.0, 0.70],
+                                    )
+                                    .filled(true)
+                                    .build();
+                                draw_list.add_text([lx, ly], marker.color, &marker.label);
+                            }
+                        }
+                    }
+
+                    // Draw marker editor window.
+                    self.marker_overlay.draw_editor(ui);
 
                     // Draw the "waiting for drop" overlay in the centre of the window.
                     if self.waiting_for_drop && !self.hovering_file {
@@ -2559,6 +2805,9 @@ impl AppState {
                     (position.x as f32, position.y as f32),
                 );
             }
+            if self.marker_drag_start.is_some() {
+                self.marker_drag_current = (position.x as f32, position.y as f32);
+            }
         }
 
         if let winit::event::Event::WindowEvent {
@@ -2679,6 +2928,18 @@ impl AppState {
                 VirtualKeyCode::O => {
                     self.show_hud = !self.show_hud;
                 }
+                VirtualKeyCode::M => {
+                    self.marker_overlay.visible = !self.marker_overlay.visible;
+                    let msg = if self.marker_overlay.visible {
+                        "Markers: visible"
+                    } else {
+                        "Markers: hidden"
+                    };
+                    self.status_message = Some((msg.to_string(), Instant::now()));
+                }
+                VirtualKeyCode::N => {
+                    self.marker_overlay.is_editor_open = !self.marker_overlay.is_editor_open;
+                }
                 VirtualKeyCode::Z => {
                     self.peek_zoom_active = true;
                 }
@@ -2703,11 +2964,43 @@ impl AppState {
                 winit::event::ElementState::Pressed => {
                     if !self.imgui_context.io().want_capture_mouse {
                         let start = self.clamp_to_render_rect(self.mouse_position);
-                        self.drag_zoom_start = Some(start);
-                        self.drag_zoom_current = start;
+                        if self.marker_overlay.create_mode {
+                            self.marker_drag_start = Some(start);
+                            self.marker_drag_current = start;
+                        } else {
+                            self.drag_zoom_start = Some(start);
+                            self.drag_zoom_current = start;
+                        }
                     }
                 }
                 winit::event::ElementState::Released => {
+                    // Finish a marker creation drag.
+                    if let Some(start) = self.marker_drag_start.take() {
+                        let current = self.marker_drag_current;
+                        let dx = (current.0 - start.0).abs();
+                        let dy = (current.1 - start.1).abs();
+                        if dx > MIN_DRAG_DISTANCE_PX || dy > MIN_DRAG_DISTANCE_PX {
+                            // Convert screen px → image UV using current zoom/pan state.
+                            let (x_off, y_off, rw, rh) = self.compute_render_rect();
+                            let zoom_cx =
+                                self.fixed_zoom_center.0 + self.zoom_center_offset.0;
+                            let zoom_cy =
+                                self.fixed_zoom_center.1 + self.zoom_center_offset.1;
+                            let zoom = self.zoom_level;
+                            let to_uv = |sx: f32, sy: f32| -> (f32, f32) {
+                                let suv_x = (sx - x_off) / rw.max(1.0);
+                                let suv_y = (sy - y_off) / rh.max(1.0);
+                                let iuv_x = zoom_cx + (suv_x - zoom_cx) / zoom;
+                                let iuv_y = zoom_cy + (suv_y - zoom_cy) / zoom;
+                                (iuv_x.clamp(0.0, 1.0), iuv_y.clamp(0.0, 1.0))
+                            };
+                            let (u1, v1) = to_uv(start.0, start.1);
+                            let (u2, v2) = to_uv(current.0, current.1);
+                            self.marker_overlay.add_marker(u1, v1, u2, v2);
+                            self.marker_overlay.create_mode = false;
+                        }
+                    }
+                    // Finish a drag-zoom.
                     if let Some(start) = self.drag_zoom_start.take() {
                         let current = self.constrain_drag_to_window_aspect(start, self.drag_zoom_current);
                         let dx = (current.0 - start.0).abs();
@@ -3196,7 +3489,7 @@ fn generate_output_filename(prefix: &str, extension: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_output_filename, stitch_images_side_by_side};
+    use super::{generate_output_filename, stitch_images_side_by_side, MarkerOverlay};
 
     #[test]
     fn test_generate_output_filename_format() {
@@ -3425,5 +3718,120 @@ mod tests {
             assert_eq!(count, 0);
             assert!(imgs.is_empty());
         }
+    }
+
+    // ── MarkerOverlay unit tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_marker_overlay_starts_empty() {
+        let overlay = MarkerOverlay::new();
+        assert!(overlay.markers.is_empty());
+        assert!(overlay.visible);
+        assert!(!overlay.is_editor_open);
+        assert!(!overlay.create_mode);
+    }
+
+    #[test]
+    fn test_add_marker_stores_normalised_coords() {
+        let mut overlay = MarkerOverlay::new();
+        // Provide coordinates in "wrong" order; add_marker should normalise them.
+        overlay.add_marker(0.8, 0.7, 0.2, 0.1);
+        assert_eq!(overlay.markers.len(), 1);
+        let m = &overlay.markers[0];
+        assert_eq!(m.x1, 0.2, "x1 should be min");
+        assert_eq!(m.y1, 0.1, "y1 should be min");
+        assert_eq!(m.x2, 0.8, "x2 should be max");
+        assert_eq!(m.y2, 0.7, "y2 should be max");
+    }
+
+    #[test]
+    fn test_add_marker_already_normalised() {
+        let mut overlay = MarkerOverlay::new();
+        overlay.add_marker(0.1, 0.2, 0.9, 0.8);
+        let m = &overlay.markers[0];
+        assert_eq!(m.x1, 0.1);
+        assert_eq!(m.y1, 0.2);
+        assert_eq!(m.x2, 0.9);
+        assert_eq!(m.y2, 0.8);
+    }
+
+    #[test]
+    fn test_add_marker_assigns_incrementing_ids() {
+        let mut overlay = MarkerOverlay::new();
+        overlay.add_marker(0.0, 0.0, 0.5, 0.5);
+        overlay.add_marker(0.1, 0.1, 0.6, 0.6);
+        overlay.add_marker(0.2, 0.2, 0.7, 0.7);
+        assert_eq!(overlay.markers[0].id, 0);
+        assert_eq!(overlay.markers[1].id, 1);
+        assert_eq!(overlay.markers[2].id, 2);
+    }
+
+    #[test]
+    fn test_add_marker_cycles_colors() {
+        let mut overlay = MarkerOverlay::new();
+        for _ in 0..7 {
+            overlay.add_marker(0.0, 0.0, 1.0, 1.0);
+        }
+        // Colors cycle through 5 entries; markers 0 and 5 should share a color.
+        assert_eq!(overlay.markers[0].color, overlay.markers[5].color);
+        // Adjacent markers 0 and 1 should differ.
+        assert_ne!(overlay.markers[0].color, overlay.markers[1].color);
+    }
+
+    #[test]
+    fn test_add_marker_default_label_is_empty() {
+        let mut overlay = MarkerOverlay::new();
+        overlay.add_marker(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(overlay.markers[0].label, "");
+    }
+
+    #[test]
+    fn test_delete_marker_removes_correct_one() {
+        let mut overlay = MarkerOverlay::new();
+        overlay.add_marker(0.0, 0.0, 0.3, 0.3); // id=0
+        overlay.add_marker(0.1, 0.1, 0.4, 0.4); // id=1
+        overlay.add_marker(0.2, 0.2, 0.5, 0.5); // id=2
+        overlay.delete_marker(1);
+        assert_eq!(overlay.markers.len(), 2);
+        assert!(overlay.markers.iter().all(|m| m.id != 1));
+        assert!(overlay.markers.iter().any(|m| m.id == 0));
+        assert!(overlay.markers.iter().any(|m| m.id == 2));
+    }
+
+    #[test]
+    fn test_delete_marker_nonexistent_id_is_noop() {
+        let mut overlay = MarkerOverlay::new();
+        overlay.add_marker(0.0, 0.0, 1.0, 1.0);
+        overlay.delete_marker(99);
+        assert_eq!(overlay.markers.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_all_markers() {
+        let mut overlay = MarkerOverlay::new();
+        overlay.add_marker(0.0, 0.0, 0.5, 0.5);
+        overlay.add_marker(0.5, 0.5, 1.0, 1.0);
+        overlay.delete_marker(0);
+        overlay.delete_marker(1);
+        assert!(overlay.markers.is_empty());
+    }
+
+    #[test]
+    fn test_marker_ids_after_delete_continue_incrementing() {
+        let mut overlay = MarkerOverlay::new();
+        overlay.add_marker(0.0, 0.0, 0.5, 0.5); // id=0
+        overlay.delete_marker(0);
+        overlay.add_marker(0.1, 0.1, 0.6, 0.6); // id=1 (next_id not reset)
+        assert_eq!(overlay.markers[0].id, 1);
+    }
+
+    #[test]
+    fn test_toggle_visibility() {
+        let mut overlay = MarkerOverlay::new();
+        assert!(overlay.visible);
+        overlay.visible = !overlay.visible;
+        assert!(!overlay.visible);
+        overlay.visible = !overlay.visible;
+        assert!(overlay.visible);
     }
 }
