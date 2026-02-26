@@ -2,6 +2,7 @@ use crate::image_loader;
 use crate::player::FlipStats;
 use crate::player::Player;
 use crate::player::PlayerConfig;
+use font8x8::UnicodeFonts;
 use imgui::Condition;
 use imgui::Ui;
 use log::{debug, info, warn};
@@ -2044,18 +2045,6 @@ impl AppState {
                             let (sx1, sy1) = img_to_ui(marker.x1, marker.y1);
                             let (sx2, sy2) = img_to_ui(marker.x2, marker.y2);
 
-                            // Semi-transparent fill.
-                            let fill = [
-                                marker.color[0],
-                                marker.color[1],
-                                marker.color[2],
-                                0.15,
-                            ];
-                            draw_list
-                                .add_rect([sx1, sy1], [sx2, sy2], fill)
-                                .filled(true)
-                                .build();
-
                             // Solid outline.
                             draw_list
                                 .add_rect([sx1, sy1], [sx2, sy2], marker.color)
@@ -2770,6 +2759,9 @@ impl AppState {
         window: &winit::window::Window,
         event: &winit::event::Event<T>,
     ) {
+        self.imgui_platform
+            .handle_event(self.imgui_context.io_mut(), window, event);
+
         if let winit::event::Event::WindowEvent {
             event: winit::event::WindowEvent::Resized(size),
             ..
@@ -2824,6 +2816,12 @@ impl AppState {
             ..
         } = event
         {
+            // While ImGui is capturing keyboard input, suppress global shortcuts.
+            if self.imgui_context.io().want_capture_keyboard
+                || self.imgui_context.io().want_text_input
+            {
+                return;
+            }
             match keycode {
                 VirtualKeyCode::Escape => {
                     self.esc_key_down = false;
@@ -2849,6 +2847,12 @@ impl AppState {
             ..
         } = event
         {
+            // While ImGui is capturing keyboard input, suppress global shortcuts.
+            if self.imgui_context.io().want_capture_keyboard
+                || self.imgui_context.io().want_text_input
+            {
+                return;
+            }
             match keycode {
                 VirtualKeyCode::Escape => {
                     if !self.esc_key_down {
@@ -3043,8 +3047,6 @@ impl AppState {
             self.hovering_file = false;
         }
 
-        self.imgui_platform
-            .handle_event(self.imgui_context.io_mut(), window, event);
         debug!("Event handled");
     }
 
@@ -3377,7 +3379,10 @@ impl AppState {
         let player = self.player.read();
         let (left_index, right_index) = player.current_images();
         match player.get_flip_diff_raw_data(left_index, right_index) {
-            Some((data, width, height)) => {
+            Some((mut data, width, height)) => {
+                if self.marker_overlay.visible && !self.marker_overlay.markers.is_empty() {
+                    draw_markers_on_image(&mut data, width, height, &self.marker_overlay.markers);
+                }
                 let path = generate_output_filename("flip_diff", "png");
                 match image::save_buffer(&path, &data, width, height, image::ColorType::Rgba8) {
                     Ok(_) => {
@@ -3436,6 +3441,12 @@ impl AppState {
             panels.push(d);
         }
 
+        if self.marker_overlay.visible && !self.marker_overlay.markers.is_empty() {
+            for (pixels, width, height) in &mut panels {
+                draw_markers_on_image(pixels, *width, *height, &self.marker_overlay.markers);
+            }
+        }
+
         if panels.is_empty() {
             self.status_message = Some(("No images available for combined screenshot.".to_string(), Instant::now()));
             return;
@@ -3478,6 +3489,115 @@ fn stitch_images_side_by_side(panels: &[(Vec<u8>, u32, u32)]) -> (Vec<u8>, u32, 
     (combined, total_width, max_height)
 }
 
+/// Draw marker outlines onto an RGBA image buffer in-place.
+fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[Marker]) {
+    fn put_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: [u8; 4]) {
+        if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+            return;
+        }
+        let idx = ((y as u32 * width + x as u32) * 4) as usize;
+        pixels[idx..idx + 4].copy_from_slice(&color);
+    }
+    fn fill_rect(
+        pixels: &mut [u8],
+        width: u32,
+        height: u32,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        color: [u8; 4],
+    ) {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                put_pixel(pixels, width, height, x, y, color);
+            }
+        }
+    }
+    fn draw_text(
+        pixels: &mut [u8],
+        width: u32,
+        height: u32,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+    ) {
+        let mut pen_x = x;
+        for ch in text.chars() {
+            if let Some(glyph) = font8x8::BASIC_FONTS.get(ch) {
+                for (row, bits) in glyph.iter().enumerate() {
+                    for col in 0..8_u8 {
+                        if ((bits >> col) & 1) != 0 {
+                            put_pixel(
+                                pixels,
+                                width,
+                                height,
+                                pen_x + col as i32,
+                                y + row as i32,
+                                color,
+                            );
+                        }
+                    }
+                }
+            }
+            pen_x += 8;
+        }
+    }
+
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    for marker in markers {
+        let color = [
+            (marker.color[0].clamp(0.0, 1.0) * 255.0) as u8,
+            (marker.color[1].clamp(0.0, 1.0) * 255.0) as u8,
+            (marker.color[2].clamp(0.0, 1.0) * 255.0) as u8,
+            255,
+        ];
+        let x1 = (marker.x1.clamp(0.0, 1.0) * (width.saturating_sub(1)) as f32).round() as i32;
+        let y1 = (marker.y1.clamp(0.0, 1.0) * (height.saturating_sub(1)) as f32).round() as i32;
+        let x2 = (marker.x2.clamp(0.0, 1.0) * (width.saturating_sub(1)) as f32).round() as i32;
+        let y2 = (marker.y2.clamp(0.0, 1.0) * (height.saturating_sub(1)) as f32).round() as i32;
+        let (left, right) = (x1.min(x2), x1.max(x2));
+        let (top, bottom) = (y1.min(y2), y1.max(y2));
+        let thickness = 2;
+
+        for t in 0..thickness {
+            let lt = left - t;
+            let rt = right + t;
+            let tt = top - t;
+            let bt = bottom + t;
+            for x in lt..=rt {
+                put_pixel(pixels, width, height, x, tt, color);
+                put_pixel(pixels, width, height, x, bt, color);
+            }
+            for y in tt..=bt {
+                put_pixel(pixels, width, height, lt, y, color);
+                put_pixel(pixels, width, height, rt, y, color);
+            }
+        }
+
+        if !marker.label.is_empty() {
+            let text_w = (marker.label.chars().count() as i32) * 8;
+            let tx = left.max(0);
+            let ty = (top - 11).max(0);
+            fill_rect(
+                pixels,
+                width,
+                height,
+                tx - 2,
+                ty - 1,
+                tx + text_w + 1,
+                (ty + 8).min(height as i32 - 1),
+                [0, 0, 0, 200],
+            );
+            draw_text(pixels, width, height, tx, ty, &marker.label, color);
+        }
+    }
+}
+
 /// Generate a timestamped output file path in the current directory.
 fn generate_output_filename(prefix: &str, extension: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3489,7 +3609,7 @@ fn generate_output_filename(prefix: &str, extension: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_output_filename, stitch_images_side_by_side, MarkerOverlay};
+    use super::{draw_markers_on_image, generate_output_filename, stitch_images_side_by_side, MarkerOverlay};
 
     #[test]
     fn test_generate_output_filename_format() {
@@ -3611,6 +3731,22 @@ mod tests {
         // Row 1: green | transparent (zero-initialised)
         assert_eq!(&combined[8..12], &[0, 255, 0, 255], "row1 col0 should be green");
         assert_eq!(&combined[12..16], &[0, 0, 0, 0], "row1 col1 should be transparent padding");
+    }
+
+    #[test]
+    fn test_draw_markers_on_image_draws_outline_only() {
+        let mut pixels = vec![0u8; 8 * 8 * 4];
+        let mut overlay = MarkerOverlay::new();
+        overlay.add_marker(0.25, 0.25, 0.75, 0.75);
+        draw_markers_on_image(&mut pixels, 8, 8, &overlay.markers);
+
+        // Interior should remain transparent.
+        let interior_idx = ((4 * 8 + 4) * 4) as usize;
+        assert_eq!(&pixels[interior_idx..interior_idx + 4], &[0, 0, 0, 0]);
+
+        // Top border should be non-zero.
+        let border_idx = ((2 * 8 + 3) * 4) as usize;
+        assert_ne!(&pixels[border_idx..border_idx + 4], &[0, 0, 0, 0]);
     }
 
     /// Verifies that `stitch_images_side_by_side` with a single panel is a no-op copy.
