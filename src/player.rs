@@ -70,21 +70,21 @@ impl RingBufferTextureCache {
     }
 
     /// Insert a texture into the cache. If the cache is at capacity, the frame farthest from
-    /// `current_frame` is evicted first. Returns any evicted textures so the caller can return
-    /// them to a reuse pool.
+    /// `current_frame` is evicted first. Returns any evicted (index, texture) pairs so the
+    /// caller can return the textures to a reuse pool and clean up associated data.
     fn insert(
         &self,
         index: usize,
         texture: Arc<wgpu::Texture>,
         current_frame: usize,
         frame_count: usize,
-    ) -> Vec<Arc<wgpu::Texture>> {
+    ) -> Vec<(usize, Arc<wgpu::Texture>)> {
         let mut entries = self.entries.write();
         let mut evicted = Vec::new();
 
         // Replace an existing entry without counting as an eviction.
         if let Some(old) = entries.insert(index, texture) {
-            evicted.push(old);
+            evicted.push((index, old));
             return evicted;
         }
 
@@ -94,7 +94,7 @@ impl RingBufferTextureCache {
             match select_eviction_candidate(&keys, current_frame, frame_count) {
                 Some(farthest) => {
                     if let Some(old) = entries.remove(&farthest) {
-                        evicted.push(old);
+                        evicted.push((farthest, old));
                         self.metrics.evictions.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -749,10 +749,15 @@ impl Player {
                     size,
                 );
 
-                // Insert into the ring-buffer cache; evicted textures go back to the reuse pool.
+                // Insert into the ring-buffer cache; evicted textures go back to the reuse pool
+                // and their corresponding histogram entries are also removed.
                 let evicted = cache.insert(index, texture, current_frame, frame_count);
-                for old_texture in evicted {
-                    texture_reuse_pool.lock().push(old_texture);
+                {
+                    let mut hist = histogram_cache.write();
+                    for (evicted_index, old_texture) in evicted {
+                        hist.remove(&(evicted_index, is_left));
+                        texture_reuse_pool.lock().push(old_texture);
+                    }
                 }
 
                 frame_changed.store(true, Ordering::Relaxed);
