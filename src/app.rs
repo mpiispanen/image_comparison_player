@@ -1698,13 +1698,19 @@ impl AppState {
                     if self.histogram_window.is_open {
                         let player = self.player.read();
                         let (left_index, right_index) = player.current_images();
-                        let hist_cache = player.histogram_cache.read();
-                        let left_hist = hist_cache.get(&(left_index, true));
-                        let right_hist = hist_cache.get(&(right_index, false));
+                        // Clone the histogram data while holding the read lock, then
+                        // drop the lock before calling into the UI drawing code to
+                        // reduce contention with writer threads.
+                        let (left_hist, right_hist) = {
+                            let hist_cache = player.histogram_cache.read();
+                            let left_hist = hist_cache.get(&(left_index, true)).cloned();
+                            let right_hist = hist_cache.get(&(right_index, false)).cloned();
+                            (left_hist, right_hist)
+                        };
                         self.histogram_window.draw(
                             ui,
-                            left_hist,
-                            right_hist,
+                            left_hist.as_ref(),
+                            right_hist.as_ref(),
                             self.single_image_mode,
                         );
                     }
