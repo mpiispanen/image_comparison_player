@@ -271,6 +271,7 @@ impl HistogramData {
         let mut b = [0u64; 256];
         let mut luma = [0u64; 256];
 
+        debug_assert_eq!(data.len() % 4, 0, "HistogramData::from_rgba8 expects data.len() to be a multiple of 4 (RGBA pixels)");
         for chunk in data.chunks_exact(4) {
             let rv = chunk[0] as usize;
             let gv = chunk[1] as usize;
