@@ -921,7 +921,20 @@ impl AppState {
             } else {
                 continue;
             };
+            if data.is_empty() {
+                return Err(format!(
+                    "Extra sequence {} contains no images; please provide at least one image",
+                    i + 3
+                ).into());
+            }
             extra_image_data.push(data);
+        }
+
+        // Extra sequences require sequence 2 to be present.
+        if !extra_image_data.is_empty() && single_image_mode {
+            return Err(
+                "Extra sequences (--dir3/--dir4) require sequence 2 (--dir2/--images2) to be provided".into(),
+            );
         }
         let active_sequence_count = if single_image_mode {
             1

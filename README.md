@@ -54,8 +54,8 @@ The application accepts the following command-line arguments:
 ```
 
 Sequence 1 (`--dir1` or `--images1`) is required.  
-Sequence 2 is optional; when omitted the app runs in single image mode.  
-Sequences 3 and 4 are optional; when at least one is provided the app enters multi-view mode.
+Sequence 2 (`--dir2` or `--images2`) enables comparison; when omitted the app runs in single image mode.  
+Sequences 3 and 4 are optional extensions: when sequence 2 is present, adding sequence 3 and/or 4 switches the app into multi-view mode (three or four synchronized panels). Providing sequences 3 or 4 without sequence 2 is an error.
 
 ### Multi-view example
 

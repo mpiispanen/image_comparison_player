@@ -890,6 +890,9 @@ impl Player {
         for extra_idx in 0..self.extra_frame_counts.len() {
             let seq_idx = extra_idx + 2;
             let fc = self.extra_frame_counts[extra_idx];
+            if fc == 0 {
+                continue; // skip empty sequences to avoid modulo-by-zero
+            }
             let cur = self.extra_current_frames[extra_idx].load(Ordering::Relaxed);
             self.ensure_texture_loaded_seq(cur, seq_idx);
             for i in 1..=self.config.preload_ahead {

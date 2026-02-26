@@ -226,6 +226,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             matches.get_many::<String>("images4").map(|vals| vals.cloned().collect());
         let extra_images = vec![extra_images_3, extra_images_4];
 
+        // Validate: extra sequences require sequence 2 to be present.
+        let has_extra = extra_dirs.iter().any(|d| d.is_some())
+            || extra_images.iter().any(|im| im.is_some());
+        let has_seq2 = dir2.is_some() || images2.as_ref().is_some_and(|v| !v.is_empty());
+        if has_extra && !has_seq2 {
+            return Err(
+                "--dir3/--images3 and --dir4/--images4 require --dir2 or --images2 to also be provided".into(),
+            );
+        }
+
         (dir1, dir2, images1, images2, extra_dirs, extra_images)
     };
 
