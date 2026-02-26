@@ -680,6 +680,7 @@ impl PixelInfoWindow {
         Self { is_open: false }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw(
         &self,
         ui: &Ui,
@@ -3498,6 +3499,7 @@ fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[
         let idx = ((y as u32 * width + x as u32) * 4) as usize;
         pixels[idx..idx + 4].copy_from_slice(&color);
     }
+    #[allow(clippy::too_many_arguments)]
     fn fill_rect(
         pixels: &mut [u8],
         width: u32,
