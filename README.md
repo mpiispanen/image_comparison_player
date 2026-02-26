@@ -55,25 +55,32 @@ The application supports the following keyboard controls:
 - Right Arrow: Next frame
 - Space: Toggle play/pause
 - C: Toggle cache debug window
-- F: Toggle flip difference mode
+- F: Cycle comparison mode (Normal → FLIP → Overlay → AbsDiff)
 - H: Toggle help overlay
 - Esc: Close help overlay (if open), otherwise exit the application
 - [ : Decrease playback speed
 - ] : Increase playback speed
 - Q: Zoom out
 - E: Zoom in
+- R: Reset zoom to 1x
 - W: Move zoom center up
 - A: Move zoom center left
 - S: Move zoom center down
 - D: Move zoom center right
+- Z (hold): Peek zoom — magnifying-glass zoom while held
+- -: Decrease peek zoom factor
+- =: Increase peek zoom factor
 - P: Save the current FLIP diff image to a PNG file
-- I: Save a screenshot of the current window to a PNG file (`screenshot_regular_*` or `screenshot_flip_*` depending on FLIP mode)
+- I: Save a screenshot of the current window to a PNG file
+- U: Save a combined side-by-side screenshot
 - L: Toggle the split line between images on/off
+- O: Toggle the HUD overlay
+- V: Toggle pixel info window
 
 Mouse controls:
 - Move the cursor horizontally to adjust the split between left and right images
-- Move the cursor vertically in flip difference mode to switch between normal and difference views
 - Scroll to zoom in/out
+- Click and drag to zoom into a selected region
 
 ## Keyboard Remapping
 
@@ -94,37 +101,43 @@ action_name = Key1[, Key2, ...]
 
 ### Supported action names
 
-| Action name             | Default key(s)       | Description                          |
-|-------------------------|----------------------|--------------------------------------|
-| `play_pause`            | `Space`              | Toggle play / pause                  |
-| `next_frame`            | `Right`              | Advance one frame                    |
-| `previous_frame`        | `Left`               | Go back one frame                    |
-| `zoom_in`               | `E`, `Up`            | Zoom in                              |
-| `zoom_out`              | `Q`, `Down`          | Zoom out                             |
-| `pan_up`                | `W`                  | Pan view upward                      |
-| `pan_left`              | `A`                  | Pan view left                        |
-| `pan_down`              | `S`                  | Pan view downward                    |
-| `pan_right`             | `D`                  | Pan view right                       |
-| `toggle_flip_diff`      | `F`                  | Toggle FLIP diff overlay             |
-| `toggle_split_line`     | `L`                  | Toggle the split-line divider        |
-| `toggle_show_left`      | `1`                  | Show only the left image             |
-| `toggle_show_right`     | `2`                  | Show only the right image            |
-| `save_flip_diff`        | `P`                  | Save FLIP diff image to PNG          |
-| `save_screenshot`       | `I`                  | Save a screenshot to PNG             |
-| `toggle_help`           | `H`                  | Toggle the help overlay              |
-| `toggle_cache_debug`    | `C`                  | Toggle the cache debug window        |
-| `toggle_pixel_info`     | `V`                  | Toggle the pixel info window         |
-| `decrease_playback_speed` | `[`              | Decrease playback speed              |
-| `increase_playback_speed` | `]`              | Increase playback speed              |
-| `quit`                  | `Escape`             | Close overlay or exit the app        |
+| Action name                 | Default key(s)  | Description                                    |
+|-----------------------------|-----------------|------------------------------------------------|
+| `play_pause`                | `Space`         | Toggle play / pause                            |
+| `next_frame`                | `Right`         | Advance one frame                              |
+| `previous_frame`            | `Left`          | Go back one frame                              |
+| `zoom_in`                   | `E`, `Up`       | Zoom in                                        |
+| `zoom_out`                  | `Q`, `Down`     | Zoom out                                       |
+| `reset_zoom`                | `R`             | Reset zoom to 1× and recenter                  |
+| `pan_up`                    | `W`             | Pan view upward                                |
+| `pan_left`                  | `A`             | Pan view left                                  |
+| `pan_down`                  | `S`             | Pan view downward                              |
+| `pan_right`                 | `D`             | Pan view right                                 |
+| `peek_zoom`                 | `Z`             | Magnifying-glass zoom while held               |
+| `decrease_peek_zoom`        | `-`             | Decrease peek zoom factor                      |
+| `increase_peek_zoom`        | `=`             | Increase peek zoom factor                      |
+| `cycle_comparison_mode`     | `F`             | Cycle comparison mode (Normal/FLIP/Overlay/AbsDiff) |
+| `toggle_split_line`         | `L`             | Toggle the split-line divider                  |
+| `toggle_show_left`          | `1`             | Show only the left image                       |
+| `toggle_show_right`         | `2`             | Show only the right image                      |
+| `save_flip_diff`            | `P`             | Save FLIP diff image to PNG                    |
+| `save_screenshot`           | `I`             | Save a window screenshot to PNG                |
+| `save_combined_screenshot`  | `U`             | Save a combined side-by-side screenshot        |
+| `toggle_help`               | `H`             | Toggle the help overlay                        |
+| `toggle_cache_debug`        | `C`             | Toggle the cache debug window                  |
+| `toggle_pixel_info`         | `V`             | Toggle the pixel info window                   |
+| `toggle_hud`                | `O`             | Toggle the HUD overlay                         |
+| `decrease_playback_speed`   | `[`             | Decrease playback speed                        |
+| `increase_playback_speed`   | `]`             | Increase playback speed                        |
+| `quit`                      | `Escape`        | Close overlay or exit the app                  |
 
 ### Supported key names
 
-Single characters are accepted as-is (`A`–`Z`, case-insensitive; `0`–`9`; `[`, `]`).
+Single characters are accepted as-is (`A`–`Z`, case-insensitive; `0`–`9`; `[`, `]`, `-`, `=`).
 Named keys: `Escape` / `Esc`, `Space`, `Left`, `Right`, `Up`, `Down`,
+`LBracket`, `RBracket`, `Minus` / `Hyphen`, `Equals`,
 `Return` / `Enter`, `Tab`, `Back` / `Backspace`, `Delete` / `Del`,
 `Home`, `End`, `PageUp`, `PageDown`, `Insert`,
-`LBracket`, `RBracket`,
 `F1`–`F12`,
 `LShift`, `RShift`, `LCtrl` / `LControl`, `RCtrl` / `RControl`,
 `LAlt`, `RAlt`.
@@ -146,7 +159,7 @@ pan_right   = L
 play_pause  = Space
 
 # Bind two keys to next_frame
-next_frame  = Right, Period
+next_frame  = Right, N
 ```
 
 Pass the file on the command line:

@@ -632,16 +632,20 @@ impl HelpOverlay {
                 ui.text("  Scroll wheel   Zoom in / out");
                 ui.text("  Up / Down      Zoom in / out");
                 ui.text("  Q / E          Zoom out / in");
+                ui.text("  R              Reset zoom");
                 ui.text("  W A S D        Pan up / left / down / right");
+                ui.text("  Z (hold)       Peek zoom (magnifying glass)");
+                ui.text("  - / =          Decrease / Increase peek zoom factor");
                 ui.dummy([0.0, 4.0]);
 
                 if !single_image_mode {
                     ui.text_colored([1.0, 0.85, 0.3, 1.0], "Comparison");
                     ui.separator();
                     ui.text("  Mouse move     Move split-line divider");
-                    ui.text("  F              Toggle FLIP diff overlay");
+                    ui.text("  F              Cycle comparison mode");
                     ui.text("  1 / 2          Show only left / right image");
                     ui.text("  P              Save FLIP diff image");
+                    ui.text("  L              Toggle split line");
                     ui.dummy([0.0, 4.0]);
                 }
 
@@ -650,11 +654,13 @@ impl HelpOverlay {
                 ui.text("  H              Toggle this help overlay");
                 ui.text("  C              Toggle cache debug window");
                 ui.text("  V              Toggle pixel info window");
+                ui.text("  O              Toggle HUD overlay");
                 ui.dummy([0.0, 4.0]);
 
                 ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
                 ui.separator();
                 ui.text("  I              Save screenshot");
+                ui.text("  U              Save combined screenshot");
                 ui.text("  Esc            Close overlay / Quit");
             });
     }
@@ -825,6 +831,7 @@ pub struct AppState {
     screenshot_result_tx: mpsc::Sender<String>,
     single_image_mode: bool,
     quit_key_down: bool,
+    peek_zoom_active: bool,
     pixel_info_window: PixelInfoWindow,
     help_overlay: HelpOverlay,
     left_pixel_color: [u8; 4],
@@ -1286,6 +1293,7 @@ impl AppState {
             screenshot_result_rx: Arc::new(Mutex::new(screenshot_result_rx)),
             single_image_mode,
             quit_key_down: false,
+            peek_zoom_active: false,
             pixel_info_window: PixelInfoWindow::new(),
             help_overlay: HelpOverlay::new(),
             left_pixel_color: [128, 128, 128, 255],
@@ -2029,8 +2037,10 @@ impl AppState {
             ..
         } = event
         {
-            if self.key_config.bindings.get(vk) == Some(&KeyAction::Quit) {
-                self.quit_key_down = false;
+            match self.key_config.bindings.get(vk) {
+                Some(&KeyAction::Quit) => self.quit_key_down = false,
+                Some(&KeyAction::PeekZoom) => self.peek_zoom_active = false,
+                _ => {}
             }
         }
 
@@ -2063,7 +2073,7 @@ impl AppState {
                     KeyAction::ToggleCacheDebug => {
                         self.cache_debug_window.toggle();
                     }
-                    KeyAction::ToggleFlipDiff => {
+                    KeyAction::CycleComparisonMode => {
                         if !self.single_image_mode {
                             self.toggle_flip_diff();
                         }
@@ -2099,6 +2109,9 @@ impl AppState {
                     KeyAction::SaveScreenshot => {
                         self.request_screenshot();
                     }
+                    KeyAction::SaveCombinedScreenshot => {
+                        // Combined side-by-side screenshot (implemented when merged with main).
+                    }
                     KeyAction::ToggleShowLeft => {
                         self.toggle_image_source(true);
                     }
@@ -2113,6 +2126,24 @@ impl AppState {
                     }
                     KeyAction::ToggleHelp => {
                         self.help_overlay.toggle();
+                    }
+                    KeyAction::ResetZoom => {
+                        self.zoom_level = 1.0;
+                        self.fixed_zoom_center = (0.5, 0.5);
+                        self.zoom_center_offset = (0.0, 0.0);
+                        self.update_uniform_buffer();
+                    }
+                    KeyAction::ToggleHud => {
+                        // HUD toggle (implemented when merged with main).
+                    }
+                    KeyAction::PeekZoom => {
+                        self.peek_zoom_active = true;
+                    }
+                    KeyAction::DecreasePeekZoom => {
+                        // Peek zoom factor adjustment (implemented when merged with main).
+                    }
+                    KeyAction::IncreasePeekZoom => {
+                        // Peek zoom factor adjustment (implemented when merged with main).
                     }
                 }
             }

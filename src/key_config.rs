@@ -15,17 +15,25 @@ pub enum KeyAction {
     PanLeft,
     PanDown,
     PanRight,
-    ToggleFlipDiff,
+    CycleComparisonMode,
     ToggleSplitLine,
     ToggleShowLeft,
     ToggleShowRight,
     SaveFlipDiff,
     SaveScreenshot,
+    SaveCombinedScreenshot,
     ToggleHelp,
     ToggleCacheDebug,
     TogglePixelInfo,
     DecreasePlaybackSpeed,
     IncreasePlaybackSpeed,
+    ResetZoom,
+    ToggleHud,
+    /// Hold-to-peek magnifying-glass zoom (Z key by default).
+    /// The action is active while the key is held and deactivates on key release.
+    PeekZoom,
+    DecreasePeekZoom,
+    IncreasePeekZoom,
     Quit,
 }
 
@@ -62,17 +70,23 @@ impl KeyConfig {
             (VirtualKeyCode::A, KeyAction::PanLeft),
             (VirtualKeyCode::S, KeyAction::PanDown),
             (VirtualKeyCode::D, KeyAction::PanRight),
-            (VirtualKeyCode::F, KeyAction::ToggleFlipDiff),
+            (VirtualKeyCode::F, KeyAction::CycleComparisonMode),
             (VirtualKeyCode::L, KeyAction::ToggleSplitLine),
             (VirtualKeyCode::Key1, KeyAction::ToggleShowLeft),
             (VirtualKeyCode::Key2, KeyAction::ToggleShowRight),
             (VirtualKeyCode::P, KeyAction::SaveFlipDiff),
             (VirtualKeyCode::I, KeyAction::SaveScreenshot),
+            (VirtualKeyCode::U, KeyAction::SaveCombinedScreenshot),
             (VirtualKeyCode::H, KeyAction::ToggleHelp),
             (VirtualKeyCode::C, KeyAction::ToggleCacheDebug),
             (VirtualKeyCode::V, KeyAction::TogglePixelInfo),
             (VirtualKeyCode::LBracket, KeyAction::DecreasePlaybackSpeed),
             (VirtualKeyCode::RBracket, KeyAction::IncreasePlaybackSpeed),
+            (VirtualKeyCode::R, KeyAction::ResetZoom),
+            (VirtualKeyCode::O, KeyAction::ToggleHud),
+            (VirtualKeyCode::Z, KeyAction::PeekZoom),
+            (VirtualKeyCode::Minus, KeyAction::DecreasePeekZoom),
+            (VirtualKeyCode::Equals, KeyAction::IncreasePeekZoom),
             (VirtualKeyCode::Escape, KeyAction::Quit),
         ]
     }
@@ -185,17 +199,23 @@ impl KeyConfig {
             "pan_left" => Some(KeyAction::PanLeft),
             "pan_down" => Some(KeyAction::PanDown),
             "pan_right" => Some(KeyAction::PanRight),
-            "toggle_flip_diff" => Some(KeyAction::ToggleFlipDiff),
+            "cycle_comparison_mode" => Some(KeyAction::CycleComparisonMode),
             "toggle_split_line" => Some(KeyAction::ToggleSplitLine),
             "toggle_show_left" => Some(KeyAction::ToggleShowLeft),
             "toggle_show_right" => Some(KeyAction::ToggleShowRight),
             "save_flip_diff" => Some(KeyAction::SaveFlipDiff),
             "save_screenshot" => Some(KeyAction::SaveScreenshot),
+            "save_combined_screenshot" => Some(KeyAction::SaveCombinedScreenshot),
             "toggle_help" => Some(KeyAction::ToggleHelp),
             "toggle_cache_debug" => Some(KeyAction::ToggleCacheDebug),
             "toggle_pixel_info" => Some(KeyAction::TogglePixelInfo),
             "decrease_playback_speed" => Some(KeyAction::DecreasePlaybackSpeed),
             "increase_playback_speed" => Some(KeyAction::IncreasePlaybackSpeed),
+            "reset_zoom" => Some(KeyAction::ResetZoom),
+            "toggle_hud" => Some(KeyAction::ToggleHud),
+            "peek_zoom" => Some(KeyAction::PeekZoom),
+            "decrease_peek_zoom" => Some(KeyAction::DecreasePeekZoom),
+            "increase_peek_zoom" => Some(KeyAction::IncreasePeekZoom),
             "quit" => Some(KeyAction::Quit),
             _ => None,
         }
@@ -260,6 +280,8 @@ impl KeyConfig {
             "down" => Some(VirtualKeyCode::Down),
             "[" | "lbracket" => Some(VirtualKeyCode::LBracket),
             "]" | "rbracket" => Some(VirtualKeyCode::RBracket),
+            "-" | "minus" | "hyphen" => Some(VirtualKeyCode::Minus),
+            "=" | "equals" => Some(VirtualKeyCode::Equals),
             "return" | "enter" => Some(VirtualKeyCode::Return),
             "tab" => Some(VirtualKeyCode::Tab),
             "back" | "backspace" => Some(VirtualKeyCode::Back),
@@ -325,6 +347,14 @@ mod tests {
         assert_eq!(cfg.bindings.get(&VirtualKeyCode::Right), Some(&KeyAction::NextFrame));
         assert_eq!(cfg.bindings.get(&VirtualKeyCode::Escape), Some(&KeyAction::Quit));
         assert_eq!(cfg.bindings.get(&VirtualKeyCode::H), Some(&KeyAction::ToggleHelp));
+        // New actions
+        assert_eq!(cfg.bindings.get(&VirtualKeyCode::F), Some(&KeyAction::CycleComparisonMode));
+        assert_eq!(cfg.bindings.get(&VirtualKeyCode::Z), Some(&KeyAction::PeekZoom));
+        assert_eq!(cfg.bindings.get(&VirtualKeyCode::R), Some(&KeyAction::ResetZoom));
+        assert_eq!(cfg.bindings.get(&VirtualKeyCode::O), Some(&KeyAction::ToggleHud));
+        assert_eq!(cfg.bindings.get(&VirtualKeyCode::U), Some(&KeyAction::SaveCombinedScreenshot));
+        assert_eq!(cfg.bindings.get(&VirtualKeyCode::Minus), Some(&KeyAction::DecreasePeekZoom));
+        assert_eq!(cfg.bindings.get(&VirtualKeyCode::Equals), Some(&KeyAction::IncreasePeekZoom));
     }
 
     #[test]
@@ -401,6 +431,10 @@ mod tests {
         assert_eq!(KeyConfig::parse_key("Space"), Some(VirtualKeyCode::Space));
         assert_eq!(KeyConfig::parse_key("["), Some(VirtualKeyCode::LBracket));
         assert_eq!(KeyConfig::parse_key("]"), Some(VirtualKeyCode::RBracket));
+        assert_eq!(KeyConfig::parse_key("-"), Some(VirtualKeyCode::Minus));
+        assert_eq!(KeyConfig::parse_key("Minus"), Some(VirtualKeyCode::Minus));
+        assert_eq!(KeyConfig::parse_key("="), Some(VirtualKeyCode::Equals));
+        assert_eq!(KeyConfig::parse_key("Equals"), Some(VirtualKeyCode::Equals));
         assert_eq!(KeyConfig::parse_key("F1"), Some(VirtualKeyCode::F1));
         assert_eq!(KeyConfig::parse_key("f12"), Some(VirtualKeyCode::F12));
     }
@@ -416,6 +450,13 @@ mod tests {
         let actions = [
             ("play_pause", KeyAction::PlayPause),
             ("next_frame", KeyAction::NextFrame),
+            ("cycle_comparison_mode", KeyAction::CycleComparisonMode),
+            ("peek_zoom", KeyAction::PeekZoom),
+            ("reset_zoom", KeyAction::ResetZoom),
+            ("toggle_hud", KeyAction::ToggleHud),
+            ("save_combined_screenshot", KeyAction::SaveCombinedScreenshot),
+            ("decrease_peek_zoom", KeyAction::DecreasePeekZoom),
+            ("increase_peek_zoom", KeyAction::IncreasePeekZoom),
             ("quit", KeyAction::Quit),
             ("toggle_help", KeyAction::ToggleHelp),
         ];
@@ -423,5 +464,6 @@ mod tests {
             assert_eq!(KeyConfig::parse_action(name), Some(expected));
         }
         assert_eq!(KeyConfig::parse_action("unknown"), None);
+        assert_eq!(KeyConfig::parse_action("toggle_flip_diff"), None);
     }
 }
