@@ -1,5 +1,5 @@
 use image::GenericImageView;
-use log::debug;
+use log::{debug, warn};
 use memmap2::Mmap;
 use nv_flip::{flip, magma_lut, FlipImageRgb8, FlipPool};
 use parking_lot::{Mutex, RwLock};
@@ -70,8 +70,8 @@ impl RingBufferTextureCache {
     }
 
     /// Insert a texture into the cache. If the cache is at capacity, the frame farthest from
-    /// `current_frame` is evicted first. Returns any evicted (index, texture) pairs so the
-    /// caller can return the textures to a reuse pool and clean up associated data.
+    /// `current_frame` is evicted first. Returns any evicted (frame_index, texture) pairs so
+    /// the caller can return textures to a reuse pool and clean up associated per-frame data.
     fn insert(
         &self,
         index: usize,
@@ -265,13 +265,20 @@ pub struct HistogramData {
 
 impl HistogramData {
     /// Compute a histogram from a flat RGBA8 byte slice.
+    /// Luminance uses BT.709 coefficients: L = 0.2126·R + 0.7152·G + 0.0722·B,
+    /// approximated with fixed-point (13933·R + 46871·G + 4732·B) >> 16.
     pub fn from_rgba8(data: &[u8]) -> Self {
+        debug_assert_eq!(
+            data.len() % 4,
+            0,
+            "HistogramData::from_rgba8 expects data.len() to be a multiple of 4 (RGBA pixels)"
+        );
+
         let mut r = [0u64; 256];
         let mut g = [0u64; 256];
         let mut b = [0u64; 256];
         let mut luma = [0u64; 256];
 
-        debug_assert_eq!(data.len() % 4, 0, "HistogramData::from_rgba8 expects data.len() to be a multiple of 4 (RGBA pixels)");
         for chunk in data.chunks_exact(4) {
             let rv = chunk[0] as usize;
             let gv = chunk[1] as usize;
@@ -279,8 +286,7 @@ impl HistogramData {
             r[rv] += 1;
             g[gv] += 1;
             b[bv] += 1;
-            // BT.709 luminance: L = 0.2126·R + 0.7152·G + 0.0722·B
-            // Fixed-point: coefficients scaled by 65536 → (13933, 46871, 4732); shift right 16.
+            // BT.709 luminance: coefficients scaled by 65536 → shift right 16.
             let lv = (13933u32 * rv as u32 + 46871u32 * gv as u32 + 4732u32 * bv as u32) >> 16;
             luma[lv.min(255) as usize] += 1;
         }
@@ -347,6 +353,7 @@ pub struct Player {
     pub flip_diff_cache_metrics: Arc<CacheMetrics>,
     flip_diff_cache_capacity: usize,
     /// Per-frame histogram data, keyed by (frame_index, is_left).
+    /// Entries are evicted together with the corresponding texture.
     pub histogram_cache: Arc<RwLock<HashMap<(usize, bool), HistogramData>>>,
 }
 
@@ -749,8 +756,8 @@ impl Player {
                     size,
                 );
 
-                // Insert into the ring-buffer cache; evicted textures go back to the reuse pool
-                // and their corresponding histogram entries are also removed.
+                // Insert into the ring-buffer cache; evicted (index, texture) pairs are returned
+                // so textures go back to the reuse pool and histogram entries are removed too.
                 let evicted = cache.insert(index, texture, current_frame, frame_count);
                 {
                     let mut hist = histogram_cache.write();
@@ -908,6 +915,14 @@ impl Player {
         } else {
             false
         }
+    }
+
+    pub fn playback_speed(&self) -> f32 {
+        self.playback_speed
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.is_playing.load(Ordering::Relaxed)
     }
 
     pub fn decrease_playback_speed(&mut self) {
@@ -1093,15 +1108,32 @@ impl Player {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-            let left_buffer =
+            let (left_buffer, left_stride) =
                 self.create_buffer_and_copy_texture(&mut encoder, &left_texture, left_size);
-            let right_buffer =
+            let (right_buffer, right_stride) =
                 self.create_buffer_and_copy_texture(&mut encoder, &right_texture, right_size);
 
             self.queue.submit(std::iter::once(encoder.finish()));
 
-            let left_data = self.read_buffer(&left_buffer, (width * height * 4) as u64);
-            let right_data = self.read_buffer(&right_buffer, (width * height * 4) as u64);
+            // Read back full padded buffers then strip row padding so nv_flip
+            // receives tightly-packed RGBA rows of exactly `width * 4` bytes.
+            let strip_padding = |padded: Vec<u8>, stride: u32, w: u32, h: u32| -> Vec<u8> {
+                let row_bytes = (w * 4) as usize;
+                let stride = stride as usize;
+                let mut out = Vec::with_capacity(row_bytes * h as usize);
+                for row in 0..h as usize {
+                    out.extend_from_slice(&padded[row * stride..row * stride + row_bytes]);
+                }
+                out
+            };
+
+            let left_padded =
+                self.read_buffer(&left_buffer, (left_stride * height) as u64);
+            let right_padded =
+                self.read_buffer(&right_buffer, (right_stride * height) as u64);
+
+            let left_data = strip_padding(left_padded, left_stride, width, height);
+            let right_data = strip_padding(right_padded, right_stride, width, height);
 
             let flip_diff_sender = self.flip_diff_sender.clone();
             let device = Arc::clone(&self.device);
@@ -1262,10 +1294,15 @@ impl Player {
         encoder: &mut wgpu::CommandEncoder,
         texture: &wgpu::Texture,
         size: wgpu::Extent3d,
-    ) -> wgpu::Buffer {
+    ) -> (wgpu::Buffer, u32) {
+        // bytes_per_row must be a multiple of wgpu::COPY_BYTES_PER_ROW_ALIGNMENT (256).
+        let unpadded_bytes_per_row = size.width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Texture Buffer"),
-            size: (size.width * size.height * 4) as u64,
+            size: (bytes_per_row * size.height) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -1281,14 +1318,14 @@ impl Player {
                 buffer: &buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(size.width * 4),
+                    bytes_per_row: Some(bytes_per_row),
                     rows_per_image: Some(size.height),
                 },
             },
             size,
         );
 
-        buffer
+        (buffer, bytes_per_row)
     }
 
     fn read_buffer(&self, buffer: &wgpu::Buffer, size: u64) -> Vec<u8> {
@@ -1308,6 +1345,29 @@ impl Player {
     /// for the given left/right frame pair, if it has been computed.
     pub fn get_flip_diff_raw_data(&self, left_index: usize, right_index: usize) -> Option<(Vec<u8>, u32, u32)> {
         self.flip_diff_raw_data.read().get(&(left_index, right_index)).cloned()
+    }
+
+    /// Load and return the raw RGBA pixel data for a specific frame from disk.
+    /// Returns `(pixels, width, height)` on success, or `None` if the path is
+    /// out-of-range or the image cannot be decoded.
+    pub fn get_current_frame_image_data(&self, index: usize, is_left: bool) -> Option<(Vec<u8>, u32, u32)> {
+        let image_data = if is_left {
+            &self.config.image_data1
+        } else {
+            &self.config.image_data2
+        };
+        let path = &image_data.get(index)?.0;
+        match image::open(path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (width, height) = rgba.dimensions();
+                Some((rgba.into_raw(), width, height))
+            }
+            Err(e) => {
+                warn!("Failed to load image '{}' for combined screenshot: {}", path, e);
+                None
+            }
+        }
     }
 }
 
@@ -1462,6 +1522,54 @@ mod performance_tests {
         // frame 4: fwd=(4+10-5)%10=9, bwd=(5+10-4)%10=1, min_dist=1 (nearest)
         let result = select_eviction_candidate(&[0, 1, 4], 5, 10);
         assert_eq!(result, Some(0));
+    }
+
+    /// Verifies the aligned bytes_per_row calculation used in create_buffer_and_copy_texture.
+    #[test]
+    fn test_copy_bytes_per_row_alignment() {
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        // Helper mirrors the production formula.
+        let aligned = |w: u32| -> u32 {
+            let unpadded = w * 4;
+            unpadded.div_ceil(align) * align
+        };
+
+        // Width already produces aligned bytes_per_row (64 * 4 = 256).
+        assert_eq!(aligned(64), 256);
+        assert_eq!(aligned(64) % align, 0);
+
+        // Width whose bytes_per_row is NOT a multiple of 256 without padding.
+        assert_eq!(aligned(100), 512); // 400 → padded to 512
+        assert_eq!(aligned(100) % align, 0);
+
+        // Width = 1 → 4 bytes padded to 256.
+        assert_eq!(aligned(1), 256);
+        assert_eq!(aligned(1) % align, 0);
+    }
+
+    /// Verifies the strip_padding helper removes row padding correctly.
+    #[test]
+    fn test_strip_row_padding() {
+        let width: u32 = 2;
+        let height: u32 = 2;
+        let stride: u32 = 256; // padded stride
+        let row_bytes = (width * 4) as usize;
+
+        // Build padded buffer: two 256-byte rows, pixel data in first 8 bytes each.
+        let mut padded = vec![0u8; stride as usize * height as usize];
+        // Row 0 pixels: R=1,G=2,B=3,A=4 and R=5,G=6,B=7,A=8
+        padded[0..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        // Row 1 pixels: R=9,G=10,B=11,A=12 and R=13,G=14,B=15,A=16
+        padded[256..264].copy_from_slice(&[9, 10, 11, 12, 13, 14, 15, 16]);
+
+        // Strip padding.
+        let mut out = Vec::with_capacity(row_bytes * height as usize);
+        for row in 0..height as usize {
+            let s = row * stride as usize;
+            out.extend_from_slice(&padded[s..s + row_bytes]);
+        }
+
+        assert_eq!(out, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     }
 }
 
@@ -1686,9 +1794,8 @@ mod tests {
     // ── HistogramData ──────────────────────────────────────────────────────
 
     #[test]
-    fn test_histogram_all_zeros_empty_data() {
+    fn test_histogram_empty_data() {
         let hist = HistogramData::from_rgba8(&[]);
-        // No pixels → every bin is 0 except the normalised peak which stays 0.
         assert!(hist.r.iter().all(|&v| v == 0.0));
         assert!(hist.g.iter().all(|&v| v == 0.0));
         assert!(hist.b.iter().all(|&v| v == 0.0));
@@ -1697,28 +1804,20 @@ mod tests {
 
     #[test]
     fn test_histogram_single_red_pixel() {
-        // A single fully-red pixel: R=255, G=0, B=0, A=255
         let data = vec![255u8, 0, 0, 255];
         let hist = HistogramData::from_rgba8(&data);
-        // Red bin 255 should be peak (1.0), all others 0
         assert_eq!(hist.r[255], 1.0);
         assert!(hist.r[..255].iter().all(|&v| v == 0.0));
-        // Green: only bin 0 has a count
         assert_eq!(hist.g[0], 1.0);
-        // Blue: only bin 0 has a count
         assert_eq!(hist.b[0], 1.0);
     }
 
     #[test]
     fn test_histogram_normalised_peak_is_one() {
-        // Two pixels: R=100 and R=200; bin 200 has more weight (still 1 pixel each,
-        // but equal weight makes both 1.0 after normalisation)
         let data = vec![100u8, 0, 0, 255, 200, 0, 0, 255];
         let hist = HistogramData::from_rgba8(&data);
-        // Both bins have count 1 → peak is 1 → both normalise to 1.0
         assert_eq!(hist.r[100], 1.0);
         assert_eq!(hist.r[200], 1.0);
-        // All other red bins are 0
         for i in 0..256usize {
             if i != 100 && i != 200 {
                 assert_eq!(hist.r[i], 0.0, "bin {} should be 0", i);
@@ -1727,17 +1826,15 @@ mod tests {
     }
 
     #[test]
-    fn test_histogram_luma_bin_in_range() {
-        // Fully-white pixel: R=255, G=255, B=255
+    fn test_histogram_luma_white_pixel() {
         let data = vec![255u8, 255, 255, 255];
         let hist = HistogramData::from_rgba8(&data);
-        // Luminance should map to the 255 bin
         assert_eq!(hist.luma[255], 1.0);
         assert!(hist.luma[..255].iter().all(|&v| v == 0.0));
     }
 
     #[test]
-    fn test_histogram_bins_have_256_entries() {
+    fn test_histogram_bin_count() {
         let hist = HistogramData::from_rgba8(&[128, 64, 32, 255]);
         assert_eq!(hist.r.len(), 256);
         assert_eq!(hist.g.len(), 256);

@@ -16,17 +16,25 @@ struct Uniforms {
     image1_size: vec2<f32>,
     image2_size: vec2<f32>,
     flip_diff_size: vec2<f32>,
-    show_flip_diff: f32,
+    comparison_mode: f32,
     zoom_level: f32,
     zoom_center: vec2<f32>,
     window_size: vec2<f32>,
     show_image1: f32,
     show_image2: f32,
     show_split_line: f32,
+    peek_active: f32,
+    peek_factor: f32,
+    peek_radius: f32,
 }
 
 @group(1) @binding(0)
 var<uniform> uniforms: Uniforms;
+
+const MODE_NORMAL: f32 = 0.0;
+const MODE_FLIP: f32 = 1.0;
+const MODE_OVERLAY: f32 = 2.0;
+const MODE_ABS_DIFF: f32 = 3.0;
 
 @vertex
 fn vs_main(model: VertexInput) -> VertexOutput {
@@ -72,15 +80,62 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color1 = textureSample(t_diffuse1, s_diffuse1, clamped_tex_coords);
     let color2 = textureSample(t_diffuse2, s_diffuse2, clamped_tex_coords);
 
+    // Calculate alpha based on whether the zoomed coordinates are within bounds
+    let alpha = 1.0 - step(1.0, max(abs(zoomed_tex_coords.x - 0.5), abs(zoomed_tex_coords.y - 0.5)) * 2.0);
+
+    let mode = uniforms.comparison_mode;
+
     // Determine split factor based on which images are enabled
     let both_shown = uniforms.show_image1 * uniforms.show_image2;
     let only_image2 = (1.0 - uniforms.show_image1) * uniforms.show_image2;
     let t = both_shown * step(uniforms.cursor_x, in.tex_coords.x) + only_image2;
-
     let mixed_color = mix(color1 * uniforms.show_image1, color2 * uniforms.show_image2, t);
 
-    // Calculate alpha based on whether the zoomed coordinates are within bounds
-    let alpha = 1.0 - step(1.0, max(abs(zoomed_tex_coords.x - 0.5), abs(zoomed_tex_coords.y - 0.5)) * 2.0);
+    // Overlay/Abs Diff are shown below cursor_y so you can compare against originals interactively.
+    if mode == MODE_OVERLAY || mode == MODE_ABS_DIFF {
+        let overlay_color = mix(color1, color2, 0.5);
+        let diff = abs(color1 - color2);
+        let abs_diff_color = vec4<f32>(clamp(diff.rgb * 10.0, vec3(0.0), vec3(1.0)), 1.0);
+        let mode_color = select(abs_diff_color, overlay_color, mode == MODE_OVERLAY);
+        let show_mode = step(uniforms.cursor_y, in.tex_coords.y);
+        let combined = mix(mixed_color, mode_color, show_mode);
+        return vec4<f32>(combined.rgb, combined.a * alpha);
+    }
+
+    // Peek zoom magnifier: active while Z is held
+    if (uniforms.peek_active > 0.5) {
+        let w_ar = uniforms.window_size.x / uniforms.window_size.y;
+        let i_ar = uniforms.image1_size.x / uniforms.image1_size.y;
+        let sx = select(1.0, i_ar / w_ar, w_ar > i_ar);
+        let sy = select(w_ar / i_ar, 1.0, w_ar > i_ar);
+        let rw = sx * uniforms.window_size.x;
+        let rh = sy * uniforms.window_size.y;
+        let xo = (uniforms.window_size.x - rw) / 2.0;
+        let yo = (uniforms.window_size.y - rh) / 2.0;
+        let cx = xo + uniforms.cursor_x * rw;
+        let cy = yo + uniforms.cursor_y * rh;
+        let dx = in.clip_position.x - cx;
+        let dy = in.clip_position.y - cy;
+        let dist = sqrt(dx * dx + dy * dy);
+        if (dist < uniforms.peek_radius) {
+            // White border ring (2 px)
+            if (dist > uniforms.peek_radius - 2.0) {
+                return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+            }
+            // Magnify: contract screen offset by peek_factor to zoom in
+            let peek_sx = cx + dx / uniforms.peek_factor;
+            let peek_sy = cy + dy / uniforms.peek_factor;
+            let tc = vec2((peek_sx - xo) / rw, (peek_sy - yo) / rh);
+            // Apply main zoom on top of peek zoom
+            let zoom_ofs = (tc - uniforms.zoom_center) / uniforms.zoom_level;
+            let ztc = clamp(uniforms.zoom_center + zoom_ofs, vec2(0.0), vec2(1.0));
+            let p1 = textureSampleLevel(t_diffuse1, s_diffuse1, ztc, 0.0);
+            let p2 = textureSampleLevel(t_diffuse2, s_diffuse2, ztc, 0.0);
+            let t_p = both_shown * step(uniforms.cursor_x, tc.x) + only_image2;
+            let peek_color = mix(p1 * uniforms.show_image1, p2 * uniforms.show_image2, t_p);
+            return vec4<f32>(peek_color.rgb, peek_color.a);
+        }
+    }
 
     // Add a 1-pixel-wide white line at the split position using screen-space coordinates
     // so the line stays a constant width regardless of image resolution or window size.
@@ -90,7 +145,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let render_width_fs = scale_x_fs * uniforms.window_size.x;
     let x_offset_fs = (uniforms.window_size.x - render_width_fs) / 2.0;
     let cursor_screen_x = x_offset_fs + uniforms.cursor_x * render_width_fs;
-    if (both_shown > 0.5 && uniforms.show_split_line > 0.5 && abs(in.clip_position.x - cursor_screen_x) < 1.0) {
+    let in_original_region = mode <= MODE_FLIP || in.tex_coords.y < uniforms.cursor_y;
+    if (both_shown > 0.5 && uniforms.show_split_line > 0.5 && in_original_region && abs(in.clip_position.x - cursor_screen_x) < 1.0) {
         return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the line
     }
 

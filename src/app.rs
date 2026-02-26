@@ -20,6 +20,12 @@ use winit::event::WindowEvent;
 use winit::window::Window as WinitWindow;
 
 const APP_TITLE: &str = "Image Comparison Player";
+const MAX_ZOOM_LEVEL: f32 = 10.0;
+const MIN_DRAG_ZOOM_DISTANCE_PX: f32 = 10.0;
+const MIN_DRAG_ZOOM_UV_SIZE: f32 = 0.01;
+const MIN_PEEK_ZOOM_FACTOR: f32 = 1.0;
+const MAX_PEEK_ZOOM_FACTOR: f32 = 16.0;
+const PEEK_ZOOM_FACTOR_STEP: f32 = 0.25;
 
 #[allow(dead_code)]
 #[repr(C)]
@@ -30,20 +36,60 @@ struct UniformData {
     image1_size: [f32; 2],
     image2_size: [f32; 2],
     flip_diff_size: [f32; 2],
-    show_flip_diff: f32,
+    comparison_mode: f32,
     zoom_level: f32,
     zoom_center: [f32; 2],
     window_size: [f32; 2],
     show_image1: f32,
     show_image2: f32,
     show_split_line: f32,
-    _padding: f32,
+    peek_active: f32,  // 1.0 when peek zoom is held (Z key)
+    peek_factor: f32,  // peek magnification factor
+    peek_radius: f32,  // peek window radius in screen pixels
 }
 
 // SAFETY: UniformData is #[repr(C)] and all fields are plain f32 arrays/scalars.
-// `_padding` keeps the total size aligned with WGSL uniform layout expectations.
+// Layout matches the WGSL Uniforms struct exactly (80 bytes, 8-byte aligned).
 unsafe impl bytemuck::Zeroable for UniformData {}
 unsafe impl bytemuck::Pod for UniformData {}
+
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+enum ComparisonMode {
+    #[default]
+    None,
+    Flip,
+    Overlay,
+    AbsDiff,
+}
+
+impl ComparisonMode {
+    fn cycle(self) -> Self {
+        match self {
+            ComparisonMode::None => ComparisonMode::Flip,
+            ComparisonMode::Flip => ComparisonMode::Overlay,
+            ComparisonMode::Overlay => ComparisonMode::AbsDiff,
+            ComparisonMode::AbsDiff => ComparisonMode::None,
+        }
+    }
+
+    fn as_f32(self) -> f32 {
+        match self {
+            ComparisonMode::None => 0.0,
+            ComparisonMode::Flip => 1.0,
+            ComparisonMode::Overlay => 2.0,
+            ComparisonMode::AbsDiff => 3.0,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ComparisonMode::None => "Normal",
+            ComparisonMode::Flip => "FLIP",
+            ComparisonMode::Overlay => "Alpha Overlay",
+            ComparisonMode::AbsDiff => "Abs Diff",
+        }
+    }
+}
 
 struct CacheDebugWindow {
     is_open: bool,
@@ -479,9 +525,11 @@ impl PixelInfoWindow {
         Self { is_open: false }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw(
         &self,
         ui: &Ui,
+        hovered_pixel: (u32, u32),
         left_color: [u8; 4],
         right_color: [u8; 4],
         flip_error: Option<f32>,
@@ -573,6 +621,39 @@ impl PixelInfoWindow {
                 }
 
                 if !single_image_mode {
+                    let overlay_color = [
+                        ((left_color[0] as u16 + right_color[0] as u16) / 2) as u8,
+                        ((left_color[1] as u16 + right_color[1] as u16) / 2) as u8,
+                        ((left_color[2] as u16 + right_color[2] as u16) / 2) as u8,
+                        ((left_color[3] as u16 + right_color[3] as u16) / 2) as u8,
+                    ];
+                    let abs_diff_color = [
+                        left_color[0].abs_diff(right_color[0]),
+                        left_color[1].abs_diff(right_color[1]),
+                        left_color[2].abs_diff(right_color[2]),
+                        left_color[3].abs_diff(right_color[3]),
+                    ];
+                    ui.text(format!(
+                        "Blend 0.5*(A+B): #{:02X}{:02X}{:02X}  ({}, {}, {}, {})",
+                        overlay_color[0],
+                        overlay_color[1],
+                        overlay_color[2],
+                        overlay_color[0],
+                        overlay_color[1],
+                        overlay_color[2],
+                        overlay_color[3]
+                    ));
+                    ui.text(format!(
+                        "|A-B| (raw, 8-bit): #{:02X}{:02X}{:02X}  ({}, {}, {}, {})",
+                        abs_diff_color[0],
+                        abs_diff_color[1],
+                        abs_diff_color[2],
+                        abs_diff_color[0],
+                        abs_diff_color[1],
+                        abs_diff_color[2],
+                        abs_diff_color[3]
+                    ));
+
                     if let Some(error) = flip_error {
                         ui.text(format!("FLIP error @ pixel: {:.4}", error));
                     } else {
@@ -580,6 +661,7 @@ impl PixelInfoWindow {
                     }
                 }
 
+                ui.text(format!("Hovered pixel: ({}, {})", hovered_pixel.0, hovered_pixel.1));
                 ui.separator();
 
                 // FLIP error metrics
@@ -598,6 +680,81 @@ impl PixelInfoWindow {
 
     fn toggle(&mut self) {
         self.is_open = !self.is_open;
+    }
+}
+
+struct HelpOverlay {
+    is_open: bool,
+}
+
+impl HelpOverlay {
+    fn new() -> Self {
+        Self { is_open: false }
+    }
+
+    fn draw(&mut self, ui: &Ui, single_image_mode: bool) {
+        if !self.is_open {
+            return;
+        }
+        ui.window("Help - Keyboard & Mouse Controls")
+            .size([420.0, 380.0], Condition::FirstUseEver)
+            .position([60.0, 60.0], Condition::FirstUseEver)
+            .resizable(true)
+            .opened(&mut self.is_open)
+            .build(|| {
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Playback");
+                ui.separator();
+                ui.text("  Space          Play / Pause");
+                ui.text("  Left / Right   Previous / Next frame");
+                ui.text("  [  /  ]        Decrease / Increase playback speed");
+                ui.dummy([0.0, 4.0]);
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Zoom & Pan");
+                ui.separator();
+                ui.text("  Scroll wheel   Zoom in / out");
+                ui.text("  Up / Down      Zoom in / out");
+                ui.text("  Q / E          Zoom out / in");
+                ui.text("  W A S D        Pan up / left / down / right");
+                ui.text("  Left drag      Zoom to dragged region");
+                ui.text("  R              Reset zoom to full frame");
+                ui.text("  Z (hold)       Peek zoom magnifier");
+                ui.text("  - / =          Decrease / Increase peek magnifier");
+                ui.dummy([0.0, 4.0]);
+
+                if !single_image_mode {
+                    ui.text_colored([1.0, 0.85, 0.3, 1.0], "Comparison");
+                    ui.separator();
+                    ui.text("  L              Toggle split-line divider");
+                    ui.text("  F              Cycle comparison mode");
+                    ui.text("                 (Normal -> FLIP -> Overlay -> Abs Diff)");
+                    ui.text("  1 / 2          Show only left / right image");
+                    ui.text("  P              Save FLIP diff image");
+                    ui.dummy([0.0, 4.0]);
+                }
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Windows & Overlays");
+                ui.separator();
+                ui.text("  H              Toggle this help overlay");
+                ui.text("  O              Toggle HUD (frame/speed/zoom/mode)");
+                ui.text("  C              Toggle cache debug window");
+                ui.text("  V              Toggle pixel info window");
+                ui.text("  N              Toggle histogram panel");
+                ui.dummy([0.0, 4.0]);
+
+                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
+                ui.separator();
+                ui.text("  I              Save screenshot");
+                ui.text("  U              Save combined screenshot (all sources side-by-side)");
+                ui.text("  Esc            Close overlay / Quit");
+            });
+    }
+
+    fn toggle(&mut self) {
+        self.is_open = !self.is_open;
+    }
+
+    fn close(&mut self) {
+        self.is_open = false;
     }
 }
 
@@ -630,11 +787,12 @@ impl HistogramWindow {
         if !self.is_open {
             return;
         }
+
         // 256 pixels wide: one pixel per histogram bin (0-255).
         let hist_width = 256.0_f32;
         let hist_height = 80.0_f32;
 
-        // Extract toggle state into locals so they can be captured by the closure.
+        // Extract toggle state into locals before the closure so they can be captured.
         let mut show_r = self.show_r;
         let mut show_g = self.show_g;
         let mut show_b = self.show_b;
@@ -663,7 +821,7 @@ impl HistogramWindow {
                     let ox = window_pos[0] + cursor[0];
                     let oy = window_pos[1] + cursor[1];
 
-                    // Background
+                    // Dark background
                     draw_list
                         .add_rect([ox, oy], [ox + hist_width, oy + hist_height], [0.1, 0.1, 0.1, 1.0])
                         .filled(true)
@@ -754,7 +912,7 @@ impl HistogramWindow {
                 }
             });
 
-        // Write back updated toggle states.
+        // Write back updated toggle states after the closure.
         self.show_r = show_r;
         self.show_g = show_g;
         self.show_b = show_b;
@@ -763,74 +921,6 @@ impl HistogramWindow {
 
     fn toggle(&mut self) {
         self.is_open = !self.is_open;
-    }
-}
-
-struct HelpOverlay {
-    is_open: bool,
-}
-
-impl HelpOverlay {
-    fn new() -> Self {
-        Self { is_open: false }
-    }
-
-    fn draw(&mut self, ui: &Ui, single_image_mode: bool) {
-        if !self.is_open {
-            return;
-        }
-        ui.window("Help - Keyboard & Mouse Controls")
-            .size([420.0, 380.0], Condition::FirstUseEver)
-            .position([60.0, 60.0], Condition::FirstUseEver)
-            .resizable(true)
-            .opened(&mut self.is_open)
-            .build(|| {
-                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Playback");
-                ui.separator();
-                ui.text("  Space          Play / Pause");
-                ui.text("  Left / Right   Previous / Next frame");
-                ui.text("  [  /  ]        Decrease / Increase playback speed");
-                ui.dummy([0.0, 4.0]);
-
-                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Zoom & Pan");
-                ui.separator();
-                ui.text("  Scroll wheel   Zoom in / out");
-                ui.text("  Up / Down      Zoom in / out");
-                ui.text("  Q / E          Zoom out / in");
-                ui.text("  W A S D        Pan up / left / down / right");
-                ui.dummy([0.0, 4.0]);
-
-                if !single_image_mode {
-                    ui.text_colored([1.0, 0.85, 0.3, 1.0], "Comparison");
-                    ui.separator();
-                    ui.text("  Mouse move     Move split-line divider");
-                    ui.text("  F              Toggle FLIP diff overlay");
-                    ui.text("  1 / 2          Show only left / right image");
-                    ui.text("  P              Save FLIP diff image");
-                    ui.dummy([0.0, 4.0]);
-                }
-
-                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Windows & Overlays");
-                ui.separator();
-                ui.text("  H              Toggle this help overlay");
-                ui.text("  C              Toggle cache debug window");
-                ui.text("  V              Toggle pixel info window");
-                ui.text("  N              Toggle histogram panel");
-                ui.dummy([0.0, 4.0]);
-
-                ui.text_colored([1.0, 0.85, 0.3, 1.0], "Other");
-                ui.separator();
-                ui.text("  I              Save screenshot");
-                ui.text("  Esc            Close overlay / Quit");
-            });
-    }
-
-    fn toggle(&mut self) {
-        self.is_open = !self.is_open;
-    }
-
-    fn close(&mut self) {
-        self.is_open = false;
     }
 }
 
@@ -933,6 +1023,7 @@ fn read_two_texture_pixels(
 type FlipDiffReceiver = Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
 type FlipDiffTexture = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
 
+#[derive(Clone)]
 pub struct AppConfig {
     pub dir1: Option<String>,
     pub dir2: Option<String>,
@@ -947,6 +1038,7 @@ pub struct AppConfig {
     pub diff_preload_ahead: usize,
     pub diff_preload_behind: usize,
     pub fps: f32,
+    pub peek_zoom_factor: f32,
 }
 
 pub struct AppState {
@@ -972,7 +1064,7 @@ pub struct AppState {
     flip_diff_receiver: FlipDiffReceiver,
     flip_diff_texture: FlipDiffTexture,
     flip_mode: bool,
-    show_flip_diff: bool,
+    comparison_mode: ComparisonMode,
     show_image1: bool,
     show_image2: bool,
     show_split_line: bool,
@@ -995,7 +1087,18 @@ pub struct AppState {
     histogram_window: HistogramWindow,
     left_pixel_color: [u8; 4],
     right_pixel_color: [u8; 4],
+    hovered_pixel: (u32, u32),
     flip_error_value: Option<f32>,
+    drag_zoom_start: Option<(f32, f32)>,
+    drag_zoom_current: (f32, f32),
+    show_hud: bool,
+    app_config: AppConfig,
+    pending_drop_paths: Vec<std::path::PathBuf>,
+    waiting_for_drop: bool,
+    hovering_file: bool,
+    peek_zoom_active: bool,
+    peek_zoom_factor: f32,
+    peek_zoom_radius: f32,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1048,12 +1151,33 @@ impl AppState {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         info!("Initializing AppState");
 
+        let stored_config = app_config.clone();
+
+        // When no images are provided (drag-and-drop startup), create a 1×1 black
+        // placeholder so the Player initialises correctly.  It is replaced as soon
+        // as the user drops real files.
+        let no_images_provided =
+            app_config.dir1.is_none() && app_config.images1.as_ref().is_none_or(|v| v.is_empty());
+
+        let placeholder_dir = if no_images_provided {
+            let dir = std::env::temp_dir().join("icp_placeholder");
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join("placeholder.png");
+            if !path.exists() {
+                image::RgbaImage::new(1, 1).save(&path)?;
+            }
+            Some(dir)
+        } else {
+            None
+        };
+
         let (images1, image_len1) = if let Some(files) = &app_config.images1 {
             image_loader::load_image_paths_from_files(files, app_config.fps)?
-        } else {
-            let raw = app_config.dir1.as_deref()
-                .ok_or("dir1 is missing: provide --dir1 or --images1")?;
+        } else if let Some(raw) = app_config.dir1.as_deref() {
             let dir = std::fs::canonicalize(raw)?;
+            image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
+        } else {
+            let dir = placeholder_dir.as_ref().unwrap();
             image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
         };
         let (images2, image_len2) = if let Some(files) = &app_config.images2 {
@@ -1389,6 +1513,19 @@ impl AppState {
 
         let mut imgui_context = imgui::Context::create();
         imgui_context.set_ini_filename(None); // Disable imgui.ini file
+        let hidpi_factor = window.scale_factor() as f32;
+        imgui_context.io_mut().font_global_scale = if hidpi_factor > 0.0 {
+            1.0 / hidpi_factor
+        } else {
+            1.0
+        };
+        imgui_context.fonts().clear();
+        imgui_context.fonts().add_font(&[imgui::FontSource::DefaultFontData {
+            config: Some(imgui::FontConfig {
+                size_pixels: 18.0 * hidpi_factor.max(1.0),
+                ..imgui::FontConfig::default()
+            }),
+        }]);
         let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
         imgui_platform.attach_window(
             imgui_context.io_mut(),
@@ -1401,13 +1538,15 @@ impl AppState {
             ..Default::default()
         };
 
-        let imgui_renderer =
+        let mut imgui_renderer =
             imgui_wgpu::Renderer::new(&mut imgui_context, &device, &queue, imgui_renderer_config);
+        imgui_renderer.reload_font_texture(&mut imgui_context, &device, &queue);
 
         let cache_debug_window = CacheDebugWindow::new();
 
         let mouse_position = (0.0, 0.0);
         let (screenshot_result_tx, screenshot_result_rx) = mpsc::channel::<String>();
+        let peek_zoom_factor = stored_config.peek_zoom_factor.max(1.0);
 
         info!("AppState initialized successfully");
         Ok(Self {
@@ -1432,7 +1571,7 @@ impl AppState {
             mouse_position,
             flip_diff_texture: Arc::new(Mutex::new(None)),
             flip_mode: false,
-            show_flip_diff: false,
+            comparison_mode: ComparisonMode::None,
             show_image1: true,
             show_image2: true,
             show_split_line: true,
@@ -1456,7 +1595,18 @@ impl AppState {
             histogram_window: HistogramWindow::new(),
             left_pixel_color: [128, 128, 128, 255],
             right_pixel_color: [128, 128, 128, 255],
+            hovered_pixel: (0, 0),
             flip_error_value: None,
+            drag_zoom_start: None,
+            drag_zoom_current: (0.0, 0.0),
+            show_hud: true,
+            app_config: stored_config,
+            pending_drop_paths: Vec::new(),
+            waiting_for_drop: no_images_provided,
+            hovering_file: false,
+            peek_zoom_active: false,
+            peek_zoom_factor,
+            peek_zoom_radius: 100.0,
         })
     }
 
@@ -1474,12 +1624,18 @@ impl AppState {
     }
 
     pub fn update(&mut self) {
+        // Process any pending drag-and-drop paths accumulated since the last frame.
+        if !self.pending_drop_paths.is_empty() {
+            let paths = std::mem::take(&mut self.pending_drop_paths);
+            self.reload_from_dropped_paths(paths);
+        }
+
         let now = Instant::now();
         let delta = now.duration_since(self.last_update);
         self.last_update = now;
 
         let mut player = self.player.write();
-        let frame_changed = player.update(delta, self.show_flip_diff);
+        let frame_changed = player.update(delta, self.comparison_mode == ComparisonMode::Flip);
         player.process_load_queue();
         debug!("Update called, frame changed: {}", frame_changed);
 
@@ -1491,7 +1647,7 @@ impl AppState {
 
     pub fn update_textures(&mut self) -> bool {
         let player = self.player.write();
-        player.update_textures(self.show_flip_diff)
+        player.update_textures(self.comparison_mode == ComparisonMode::Flip)
     }
 
     pub fn render(&mut self, window: &WinitWindow) -> Result<(), wgpu::SurfaceError> {
@@ -1560,7 +1716,7 @@ impl AppState {
             image1_size: [image_width, image_height],
             image2_size: [image_width, image_height],
             flip_diff_size: [image_width, image_height],
-            show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+            comparison_mode: self.comparison_mode.as_f32(),
             zoom_level: self.zoom_level,
             zoom_center: [
                 self.fixed_zoom_center.0 + self.zoom_center_offset.0,
@@ -1570,7 +1726,9 @@ impl AppState {
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
-            _padding: 0.0,
+            peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
+            peek_factor: self.peek_zoom_factor,
+            peek_radius: self.peek_zoom_radius,
         };
 
         debug!("Created texture view");
@@ -1582,7 +1740,7 @@ impl AppState {
             });
 
         // Check if a valid flip diff texture exists for the current frame pair
-        let flip_diff_texture = if self.show_flip_diff {
+        let flip_diff_texture = if self.comparison_mode == ComparisonMode::Flip {
             player
                 .flip_diff_cache
                 .read()
@@ -1662,6 +1820,11 @@ impl AppState {
             || self.help_overlay.is_open
             || self.histogram_window.is_open
             || self.status_message.is_some()
+            || self.waiting_for_drop
+            || self.hovering_file
+            || self.show_hud
+            || self.drag_zoom_start.is_some()
+            || (self.comparison_mode != ComparisonMode::None && !self.single_image_mode)
         {
             match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
                 Ok(()) => {
@@ -1685,6 +1848,7 @@ impl AppState {
                             .cloned();
                         self.pixel_info_window.draw(
                             ui,
+                            self.hovered_pixel,
                             self.left_pixel_color,
                             self.right_pixel_color,
                             self.flip_error_value,
@@ -1698,15 +1862,14 @@ impl AppState {
                     if self.histogram_window.is_open {
                         let player = self.player.read();
                         let (left_index, right_index) = player.current_images();
-                        // Clone the histogram data while holding the read lock, then
-                        // drop the lock before calling into the UI drawing code to
-                        // reduce contention with writer threads.
+                        // Clone histogram data briefly to avoid holding the read lock during draw.
                         let (left_hist, right_hist) = {
                             let hist_cache = player.histogram_cache.read();
                             let left_hist = hist_cache.get(&(left_index, true)).cloned();
                             let right_hist = hist_cache.get(&(right_index, false)).cloned();
                             (left_hist, right_hist)
                         };
+                        drop(player);
                         self.histogram_window.draw(
                             ui,
                             left_hist.as_ref(),
@@ -1714,22 +1877,91 @@ impl AppState {
                             self.single_image_mode,
                         );
                     }
+                    let ui_scale = window.scale_factor() as f32;
+                    let to_ui = if ui_scale > 0.0 { 1.0 / ui_scale } else { 1.0 };
+                    let win_size = window.inner_size();
+                    let ui_width = win_size.width as f32 * to_ui;
+                    let ui_height = win_size.height as f32 * to_ui;
 
-                    // Draw status-message toast in the bottom-left corner
-                    if let Some((msg, set_at)) = &self.status_message {
-                        let elapsed = set_at.elapsed().as_secs_f32();
-                        let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
+                    // Draw persistent HUD in the top-right corner
+                    if self.show_hud {
+                        let player = self.player.read();
+                        let (left_index, right_index) = player.current_images();
+                        let left_total = player.frame_count1;
+                        let right_total = player.frame_count2;
+                        let speed = player.playback_speed();
+                        let playing = player.is_playing();
+                        drop(player);
+
+                        let compare_mode = if self.single_image_mode {
+                            "Single"
+                        } else if self.comparison_mode == ComparisonMode::Flip {
+                            "FLIP diff"
+                        } else if !self.show_image1 {
+                            "Right only"
+                        } else if !self.show_image2 {
+                            "Left only"
+                        } else {
+                            "Split"
+                        };
+
+                        let draw_list = ui.get_foreground_draw_list();
+                        let padding = 10.0_f32;
+                        let inner_pad_x = 8.0_f32;
+                        let inner_pad_y = 6.0_f32;
+                        let play_str = if playing { ">" } else { "||" };
+                        let hud_text = if self.single_image_mode {
+                            format!(
+                                "Frame: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}  H: Help",
+                                left_index + 1,
+                                left_total,
+                                play_str,
+                                speed,
+                                self.zoom_level,
+                                compare_mode,
+                            )
+                        } else {
+                            format!(
+                                "L: {}/{}  R: {}/{}  {} {:.2}x  Zoom: {:.1}x  Mode: {}  H: Help",
+                                left_index + 1,
+                                left_total,
+                                right_index + 1,
+                                right_total,
+                                play_str,
+                                speed,
+                                self.zoom_level,
+                                compare_mode,
+                            )
+                        };
+                        let text_size = ui.calc_text_size(&hud_text);
+                        let box_w = text_size[0] + inner_pad_x * 2.0;
+                        let box_h = text_size[1] + inner_pad_y * 2.0;
+                        let box_min = [ui_width - padding - box_w, padding];
+                        let box_max = [ui_width - padding, padding + box_h];
+                        draw_list
+                            .add_rect(box_min, box_max, [0.0, 0.0, 0.0, 0.6])
+                            .filled(true)
+                            .build();
+                        draw_list.add_text(
+                            [box_min[0] + inner_pad_x, box_min[1] + inner_pad_y],
+                            [1.0, 1.0, 1.0, 1.0],
+                            hud_text,
+                        );
+                    }
+
+                    // Draw persistent comparison mode indicator in the top-right corner
+                    if self.comparison_mode != ComparisonMode::None && !self.single_image_mode {
                         let win_size = window.inner_size();
                         let padding = 10.0_f32;
                         let _token = ui.push_style_var(imgui::StyleVar::WindowPadding([8.0, 6.0]));
                         if let Some(_win) = ui
-                            .window("##status_toast")
+                            .window("##mode_hud")
                             .position(
-                                [padding, win_size.height as f32 - padding],
+                                [win_size.width as f32 - padding, padding],
                                 imgui::Condition::Always,
                             )
-                            .position_pivot([0.0, 1.0])
-                            .bg_alpha(alpha * 0.75)
+                            .position_pivot([1.0, 0.0])
+                            .bg_alpha(0.6)
                             .no_decoration()
                             .no_inputs()
                             .movable(false)
@@ -1738,7 +1970,143 @@ impl AppState {
                             .always_auto_resize(true)
                             .begin()
                         {
-                            ui.text_colored([1.0, 1.0, 1.0, alpha], msg.as_str());
+                            let color = match self.comparison_mode {
+                                ComparisonMode::Flip => [1.0, 0.8, 0.2, 1.0],
+                                ComparisonMode::Overlay => [0.4, 0.8, 1.0, 1.0],
+                                ComparisonMode::AbsDiff => [1.0, 0.5, 0.5, 1.0],
+                                ComparisonMode::None => [1.0, 1.0, 1.0, 1.0],
+                            };
+                            ui.text_colored(color, self.comparison_mode.label());
+                        }
+                    }
+
+                    // Draw status-message toast in the bottom-left corner
+                    if let Some((msg, set_at)) = &self.status_message {
+                        let elapsed = set_at.elapsed().as_secs_f32();
+                        let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
+                        let draw_list = ui.get_foreground_draw_list();
+                        let padding = 10.0_f32;
+                        let inner_pad_x = 8.0_f32;
+                        let inner_pad_y = 6.0_f32;
+                        let text_size = ui.calc_text_size(msg);
+                        let box_w = text_size[0] + inner_pad_x * 2.0;
+                        let box_h = text_size[1] + inner_pad_y * 2.0;
+                        let box_min = [padding, ui_height - padding - box_h];
+                        let box_max = [padding + box_w, ui_height - padding];
+                        draw_list
+                            .add_rect(box_min, box_max, [0.0, 0.0, 0.0, alpha * 0.75])
+                            .filled(true)
+                            .build();
+                        draw_list.add_text(
+                            [box_min[0] + inner_pad_x, box_min[1] + inner_pad_y],
+                            [1.0, 1.0, 1.0, alpha],
+                            msg.as_str(),
+                        );
+                    }
+
+                    // Draw drag-zoom selection rectangle.
+                    if let Some(start) = self.drag_zoom_start {
+                        let current = self.drag_zoom_current;
+                        let start_ui = (start.0 * to_ui, start.1 * to_ui);
+                        let current_ui = (current.0 * to_ui, current.1 * to_ui);
+                        // ImGui expects min/max corners; normalize in case of up/left drags.
+                        let min_x = start_ui.0.min(current_ui.0);
+                        let max_x = start_ui.0.max(current_ui.0);
+                        let min_y = start_ui.1.min(current_ui.1);
+                        let max_y = start_ui.1.max(current_ui.1);
+                        let draw_list = ui.get_foreground_draw_list();
+                        // Semi-transparent yellow fill.
+                        draw_list
+                            .add_rect([min_x, min_y], [max_x, max_y], [1.0, 1.0, 0.0, 0.15])
+                            .filled(true)
+                            .build();
+                        // Solid yellow outline.
+                        draw_list
+                            .add_rect([min_x, min_y], [max_x, max_y], [1.0, 1.0, 0.0, 0.9])
+                            .thickness(1.5)
+                            .build();
+                    }
+
+                    // Draw the "waiting for drop" overlay in the centre of the window.
+                    if self.waiting_for_drop && !self.hovering_file {
+                        let cx = ui_width / 2.0;
+                        let cy = ui_height / 2.0;
+                        let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([20.0, 16.0]));
+                        if let Some(_win) = ui
+                            .window("##drop_hint")
+                            .position([cx, cy], imgui::Condition::Always)
+                            .position_pivot([0.5, 0.5])
+                            .bg_alpha(0.75)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .always_auto_resize(true)
+                            .begin()
+                        {
+                            ui.text("Drop image files or folders here");
+                            ui.spacing();
+                            ui.text_colored([0.7, 0.7, 0.7, 1.0], "1 path \u{2192} single view");
+                            ui.text_colored([0.7, 0.7, 0.7, 1.0], "2 paths \u{2192} comparison view");
+                        }
+                    }
+
+                    // Show left/right drop-zone panels during file hover (or hover + waiting).
+                    if self.hovering_file || (self.waiting_for_drop && !self.pending_drop_paths.is_empty()) {
+                        let w = ui_width;
+                        let h = ui_height;
+                        let half = w / 2.0;
+                        let cx = self.mouse_position.0 * to_ui;
+                        let over_left = cx < half;
+
+                        let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([12.0, 10.0]));
+
+                        // Left panel
+                        let left_alpha: f32 = if over_left { 0.55 } else { 0.25 };
+                        if let Some(_win) = ui
+                            .window("##drop_left")
+                            .position([0.0, 0.0], imgui::Condition::Always)
+                            .size([half, h], imgui::Condition::Always)
+                            .bg_alpha(left_alpha)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .begin()
+                        {
+                            // Centre the label inside the panel
+                            let label = if self.waiting_for_drop { "Drop here" } else { "Left" };
+                            let label_size = ui.calc_text_size(label);
+                            let pad_x = (half - label_size[0]).max(0.0) / 2.0;
+                            let pad_y = (h - label_size[1]).max(0.0) / 2.0;
+                            ui.set_cursor_pos([pad_x, pad_y]);
+                            let text_col = if over_left { [1.0, 1.0, 1.0, 1.0] } else { [0.8, 0.8, 0.8, 0.7] };
+                            ui.text_colored(text_col, label);
+                        }
+
+                        // Right panel
+                        let right_alpha: f32 = if over_left { 0.25 } else { 0.55 };
+                        if let Some(_win) = ui
+                            .window("##drop_right")
+                            .position([half, 0.0], imgui::Condition::Always)
+                            .size([half, h], imgui::Condition::Always)
+                            .bg_alpha(right_alpha)
+                            .no_decoration()
+                            .no_inputs()
+                            .movable(false)
+                            .no_nav()
+                            .focus_on_appearing(false)
+                            .begin()
+                        {
+                            let label = if self.waiting_for_drop { "Drop here" } else { "Right" };
+                            let label_size = ui.calc_text_size(label);
+                            let pad_x = (half - label_size[0]).max(0.0) / 2.0;
+                            let pad_y = (h - label_size[1]).max(0.0) / 2.0;
+                            ui.set_cursor_pos([pad_x, pad_y]);
+                            let text_col = if over_left { [0.8, 0.8, 0.8, 0.7] } else { [1.0, 1.0, 1.0, 1.0] };
+                            ui.text_colored(text_col, label);
                         }
                     }
 
@@ -1837,7 +2205,7 @@ impl AppState {
                     image1_size: [left_texture.width() as f32, left_texture.height() as f32],
                     image2_size: [right_texture.width() as f32, right_texture.height() as f32],
                     flip_diff_size,
-                    show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+                    comparison_mode: self.comparison_mode.as_f32(),
                     zoom_level: self.zoom_level,
                     zoom_center: [
                         self.fixed_zoom_center.0 + self.zoom_center_offset.0,
@@ -1847,7 +2215,9 @@ impl AppState {
                     show_image1: if self.show_image1 { 1.0 } else { 0.0 },
                     show_image2: if self.show_image2 { 1.0 } else { 0.0 },
                     show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
-                    _padding: 0.0,
+                    peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
+                    peek_factor: self.peek_zoom_factor,
+                    peek_radius: self.peek_zoom_radius,
                 };
 
                 self.queue
@@ -1906,6 +2276,7 @@ impl AppState {
                 .min(left_texture.width().saturating_sub(1));
             let py = ((zoomed_v * left_texture.height() as f32) as u32)
                 .min(left_texture.height().saturating_sub(1));
+            self.hovered_pixel = (px, py);
             let [lc, rc] = read_two_texture_pixels(
                 &self.device,
                 &self.queue,
@@ -1970,10 +2341,11 @@ impl AppState {
                         self.config.format,
                         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
                     );
-                    let screenshot_prefix = if self.show_flip_diff {
-                        "screenshot_flip"
-                    } else {
-                        "screenshot_regular"
+                    let screenshot_prefix = match self.comparison_mode {
+                        ComparisonMode::None => "screenshot_regular",
+                        ComparisonMode::Flip => "screenshot_flip",
+                        ComparisonMode::Overlay => "screenshot_overlay",
+                        ComparisonMode::AbsDiff => "screenshot_absdiff",
                     };
                     let path = generate_output_filename(screenshot_prefix, "png");
                     let result_tx = self.screenshot_result_tx.clone();
@@ -2033,7 +2405,7 @@ impl AppState {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
@@ -2101,7 +2473,7 @@ impl AppState {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
@@ -2144,14 +2516,14 @@ impl AppState {
     }
 
     pub fn next_frame(&mut self) {
-        let frame_changed = self.player.write().next_frame(self.show_flip_diff);
+        let frame_changed = self.player.write().next_frame(self.comparison_mode == ComparisonMode::Flip);
         if frame_changed {
             self.load_and_update_textures();
         }
     }
 
     pub fn previous_frame(&mut self) {
-        let frame_changed = self.player.write().previous_frame(self.show_flip_diff);
+        let frame_changed = self.player.write().previous_frame(self.comparison_mode == ComparisonMode::Flip);
         if frame_changed {
             self.load_and_update_textures();
         }
@@ -2168,6 +2540,173 @@ impl AppState {
 
         self.update_textures();
         self.player.write().process_loaded_textures();
+    }
+
+    /// Load images from a set of dropped paths and replace the current player.
+    ///
+    /// * 1 path + cursor on left  → replace left slot only (or single-input if no images yet)
+    /// * 1 path + cursor on right → replace right slot only (or single-input if no images yet)
+    /// * 2 paths → left path → left slot, right path → right slot
+    /// * 0 or >2 paths → show an error status message and do nothing
+    fn reload_from_dropped_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.hovering_file = false;
+
+        let fps = self.app_config.fps;
+
+        let count = paths.len();
+        if count == 0 || count > 2 {
+            if count > 2 {
+                self.status_message = Some((
+                    "Drop 1 or 2 paths to load images".to_string(),
+                    Instant::now(),
+                ));
+            }
+            return;
+        }
+
+        let load_images_from_path =
+            |p: &std::path::PathBuf| -> Result<Vec<(String, u64, u64)>, String> {
+                if p.is_dir() {
+                    image_loader::load_image_paths(&p.to_string_lossy(), fps)
+                        .map(|(imgs, _)| imgs)
+                        .map_err(|e| e.to_string())
+                } else if p.is_file() {
+                    image_loader::load_image_paths_from_files(
+                        &[p.to_string_lossy().into_owned()],
+                        fps,
+                    )
+                    .map(|(imgs, _)| imgs)
+                    .map_err(|e| e.to_string())
+                } else {
+                    Err(format!("Path not found: {}", p.display()))
+                }
+            };
+
+        // Determine which half the cursor is in at the time of the drop.
+        let drop_on_left = self.mouse_position.0 < self.size.width as f32 / 2.0;
+
+        // Build final (images1, images2, single_image_mode) based on count + cursor position.
+        let (images1, images2, single_image_mode, display_msg) = if count == 2 {
+            // Two paths: first → left, second → right, regardless of cursor position.
+            let imgs1 = match load_images_from_path(&paths[0]) {
+                Ok(v) if !v.is_empty() => v,
+                Ok(_) => {
+                    self.status_message = Some((
+                        format!("No images found in: {}", paths[0].display()),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    self.status_message =
+                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    return;
+                }
+            };
+            let imgs2 = match load_images_from_path(&paths[1]) {
+                Ok(v) if !v.is_empty() => v,
+                Ok(_) => {
+                    self.status_message = Some((
+                        format!("No images found in: {}", paths[1].display()),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    self.status_message =
+                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    return;
+                }
+            };
+            let msg = format!(
+                "Loaded left: {} | right: {}",
+                paths[0].file_name().map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| paths[0].to_string_lossy().into_owned()),
+                paths[1].file_name().map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| paths[1].to_string_lossy().into_owned()),
+            );
+            (imgs1, imgs2, false, msg)
+        } else {
+            // One path: use cursor position to decide which slot to fill.
+            let dropped = match load_images_from_path(&paths[0]) {
+                Ok(v) if !v.is_empty() => v,
+                Ok(_) => {
+                    self.status_message = Some((
+                        format!("No images found in: {}", paths[0].display()),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    self.status_message =
+                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    return;
+                }
+            };
+
+            let name = paths[0].file_name().map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| paths[0].to_string_lossy().into_owned());
+
+            if self.waiting_for_drop {
+                // No prior images — just open in single-input mode.
+                let msg = format!("Loaded: {}", name);
+                (dropped.clone(), dropped, true, msg)
+            } else if drop_on_left {
+                // Replace left slot; keep existing right.
+                let existing_right = self.player.read().config.image_data2.clone();
+                let (imgs2, sim) = if existing_right.is_empty() {
+                    (dropped.clone(), true)
+                } else {
+                    (existing_right, false)
+                };
+                let msg = format!("Loaded left: {}", name);
+                (dropped, imgs2, sim, msg)
+            } else {
+                // Replace right slot; keep existing left.
+                let existing_left = self.player.read().config.image_data1.clone();
+                let msg = format!("Loaded right: {}", name);
+                (existing_left, dropped, false, msg)
+            }
+        };
+
+        let new_player = Player::new(
+            PlayerConfig {
+                image_data1: images1,
+                image_data2: images2,
+                cache_size: self.app_config.cache_size,
+                preload_ahead: self.app_config.preload_ahead,
+                preload_behind: self.app_config.preload_behind,
+                num_load_threads: self.app_config.num_load_threads,
+                num_process_threads: self.app_config.num_process_threads,
+                num_flip_diff_threads: self.app_config.num_flip_diff_threads,
+                diff_preload_ahead: self.app_config.diff_preload_ahead,
+                diff_preload_behind: self.app_config.diff_preload_behind,
+                single_image_mode,
+            },
+            Arc::clone(&self.queue),
+            Arc::clone(&self.device),
+        );
+
+        info!(
+            "Reloading player from dropped path(s): {}",
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        self.player = Arc::new(RwLock::new(new_player));
+        self.single_image_mode = single_image_mode;
+        self.waiting_for_drop = false;
+        self.comparison_mode = ComparisonMode::None;
+        *self.flip_diff_texture.lock() = None;
+        self.zoom_level = 1.0;
+        self.fixed_zoom_center = (0.5, 0.5);
+        self.zoom_center_offset = (0.0, 0.0);
+
+        self.status_message = Some((display_msg, Instant::now()));
+        self.load_and_update_textures();
     }
 
     pub fn handle_event<T>(
@@ -2190,6 +2729,11 @@ impl AppState {
         } = event
         {
             self.surface_scale = scale_factor.ceil() as u32;
+            self.imgui_context.io_mut().font_global_scale = if *scale_factor > 0.0 {
+                1.0 / *scale_factor as f32
+            } else {
+                1.0
+            };
             self.resize(**new_inner_size);
         }
 
@@ -2199,6 +2743,12 @@ impl AppState {
         } = event
         {
             self.update_mouse_position(position.x as f32, position.y as f32);
+            if let Some(start) = self.drag_zoom_start {
+                self.drag_zoom_current = self.constrain_drag_to_window_aspect(
+                    start,
+                    (position.x as f32, position.y as f32),
+                );
+            }
         }
 
         if let winit::event::Event::WindowEvent {
@@ -2207,7 +2757,7 @@ impl AppState {
                     input:
                         winit::event::KeyboardInput {
                             state: winit::event::ElementState::Released,
-                            virtual_keycode: Some(VirtualKeyCode::Escape),
+                            virtual_keycode: Some(keycode),
                             ..
                         },
                     ..
@@ -2215,7 +2765,15 @@ impl AppState {
             ..
         } = event
         {
-            self.esc_key_down = false;
+            match keycode {
+                VirtualKeyCode::Escape => {
+                    self.esc_key_down = false;
+                }
+                VirtualKeyCode::Z => {
+                    self.peek_zoom_active = false;
+                }
+                _ => {}
+            }
         }
 
         if let winit::event::Event::WindowEvent {
@@ -2249,7 +2807,7 @@ impl AppState {
                 }
                 VirtualKeyCode::F => {
                     if !self.single_image_mode {
-                        self.toggle_flip_diff();
+                        self.cycle_comparison_mode();
                     }
                 }
                 VirtualKeyCode::Left | VirtualKeyCode::Right => {
@@ -2276,11 +2834,16 @@ impl AppState {
                 VirtualKeyCode::A => self.handle_zoom_move((-1.0, 0.0)),
                 VirtualKeyCode::S => self.handle_zoom_move((0.0, 1.0)),
                 VirtualKeyCode::D => self.handle_zoom_move((1.0, 0.0)),
+                VirtualKeyCode::Minus => self.adjust_peek_zoom_factor(-PEEK_ZOOM_FACTOR_STEP),
+                VirtualKeyCode::Equals => self.adjust_peek_zoom_factor(PEEK_ZOOM_FACTOR_STEP),
                 VirtualKeyCode::P => {
                     self.save_flip_diff_image();
                 }
                 VirtualKeyCode::I => {
                     self.request_screenshot();
+                }
+                VirtualKeyCode::U => {
+                    self.save_combined_screenshot();
                 }
                 VirtualKeyCode::Key1 => {
                     self.toggle_image_source(true);
@@ -2300,6 +2863,18 @@ impl AppState {
                 VirtualKeyCode::H => {
                     self.help_overlay.toggle();
                 }
+                VirtualKeyCode::R => {
+                    self.zoom_level = 1.0;
+                    self.fixed_zoom_center = (0.5, 0.5);
+                    self.zoom_center_offset = (0.0, 0.0);
+                    self.update_uniform_buffer();
+                }
+                VirtualKeyCode::O => {
+                    self.show_hud = !self.show_hud;
+                }
+                VirtualKeyCode::Z => {
+                    self.peek_zoom_active = true;
+                }
                 _ => {}
             }
         }
@@ -2308,8 +2883,64 @@ impl AppState {
             self.handle_zoom(delta);
         }
 
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::MouseInput {
+                button: winit::event::MouseButton::Left,
+                state,
+                ..
+            },
+            ..
+        } = event
+        {
+            match state {
+                winit::event::ElementState::Pressed => {
+                    if !self.imgui_context.io().want_capture_mouse {
+                        let start = self.clamp_to_render_rect(self.mouse_position);
+                        self.drag_zoom_start = Some(start);
+                        self.drag_zoom_current = start;
+                    }
+                }
+                winit::event::ElementState::Released => {
+                    if let Some(start) = self.drag_zoom_start.take() {
+                        let current = self.constrain_drag_to_window_aspect(start, self.drag_zoom_current);
+                        let dx = (current.0 - start.0).abs();
+                        let dy = (current.1 - start.1).abs();
+                        if dx > MIN_DRAG_ZOOM_DISTANCE_PX || dy > MIN_DRAG_ZOOM_DISTANCE_PX {
+                            self.apply_drag_zoom(start, current);
+                        }
+                    }
+                }
+            }
+        }
+
         if let winit::event::Event::WindowEvent { event: WindowEvent::Touch(touch), .. } = event {
             self.handle_touch(touch);
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::DroppedFile(path),
+            ..
+        } = event
+        {
+            self.pending_drop_paths.push(path.clone());
+            self.hovering_file = false;
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::HoveredFile(_),
+            ..
+        } = event
+        {
+            self.hovering_file = true;
+        }
+
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::HoveredFileCancelled,
+            ..
+        } = event
+        {
+            self.pending_drop_paths.clear();
+            self.hovering_file = false;
         }
 
         self.imgui_platform
@@ -2341,11 +2972,23 @@ impl AppState {
         }
     }
 
-    pub fn update_mouse_position(&mut self, x: f32, y: f32) {
+    fn compute_render_rect(&self) -> (f32, f32, f32, f32) {
         let (render_width, render_height) = self.compute_render_dimensions();
-
         let x_offset = (self.size.width as f32 - render_width) / 2.0;
         let y_offset = (self.size.height as f32 - render_height) / 2.0;
+        (x_offset, y_offset, render_width, render_height)
+    }
+
+    fn clamp_to_render_rect(&self, position: (f32, f32)) -> (f32, f32) {
+        let (x_offset, y_offset, render_width, render_height) = self.compute_render_rect();
+        (
+            position.0.clamp(x_offset, x_offset + render_width),
+            position.1.clamp(y_offset, y_offset + render_height),
+        )
+    }
+
+    pub fn update_mouse_position(&mut self, x: f32, y: f32) {
+        let (x_offset, y_offset, render_width, render_height) = self.compute_render_rect();
 
         self.mouse_position = (x, y);
         self.cursor_x = if self.single_image_mode {
@@ -2357,14 +3000,17 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
-    pub fn toggle_flip_diff(&mut self) {
-        self.show_flip_diff = !self.show_flip_diff;
-        if self.show_flip_diff {
+    pub fn cycle_comparison_mode(&mut self) {
+        self.comparison_mode = self.comparison_mode.cycle();
+        if self.comparison_mode == ComparisonMode::Flip {
             let (current_left, current_right) = self.player.read().current_images();
             self.player
                 .write()
                 .generate_flip_diff(current_left, current_right);
         }
+        let label = self.comparison_mode.label();
+        self.status_message = Some((format!("Comparison mode: {}", label), Instant::now()));
+        self.update_uniform_buffer();
     }
 
     pub fn toggle_image_source(&mut self, is_left: bool) {
@@ -2391,7 +3037,7 @@ impl AppState {
             }
         };
 
-        let new_zoom_level = (self.zoom_level * zoom_factor).clamp(1.0, 10.0);
+        let new_zoom_level = (self.zoom_level * zoom_factor).clamp(1.0, MAX_ZOOM_LEVEL);
 
         // Convert cursor position to texture coordinates [0, 1] using render dimensions.
         let (render_width, render_height) = self.compute_render_dimensions();
@@ -2448,7 +3094,7 @@ impl AppState {
             image1_size,
             image2_size,
             flip_diff_size: [self.size.width as f32, self.size.height as f32],
-            show_flip_diff: if self.show_flip_diff { 1.0 } else { 0.0 },
+            comparison_mode: self.comparison_mode.as_f32(),
             zoom_level: self.zoom_level,
             zoom_center: [
                 self.fixed_zoom_center.0 + self.zoom_center_offset.0,
@@ -2458,7 +3104,9 @@ impl AppState {
             show_image1: if self.show_image1 { 1.0 } else { 0.0 },
             show_image2: if self.show_image2 { 1.0 } else { 0.0 },
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
-            _padding: 0.0,
+            peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
+            peek_factor: self.peek_zoom_factor,
+            peek_radius: self.peek_zoom_radius,
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
@@ -2519,6 +3167,111 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
+    fn adjust_peek_zoom_factor(&mut self, delta: f32) {
+        self.peek_zoom_factor = (self.peek_zoom_factor + delta)
+            .clamp(MIN_PEEK_ZOOM_FACTOR, MAX_PEEK_ZOOM_FACTOR);
+        self.status_message = Some((
+            format!("Peek zoom: {:.2}x", self.peek_zoom_factor),
+            Instant::now(),
+        ));
+        self.update_uniform_buffer();
+    }
+
+    /// Constrain drag end-point so the selection box keeps the render-area aspect ratio.
+    fn constrain_drag_to_window_aspect(&self, start: (f32, f32), end: (f32, f32)) -> (f32, f32) {
+        let (x_offset, y_offset, render_width, render_height) = self.compute_render_rect();
+        let start = self.clamp_to_render_rect(start);
+        let end = self.clamp_to_render_rect(end);
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let abs_dx = dx.abs();
+        let abs_dy = dy.abs();
+        if abs_dx <= f32::EPSILON && abs_dy <= f32::EPSILON {
+            return end;
+        }
+
+        let aspect = render_width / render_height.max(1.0);
+        let sign_x = if dx < 0.0 { -1.0 } else { 1.0 };
+        let sign_y = if dy < 0.0 { -1.0 } else { 1.0 };
+
+        let (new_abs_dx, new_abs_dy) = if abs_dy <= f32::EPSILON {
+            (abs_dx, abs_dx / aspect)
+        } else if abs_dx <= f32::EPSILON {
+            (abs_dy * aspect, abs_dy)
+        } else if abs_dx / abs_dy > aspect {
+            (abs_dx, abs_dx / aspect)
+        } else {
+            (abs_dy * aspect, abs_dy)
+        };
+
+        let max_abs_dx = if sign_x > 0.0 {
+            (x_offset + render_width) - start.0
+        } else {
+            start.0 - x_offset
+        };
+        let max_abs_dy = if sign_y > 0.0 {
+            (y_offset + render_height) - start.1
+        } else {
+            start.1 - y_offset
+        };
+        let scale_x = if new_abs_dx > f32::EPSILON {
+            max_abs_dx / new_abs_dx
+        } else {
+            1.0
+        };
+        let scale_y = if new_abs_dy > f32::EPSILON {
+            max_abs_dy / new_abs_dy
+        } else {
+            1.0
+        };
+        let scale = scale_x.min(scale_y).clamp(0.0, 1.0);
+        let constrained_abs_dx = new_abs_dx * scale;
+        let constrained_abs_dy = new_abs_dy * scale;
+
+        (
+            start.0 + sign_x * constrained_abs_dx,
+            start.1 + sign_y * constrained_abs_dy,
+        )
+    }
+
+    /// Apply a zoom that fits the drag rectangle defined by two screen-space positions.
+    fn apply_drag_zoom(&mut self, start: (f32, f32), end: (f32, f32)) {
+        let (x_offset, y_offset, render_width, render_height) = self.compute_render_rect();
+        let start = self.clamp_to_render_rect(start);
+        let end = self.clamp_to_render_rect(end);
+
+        // Convert screen coordinates to normalised image UV [0, 1].
+        let u1 = ((start.0 - x_offset) / render_width).clamp(0.0, 1.0);
+        let v1 = ((start.1 - y_offset) / render_height).clamp(0.0, 1.0);
+        let u2 = ((end.0 - x_offset) / render_width).clamp(0.0, 1.0);
+        let v2 = ((end.1 - y_offset) / render_height).clamp(0.0, 1.0);
+
+        let (u1, u2) = (u1.min(u2), u1.max(u2));
+        let (v1, v2) = (v1.min(v2), v1.max(v2));
+
+        let du = u2 - u1;
+        let dv = v2 - v1;
+
+        if du < MIN_DRAG_ZOOM_UV_SIZE || dv < MIN_DRAG_ZOOM_UV_SIZE {
+            return;
+        }
+
+        // Choose the zoom level that fully shows the rectangle.
+        let new_zoom_level = (1.0_f32 / du).min(1.0 / dv).clamp(1.0, MAX_ZOOM_LEVEL);
+        let new_center_x = (u1 + u2) / 2.0;
+        let new_center_y = (v1 + v2) / 2.0;
+
+        let max_offset_x = (1.0 - 1.0 / new_zoom_level) / 2.0;
+        let max_offset_y = (1.0 - 1.0 / new_zoom_level) / 2.0;
+        let clamped_center_x = new_center_x.clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
+        let clamped_center_y = new_center_y.clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
+
+        self.zoom_level = new_zoom_level;
+        self.fixed_zoom_center = (clamped_center_x, clamped_center_y);
+        self.zoom_center_offset = (0.0, 0.0);
+        self.update_uniform_buffer();
+    }
+
     /// Save the current FLIP diff image to a PNG file.
     pub fn save_flip_diff_image(&mut self) {
         let player = self.player.read();
@@ -2552,6 +3305,77 @@ impl AppState {
         self.screenshot_requested = true;
         self.status_message = Some(("Saving screenshot...".to_string(), Instant::now()));
     }
+
+    /// Save a combined image with all available sources (left, right, and optionally
+    /// FLIP diff) stitched side-by-side into a single PNG file.
+    pub fn save_combined_screenshot(&mut self) {
+        let player = self.player.read();
+        let (left_index, right_index) = player.current_images();
+
+        let left = player.get_current_frame_image_data(left_index, true);
+        let right = if self.single_image_mode {
+            None
+        } else {
+            player.get_current_frame_image_data(right_index, false)
+        };
+        let flip_diff = if self.comparison_mode == ComparisonMode::Flip && !self.single_image_mode {
+            player.get_flip_diff_raw_data(left_index, right_index)
+        } else {
+            None
+        };
+        drop(player);
+
+        let mut panels: Vec<(Vec<u8>, u32, u32)> = Vec::new();
+        if let Some(l) = left {
+            panels.push(l);
+        }
+        if let Some(r) = right {
+            panels.push(r);
+        }
+        if let Some(d) = flip_diff {
+            panels.push(d);
+        }
+
+        if panels.is_empty() {
+            self.status_message = Some(("No images available for combined screenshot.".to_string(), Instant::now()));
+            return;
+        }
+
+        let (combined_pixels, combined_width, combined_height) = stitch_images_side_by_side(&panels);
+        let path = generate_output_filename("combined_screenshot", "png");
+        match image::save_buffer(&path, &combined_pixels, combined_width, combined_height, image::ColorType::Rgba8) {
+            Ok(_) => {
+                info!("Combined screenshot saved to {}", path);
+                self.status_message = Some((format!("Combined screenshot saved: {}", path), Instant::now()));
+            }
+            Err(e) => {
+                warn!("Failed to save combined screenshot: {}", e);
+                self.status_message = Some((format!("Failed to save combined screenshot: {}", e), Instant::now()));
+            }
+        }
+    }
+}
+
+/// Stitch multiple RGBA images side-by-side into a single image.
+/// Each element is `(pixels, width, height)`. The output height equals the
+/// tallest input; shorter panels are padded with transparent black rows at
+/// the bottom.
+fn stitch_images_side_by_side(panels: &[(Vec<u8>, u32, u32)]) -> (Vec<u8>, u32, u32) {
+    let total_width: u32 = panels.iter().map(|(_, w, _)| w).sum();
+    let max_height: u32 = panels.iter().map(|(_, _, h)| *h).max().unwrap_or(0);
+    let mut combined = vec![0u8; (total_width * max_height * 4) as usize];
+    let mut x_offset = 0u32;
+    for (data, width, height) in panels {
+        for row in 0..*height {
+            let src_start = (row * width * 4) as usize;
+            let src_end = src_start + (width * 4) as usize;
+            let dst_start = (row * total_width * 4 + x_offset * 4) as usize;
+            combined[dst_start..dst_start + (width * 4) as usize]
+                .copy_from_slice(&data[src_start..src_end]);
+        }
+        x_offset += width;
+    }
+    (combined, total_width, max_height)
 }
 
 /// Generate a timestamped output file path in the current directory.
@@ -2565,7 +3389,7 @@ fn generate_output_filename(prefix: &str, extension: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::generate_output_filename;
+    use super::{generate_output_filename, stitch_images_side_by_side};
 
     #[test]
     fn test_generate_output_filename_format() {
@@ -2653,5 +3477,146 @@ mod tests {
         }
 
         assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    }
+
+    /// Verifies that `stitch_images_side_by_side` places two 1×1 panels next to each other.
+    #[test]
+    fn test_stitch_two_1x1_images() {
+        // Panel 1: a single red pixel
+        let red: Vec<u8> = vec![255, 0, 0, 255];
+        // Panel 2: a single blue pixel
+        let blue: Vec<u8> = vec![0, 0, 255, 255];
+        let panels = vec![(red.clone(), 1u32, 1u32), (blue.clone(), 1u32, 1u32)];
+        let (combined, width, height) = stitch_images_side_by_side(&panels);
+        assert_eq!(width, 2, "combined width should be 2");
+        assert_eq!(height, 1, "combined height should be 1");
+        assert_eq!(&combined[0..4], &red[..], "first pixel should be red");
+        assert_eq!(&combined[4..8], &blue[..], "second pixel should be blue");
+    }
+
+    /// Verifies that `stitch_images_side_by_side` pads shorter panels with transparent rows.
+    #[test]
+    fn test_stitch_images_height_padding() {
+        // Panel 1: 1×2 (green column)
+        let green_top: Vec<u8> = vec![0, 255, 0, 255, 0, 255, 0, 255]; // 2 rows
+        // Panel 2: 1×1 (red pixel — shorter than panel 1)
+        let red: Vec<u8> = vec![255, 0, 0, 255];
+        let panels = vec![(green_top, 1u32, 2u32), (red, 1u32, 1u32)];
+        let (combined, width, height) = stitch_images_side_by_side(&panels);
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+        // Row 0: green | red
+        assert_eq!(&combined[0..4], &[0, 255, 0, 255], "row0 col0 should be green");
+        assert_eq!(&combined[4..8], &[255, 0, 0, 255], "row0 col1 should be red");
+        // Row 1: green | transparent (zero-initialised)
+        assert_eq!(&combined[8..12], &[0, 255, 0, 255], "row1 col0 should be green");
+        assert_eq!(&combined[12..16], &[0, 0, 0, 0], "row1 col1 should be transparent padding");
+    }
+
+    /// Verifies that `stitch_images_side_by_side` with a single panel is a no-op copy.
+    #[test]
+    fn test_stitch_single_panel() {
+        let pixels: Vec<u8> = (0..16).collect(); // 2×2 RGBA
+        let panels = vec![(pixels.clone(), 2u32, 2u32)];
+        let (combined, width, height) = stitch_images_side_by_side(&panels);
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+        assert_eq!(combined, pixels);
+    }
+
+    /// Tests for the drag-and-drop path loading helper used by reload_from_dropped_paths.
+    mod drop_tests {
+        use crate::image_loader;
+        use std::fs;
+
+        /// Loading a single image file via load_image_paths_from_files gives 1 entry.
+        #[test]
+        fn test_drop_single_image_file() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let img = image::RgbaImage::new(4, 4);
+            let img_path = dir.path().join("frame.png");
+            img.save(&img_path).unwrap();
+
+            let fps = 30.0;
+            let result = image_loader::load_image_paths_from_files(
+                &[img_path.to_string_lossy().into_owned()],
+                fps,
+            );
+            assert!(result.is_ok(), "should load single image file");
+            let (imgs, count) = result.unwrap();
+            assert_eq!(count, 1);
+            assert_eq!(imgs.len(), 1);
+        }
+
+        /// Loading a directory with images uses load_image_paths and returns entries.
+        #[test]
+        fn test_drop_directory_with_images() {
+            let dir = tempfile::TempDir::new().unwrap();
+            for i in 0..3u32 {
+                let img = image::RgbaImage::new(4, 4);
+                img.save(dir.path().join(format!("{}.png", i))).unwrap();
+            }
+
+            let fps = 30.0;
+            let result = image_loader::load_image_paths(&dir.path().to_string_lossy(), fps);
+            assert!(result.is_ok(), "should load from directory");
+            let (imgs, count) = result.unwrap();
+            assert_eq!(count, 3);
+            assert_eq!(imgs.len(), 3);
+        }
+
+        /// Dropping a non-existent path fails with a meaningful error.
+        #[test]
+        fn test_drop_nonexistent_path() {
+            let fps = 30.0;
+            let bad_path = std::path::PathBuf::from("/nonexistent/path/that/does/not/exist");
+            let result = if bad_path.is_dir() {
+                image_loader::load_image_paths(&bad_path.to_string_lossy(), fps)
+                    .map(|(v, _)| v)
+                    .map_err(|e| e.to_string())
+            } else if bad_path.is_file() {
+                image_loader::load_image_paths_from_files(
+                    &[bad_path.to_string_lossy().into_owned()],
+                    fps,
+                )
+                .map(|(v, _)| v)
+                .map_err(|e| e.to_string())
+            } else {
+                Err(format!("Path not found: {}", bad_path.display()))
+            };
+            assert!(result.is_err(), "should fail for nonexistent path");
+            assert!(
+                result.unwrap_err().contains("not found"),
+                "error message should mention 'not found'"
+            );
+        }
+
+        /// Dropping a non-image file fails with a meaningful error.
+        #[test]
+        fn test_drop_non_image_file() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let txt_path = dir.path().join("notes.txt");
+            fs::write(&txt_path, "not an image").unwrap();
+
+            let fps = 30.0;
+            let result = image_loader::load_image_paths_from_files(
+                &[txt_path.to_string_lossy().into_owned()],
+                fps,
+            );
+            assert!(result.is_err(), "should fail for non-image file");
+        }
+
+        /// An empty directory produces no images.
+        #[test]
+        fn test_drop_empty_directory() {
+            let dir = tempfile::TempDir::new().unwrap();
+            let fps = 30.0;
+            let result = image_loader::load_image_paths(&dir.path().to_string_lossy(), fps);
+            // Should succeed but return 0 images
+            assert!(result.is_ok());
+            let (imgs, count) = result.unwrap();
+            assert_eq!(count, 0);
+            assert!(imgs.is_empty());
+        }
     }
 }

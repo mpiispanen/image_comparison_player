@@ -146,6 +146,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Frames per second (overrides input.txt durations)")
                 .default_value("30"),
         )
+        .arg(
+            Arg::new("peek_zoom_factor")
+                .long("peek-zoom-factor")
+                .action(ArgAction::Set)
+                .value_name("FACTOR")
+                .help("Magnification factor for hold-to-peek zoom (Z key)")
+                .default_value("4.0"),
+        )
         .get_matches();
 
     let test_mode = matches.get_flag("test_mode");
@@ -168,12 +176,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let images2: Option<Vec<String>> = matches
             .get_many::<String>("images2")
             .map(|vals| vals.cloned().collect());
-
-        if dir1.is_none() && images1.as_ref().is_none_or(|v| v.is_empty()) {
-            return Err(
-                "Either --dir1 or --images1 (with at least one file) must be provided".into(),
-            );
-        }
 
         (dir1, dir2, images1, images2)
     };
@@ -224,15 +226,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .parse()
         .unwrap_or(30.0);
+    let peek_zoom_factor: f32 = matches
+        .get_one::<String>("peek_zoom_factor")
+        .unwrap()
+        .parse()
+        .unwrap_or(4.0);
 
     let (width, height) = parse_window_size(window_size)?;
 
     info!(
         "Starting image comparison player with input1: {}, input2: {}, window size: {}x{}",
         dir1.as_deref()
-            .unwrap_or_else(|| images1.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("?")),
+            .unwrap_or_else(|| images1.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("<none>")),
         dir2.as_deref()
-            .unwrap_or_else(|| images2.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("<single image mode>")),
+            .unwrap_or_else(|| images2.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("<none>")),
         width,
         height
     );
@@ -257,6 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diff_preload_ahead,
         diff_preload_behind,
         fps,
+        peek_zoom_factor,
     };
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;
