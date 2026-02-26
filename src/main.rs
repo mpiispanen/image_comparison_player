@@ -24,8 +24,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::new("test_mode")
                 .long("test-mode")
                 .action(ArgAction::SetTrue)
-                .conflicts_with_all(["dir1", "dir2", "images1", "images2"])
-                .help("Run in testing mode with synthetically generated images (no real image files required)"),
+                .conflicts_with_all(["dir1", "dir2", "dir3", "dir4", "images1", "images2", "images3", "images4"])
+                .help("Run in testing mode with synthetically generated images for all four sequences (no real image files required)"),
         )
         .arg(
             Arg::new("dir1")
@@ -186,14 +186,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let test_mode = matches.get_flag("test_mode");
 
-    let (dir1, dir2, images1, images2) = if test_mode {
-        info!("Test mode enabled -- generating synthetic test images");
-        let (d1, d2) = test_images::generate_test_images()?;
+    let (dir1, dir2, images1, images2, extra_dirs_raw, extra_images_raw) = if test_mode {
+        info!("Test mode enabled -- generating synthetic test images for all four sequences");
+        let (d1, d2, d3, d4) = test_images::generate_test_images_multi()?;
         (
             Some(d1.to_string_lossy().into_owned()),
             Some(d2.to_string_lossy().into_owned()),
-            None,
-            None,
+            None::<Vec<String>>,
+            None::<Vec<String>>,
+            vec![
+                Some(d3.to_string_lossy().into_owned()),
+                Some(d4.to_string_lossy().into_owned()),
+            ],
+            vec![None::<Vec<String>>, None::<Vec<String>>],
         )
     } else {
         let dir1 = matches.get_one::<String>("dir1").cloned();
@@ -211,42 +216,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        (dir1, dir2, images1, images2)
-    };
-
-    // Extra sequences (3rd, 4th, …) — only parsed in non-test mode.
-    let extra_dirs: Vec<Option<String>> = if test_mode {
-        vec![]
-    } else {
-        vec![
+        let extra_dirs = vec![
             matches.get_one::<String>("dir3").cloned(),
             matches.get_one::<String>("dir4").cloned(),
-        ]
+        ];
+        let extra_images_3: Option<Vec<String>> =
+            matches.get_many::<String>("images3").map(|vals| vals.cloned().collect());
+        let extra_images_4: Option<Vec<String>> =
+            matches.get_many::<String>("images4").map(|vals| vals.cloned().collect());
+        let extra_images = vec![extra_images_3, extra_images_4];
+
+        (dir1, dir2, images1, images2, extra_dirs, extra_images)
     };
-    let extra_images_3: Option<Vec<String>> = if test_mode {
-        None
-    } else {
-        matches.get_many::<String>("images3").map(|vals| vals.cloned().collect())
-    };
-    let extra_images_4: Option<Vec<String>> = if test_mode {
-        None
-    } else {
-        matches.get_many::<String>("images4").map(|vals| vals.cloned().collect())
-    };
-    // Build per-sequence extra-images lists aligned with extra_dirs.
-    let extra_images: Vec<Option<Vec<String>>> = if test_mode {
-        vec![]
-    } else {
-        vec![extra_images_3, extra_images_4]
-    };
+
     // Trim trailing pairs that carry no data (both dir and images list are None).
     let num_extra = {
-        let max_with_dir = extra_dirs.iter().rposition(|d| d.is_some()).map(|i| i + 1).unwrap_or(0);
-        let max_with_imgs = extra_images.iter().rposition(|im| im.is_some()).map(|i| i + 1).unwrap_or(0);
+        let max_with_dir = extra_dirs_raw.iter().rposition(|d| d.is_some()).map(|i| i + 1).unwrap_or(0);
+        let max_with_imgs = extra_images_raw.iter().rposition(|im| im.is_some()).map(|i| i + 1).unwrap_or(0);
         max_with_dir.max(max_with_imgs)
     };
-    let extra_dirs: Vec<Option<String>> = extra_dirs.into_iter().take(num_extra).collect();
-    let extra_images: Vec<Option<Vec<String>>> = extra_images.into_iter().take(num_extra).collect();
+    let extra_dirs: Vec<Option<String>> = extra_dirs_raw.into_iter().take(num_extra).collect();
+    let extra_images: Vec<Option<Vec<String>>> = extra_images_raw.into_iter().take(num_extra).collect();
 
     let window_size = matches.get_one::<String>("window_size").unwrap();
     let cache_size = matches
