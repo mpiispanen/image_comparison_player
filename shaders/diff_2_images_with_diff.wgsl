@@ -86,11 +86,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color_top = mix(color1 * uniforms.show_image1, color2 * uniforms.show_image2, t_x);
 
     // Apply diff_multiplier to FLIP diff visualization.
-    // diff_multiplier defaults to 10.0; dividing by 10.0 normalises so default = no change.
-    // Increasing the multiplier boosts brightness of the FLIP colormap, making faint errors
-    // (dark/purple on the magma scale) easier to see.
-    let flip_scale = uniforms.diff_multiplier / 10.0;
-    var modified_diff = vec4(clamp(color_diff.rgb * flip_scale, vec3(0.0), vec3(1.0)), color_diff.a);
+    // diff_multiplier defaults to 1.0 (no amplification); increasing it boosts brightness of
+    // the FLIP colormap, making faint errors (dark/purple on the magma scale) easier to see.
+    var modified_diff = vec4(clamp(color_diff.rgb * uniforms.diff_multiplier, vec3(0.0), vec3(1.0)), color_diff.a);
 
     // Pump animation for small FLIP diffs: global synchronized pulse so clusters of low-error
     // pixels blink in unison rather than creating independent per-pixel ring patterns.

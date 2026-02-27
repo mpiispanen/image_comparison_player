@@ -49,7 +49,7 @@ struct UniformData {
     peek_active: f32,  // 1.0 when peek zoom is held (Z key)
     peek_factor: f32,  // peek magnification factor
     peek_radius: f32,  // peek window radius in screen pixels
-    diff_multiplier: f32,  // multiplier applied to abs-diff values (default 10.0)
+    diff_multiplier: f32,  // multiplier applied to abs-diff values (default 1.0)
     pump_active: f32,  // 1.0 when pumping animation is enabled
     time: f32,         // elapsed seconds (for animation)
     _padding: f32,
@@ -1615,7 +1615,7 @@ impl AppState {
             marker_overlay: MarkerOverlay::new(),
             marker_drag_start: None,
             marker_drag_current: (0.0, 0.0),
-            diff_enhance_factor: 10.0,
+            diff_enhance_factor: 1.0,
             pump_animation_active: false,
             start_time: Instant::now(),
         })
@@ -3493,7 +3493,35 @@ impl AppState {
             player.get_current_frame_image_data(right_index, false)
         };
         let flip_diff = if self.comparison_mode == ComparisonMode::Flip && !self.single_image_mode {
-            player.get_flip_diff_raw_data(left_index, right_index)
+            player.get_flip_diff_raw_data(left_index, right_index).map(|(mut pixels, w, h)| {
+                // Apply diff_multiplier: amplify the FLIP colormap brightness.
+                let factor = self.diff_enhance_factor;
+                if (factor - 1.0).abs() > f32::EPSILON {
+                    for chunk in pixels.chunks_mut(4) {
+                        chunk[0] = ((chunk[0] as f32 * factor).min(255.0)) as u8;
+                        chunk[1] = ((chunk[1] as f32 * factor).min(255.0)) as u8;
+                        chunk[2] = ((chunk[2] as f32 * factor).min(255.0)) as u8;
+                    }
+                }
+                (pixels, w, h)
+            })
+        } else if self.comparison_mode == ComparisonMode::AbsDiff && !self.single_image_mode {
+            // Compute per-pixel abs diff from the two source images.
+            let left_data = player.get_current_frame_image_data(left_index, true);
+            let right_data = player.get_current_frame_image_data(right_index, false);
+            match (left_data, right_data) {
+                (Some((lp, lw, lh)), Some((rp, rw, rh))) if lw == rw && lh == rh => {
+                    let factor = self.diff_enhance_factor;
+                    let pixels: Vec<u8> = lp.chunks(4).zip(rp.chunks(4)).flat_map(|(l, r)| {
+                        let dr = ((l[0] as i16 - r[0] as i16).abs() as f32 * factor).min(255.0) as u8;
+                        let dg = ((l[1] as i16 - r[1] as i16).abs() as f32 * factor).min(255.0) as u8;
+                        let db = ((l[2] as i16 - r[2] as i16).abs() as f32 * factor).min(255.0) as u8;
+                        [dr, dg, db, 255u8]
+                    }).collect();
+                    Some((pixels, lw, lh))
+                }
+                _ => None,
+            }
         } else {
             None
         };
