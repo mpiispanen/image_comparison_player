@@ -98,7 +98,17 @@ impl ComparisonMode {
     }
 }
 
+/// Controls which images are visible: normal side-by-side split or a full-screen solo view.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
+enum ViewMode {
+    /// Both images shown with a movable split line (default).
+    #[default]
+    Split,
+    /// One image fills the full frame; `solo_view_source` selects which one.
+    Solo,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum PeekImageMode {
     #[default]
     Both,
@@ -929,7 +939,8 @@ impl HelpOverlay {
                     ui.text("  L              Toggle split-line divider");
                     ui.text("  F              Cycle comparison mode");
                     ui.text("                 (Normal -> FLIP -> Overlay -> Abs Diff)");
-                    ui.text("  1 / 2          Show only left / right image");
+                    ui.text("  1 / 2          Solo view: show only left / right image");
+                    ui.text("                 (press same key again to return to split view)");
                     ui.text("  P              Save FLIP diff image");
                     ui.text("  , / .          Decrease / Increase diff multiplier");
                     ui.text("  T              Toggle diff highlight animation");
@@ -1185,6 +1196,10 @@ pub struct AppState {
     left_label: String,
     /// Short display label for the right/second image source (shown in HUD).
     right_label: String,
+    /// Whether we are in solo (one-image-at-a-time) view or the normal split view.
+    view_mode: ViewMode,
+    /// Index of the image source shown in solo view mode (0 = left/first, 1 = right/second).
+    solo_view_source: usize,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1712,6 +1727,8 @@ impl AppState {
             start_time: Instant::now(),
             left_label,
             right_label,
+            view_mode: ViewMode::Split,
+            solo_view_source: 0,
         })
     }
 
@@ -1815,6 +1832,8 @@ impl AppState {
             (scaled_width, scaled_height)
         };
 
+        let (show_image1, show_image2) = self.effective_show_images();
+
         let uniforms = UniformData {
             cursor_x: if self.single_image_mode { 1.0 } else { self.cursor_x / render_width },
             cursor_y: self.cursor_y / render_height,
@@ -1828,8 +1847,8 @@ impl AppState {
                 self.fixed_zoom_center.1 + self.zoom_center_offset.1
             ],
             window_size: [window_size.width as f32, window_size.height as f32],
-            show_image1: if self.show_image1 { 1.0 } else { 0.0 },
-            show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+            show_image1,
+            show_image2,
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
             peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
             peek_factor: self.peek_zoom_factor,
@@ -1837,7 +1856,7 @@ impl AppState {
             diff_multiplier: self.diff_enhance_factor,
             pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
             time: self.start_time.elapsed().as_secs_f32(),
-            peek_show_image: self.peek_image_mode.as_f32(),
+            peek_show_image: self.effective_peek_image_mode().as_f32(),
         };
 
         debug!("Created texture view");
@@ -2008,15 +2027,22 @@ impl AppState {
                         drop(player);
 
                         let compare_mode = if self.single_image_mode {
-                            "Single"
+                            "Single".to_string()
+                        } else if self.view_mode == ViewMode::Solo {
+                            let src_label = if self.solo_view_source == 0 {
+                                &left_frame_label
+                            } else {
+                                &right_frame_label
+                            };
+                            format!("Solo: {}", src_label)
                         } else if self.comparison_mode == ComparisonMode::Flip {
-                            "FLIP diff"
+                            "FLIP diff".to_string()
                         } else if !self.show_image1 {
-                            "Right only"
+                            "Right only".to_string()
                         } else if !self.show_image2 {
-                            "Left only"
+                            "Left only".to_string()
                         } else {
-                            "Split"
+                            "Split".to_string()
                         };
 
                         let draw_list = ui.get_foreground_draw_list();
@@ -2080,92 +2106,121 @@ impl AppState {
                             let right_text_size = ui.calc_text_size(&right_frame_label);
                             let hud_reserved_top = padding + box_h + 6.0;
                             let top_y = (y_off_ui + vpad).max(hud_reserved_top);
-                            let label_h = left_text_size[1].max(right_text_size[1]);
-                            let max_top_y = original_bottom_ui - label_h - vpad;
-                            if top_y <= max_top_y {
-                                // Left label centered in the left source region.
-                                let left_region_start = x_off_ui;
-                                let left_region_end = split_x_ui;
-                                let left_center = (left_region_start + left_region_end) * 0.5;
-                                let left_bound_min = left_region_start + lpad;
-                                let left_bound_max = left_region_end - lpad;
-                                let lx = if left_bound_max - left_bound_min >= left_text_size[0] {
-                                    (left_center - left_text_size[0] * 0.5).clamp(
-                                        left_bound_min,
-                                        left_bound_max - left_text_size[0],
-                                    )
-                                } else {
-                                    -1.0
-                                };
-                                if lx >= 0.0 {
-                                    let ly = top_y;
-                                    draw_list
-                                        .add_rect(
-                                            [lx - vpad, ly - vpad],
-                                            [lx + left_text_size[0] + vpad, ly + left_text_size[1] + vpad],
-                                            [0.0, 0.0, 0.0, 0.65],
-                                        )
-                                        .filled(true)
-                                        .build();
-                                    draw_list.add_text([lx, ly], [1.0, 1.0, 1.0, 1.0], &left_frame_label);
-                                }
 
-                                // Right label centered in the right source region.
-                                let right_region_start = split_x_ui;
-                                let right_region_end = x_off_ui + render_w_ui;
-                                let right_center = (right_region_start + right_region_end) * 0.5;
-                                let right_bound_min = right_region_start + lpad;
-                                let right_bound_max = right_region_end - lpad;
-                                let rx = if right_bound_max - right_bound_min >= right_text_size[0] {
-                                    (right_center - right_text_size[0] * 0.5).clamp(
-                                        right_bound_min,
-                                        right_bound_max - right_text_size[0],
-                                    )
+                            if self.view_mode == ViewMode::Solo {
+                                // Solo mode: show only the active source label, centered in the full image area.
+                                let (solo_label, solo_text_size) = if self.solo_view_source == 0 {
+                                    (&left_frame_label, left_text_size)
                                 } else {
-                                    -1.0
+                                    (&right_frame_label, right_text_size)
                                 };
-                                if rx >= 0.0 {
-                                    let ry = top_y;
-                                    draw_list
-                                        .add_rect(
-                                            [rx - vpad, ry - vpad],
-                                            [rx + right_text_size[0] + vpad, ry + right_text_size[1] + vpad],
-                                            [0.0, 0.0, 0.0, 0.65],
-                                        )
-                                        .filled(true)
-                                        .build();
-                                    draw_list.add_text([rx, ry], [1.0, 1.0, 1.0, 1.0], &right_frame_label);
-                                }
-                            }
-
-                            if self.comparison_mode != ComparisonMode::None {
-                                let diff_label = match self.comparison_mode {
-                                    ComparisonMode::Flip => "FLIP Diff",
-                                    ComparisonMode::Overlay => "Overlay",
-                                    ComparisonMode::AbsDiff => "Abs Diff",
-                                    ComparisonMode::None => "",
-                                };
-                                let diff_text_size = ui.calc_text_size(diff_label);
-                                let diff_y = y_off_ui + render_h_ui - diff_text_size[1] - vpad * 2.0;
-                                let split_y_ui = y_off_ui + self.cursor_y * to_ui;
-                                let diff_top = diff_y - vpad;
-                                if split_y_ui <= diff_top {
-                                    let diff_x = (x_off_ui + (render_w_ui - diff_text_size[0]) * 0.5).clamp(
+                                let label_h = solo_text_size[1];
+                                let max_top_y = y_off_ui + render_h_ui - label_h - vpad;
+                                if top_y <= max_top_y {
+                                    let full_center = x_off_ui + render_w_ui * 0.5;
+                                    let sx = (full_center - solo_text_size[0] * 0.5).clamp(
                                         x_off_ui + lpad,
-                                        x_off_ui + render_w_ui - diff_text_size[0] - lpad,
+                                        x_off_ui + render_w_ui - solo_text_size[0] - lpad,
                                     );
+                                    let sy = top_y;
                                     draw_list
                                         .add_rect(
-                                            [diff_x - vpad, diff_y - vpad],
-                                            [
-                                                diff_x + diff_text_size[0] + vpad,
-                                                diff_y + diff_text_size[1] + vpad,
-                                            ],
+                                            [sx - vpad, sy - vpad],
+                                            [sx + solo_text_size[0] + vpad, sy + solo_text_size[1] + vpad],
                                             [0.0, 0.0, 0.0, 0.65],
                                         )
                                         .filled(true)
                                         .build();
-                                    draw_list.add_text([diff_x, diff_y], [1.0, 1.0, 1.0, 1.0], diff_label);
+                                    draw_list.add_text([sx, sy], [1.0, 1.0, 1.0, 1.0], solo_label.as_str());
+                                }
+                            } else {
+                                let label_h = left_text_size[1].max(right_text_size[1]);
+                                let max_top_y = original_bottom_ui - label_h - vpad;
+                                if top_y <= max_top_y {
+                                    // Left label centered in the left source region.
+                                    let left_region_start = x_off_ui;
+                                    let left_region_end = split_x_ui;
+                                    let left_center = (left_region_start + left_region_end) * 0.5;
+                                    let left_bound_min = left_region_start + lpad;
+                                    let left_bound_max = left_region_end - lpad;
+                                    let lx = if left_bound_max - left_bound_min >= left_text_size[0] {
+                                        (left_center - left_text_size[0] * 0.5).clamp(
+                                            left_bound_min,
+                                            left_bound_max - left_text_size[0],
+                                        )
+                                    } else {
+                                        -1.0
+                                    };
+                                    if lx >= 0.0 {
+                                        let ly = top_y;
+                                        draw_list
+                                            .add_rect(
+                                                [lx - vpad, ly - vpad],
+                                                [lx + left_text_size[0] + vpad, ly + left_text_size[1] + vpad],
+                                                [0.0, 0.0, 0.0, 0.65],
+                                            )
+                                            .filled(true)
+                                            .build();
+                                        draw_list.add_text([lx, ly], [1.0, 1.0, 1.0, 1.0], &left_frame_label);
+                                    }
+
+                                    // Right label centered in the right source region.
+                                    let right_region_start = split_x_ui;
+                                    let right_region_end = x_off_ui + render_w_ui;
+                                    let right_center = (right_region_start + right_region_end) * 0.5;
+                                    let right_bound_min = right_region_start + lpad;
+                                    let right_bound_max = right_region_end - lpad;
+                                    let rx = if right_bound_max - right_bound_min >= right_text_size[0] {
+                                        (right_center - right_text_size[0] * 0.5).clamp(
+                                            right_bound_min,
+                                            right_bound_max - right_text_size[0],
+                                        )
+                                    } else {
+                                        -1.0
+                                    };
+                                    if rx >= 0.0 {
+                                        let ry = top_y;
+                                        draw_list
+                                            .add_rect(
+                                                [rx - vpad, ry - vpad],
+                                                [rx + right_text_size[0] + vpad, ry + right_text_size[1] + vpad],
+                                                [0.0, 0.0, 0.0, 0.65],
+                                            )
+                                            .filled(true)
+                                            .build();
+                                        draw_list.add_text([rx, ry], [1.0, 1.0, 1.0, 1.0], &right_frame_label);
+                                    }
+                                }
+
+                                if self.comparison_mode != ComparisonMode::None {
+                                    let diff_label = match self.comparison_mode {
+                                        ComparisonMode::Flip => "FLIP Diff",
+                                        ComparisonMode::Overlay => "Overlay",
+                                        ComparisonMode::AbsDiff => "Abs Diff",
+                                        ComparisonMode::None => "",
+                                    };
+                                    let diff_text_size = ui.calc_text_size(diff_label);
+                                    let diff_y = y_off_ui + render_h_ui - diff_text_size[1] - vpad * 2.0;
+                                    let split_y_ui = y_off_ui + self.cursor_y * to_ui;
+                                    let diff_top = diff_y - vpad;
+                                    if split_y_ui <= diff_top {
+                                        let diff_x = (x_off_ui + (render_w_ui - diff_text_size[0]) * 0.5).clamp(
+                                            x_off_ui + lpad,
+                                            x_off_ui + render_w_ui - diff_text_size[0] - lpad,
+                                        );
+                                        draw_list
+                                            .add_rect(
+                                                [diff_x - vpad, diff_y - vpad],
+                                                [
+                                                    diff_x + diff_text_size[0] + vpad,
+                                                    diff_y + diff_text_size[1] + vpad,
+                                                ],
+                                                [0.0, 0.0, 0.0, 0.65],
+                                            )
+                                            .filled(true)
+                                            .build();
+                                        draw_list.add_text([diff_x, diff_y], [1.0, 1.0, 1.0, 1.0], diff_label);
+                                    }
                                 }
                             }
                         }
@@ -2494,6 +2549,8 @@ impl AppState {
                     flip_diff_texture.height() as f32,
                 ];
 
+                let (show_image1, show_image2) = self.effective_show_images();
+
                 let uniforms = UniformData {
                     cursor_x: self.cursor_x / render_width,
                     cursor_y: mouse_y / window_height,
@@ -2507,8 +2564,8 @@ impl AppState {
                         self.fixed_zoom_center.1 + self.zoom_center_offset.1
                     ],
                     window_size: [window_size.width as f32, window_size.height as f32],
-                    show_image1: if self.show_image1 { 1.0 } else { 0.0 },
-                    show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+                    show_image1,
+                    show_image2,
                     show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
                     peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
                     peek_factor: self.peek_zoom_factor,
@@ -2516,7 +2573,7 @@ impl AppState {
                     diff_multiplier: self.diff_enhance_factor,
                     pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
                     time: self.start_time.elapsed().as_secs_f32(),
-                    peek_show_image: self.peek_image_mode.as_f32(),
+                    peek_show_image: self.effective_peek_image_mode().as_f32(),
                 };
 
                 self.queue
@@ -3194,10 +3251,38 @@ impl AppState {
                     self.save_combined_screenshot();
                 }
                 VirtualKeyCode::Key1 => {
-                    self.toggle_image_source(true);
+                    if !self.single_image_mode {
+                        if self.view_mode == ViewMode::Solo && self.solo_view_source == 0 {
+                            // Already viewing source 0 solo — exit solo view.
+                            self.view_mode = ViewMode::Split;
+                            self.status_message = Some(("Solo view: off".to_string(), Instant::now()));
+                        } else {
+                            self.view_mode = ViewMode::Solo;
+                            self.solo_view_source = 0;
+                            self.status_message = Some((
+                                format!("Solo: {}", self.left_label),
+                                Instant::now(),
+                            ));
+                        }
+                        self.update_uniform_buffer();
+                    }
                 }
                 VirtualKeyCode::Key2 => {
-                    self.toggle_image_source(false);
+                    if !self.single_image_mode {
+                        if self.view_mode == ViewMode::Solo && self.solo_view_source == 1 {
+                            // Already viewing source 1 solo — exit solo view.
+                            self.view_mode = ViewMode::Split;
+                            self.status_message = Some(("Solo view: off".to_string(), Instant::now()));
+                        } else {
+                            self.view_mode = ViewMode::Solo;
+                            self.solo_view_source = 1;
+                            self.status_message = Some((
+                                format!("Solo: {}", self.right_label),
+                                Instant::now(),
+                            ));
+                        }
+                        self.update_uniform_buffer();
+                    }
                 }
                 VirtualKeyCode::L => {
                     self.toggle_split_line();
@@ -3233,7 +3318,7 @@ impl AppState {
                     self.peek_zoom_active = true;
                 }
                 VirtualKeyCode::X => {
-                    if !self.single_image_mode {
+                    if !self.single_image_mode && self.view_mode != ViewMode::Solo {
                         self.cycle_peek_image_mode();
                     }
                 }
@@ -3406,16 +3491,6 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
-    pub fn toggle_image_source(&mut self, is_left: bool) {
-        if is_left {
-            self.show_image1 = !self.show_image1;
-        } else {
-            self.show_image2 = !self.show_image2;
-        }
-        self.normalize_peek_image_mode();
-        self.update_uniform_buffer();
-    }
-
     pub fn toggle_split_line(&mut self) {
         self.show_split_line = !self.show_split_line;
         self.update_uniform_buffer();
@@ -3472,6 +3547,31 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
+    fn effective_show_images(&self) -> (f32, f32) {
+        match self.view_mode {
+            ViewMode::Solo => (
+                if self.solo_view_source == 0 { 1.0 } else { 0.0 },
+                if self.solo_view_source == 1 { 1.0 } else { 0.0 },
+            ),
+            ViewMode::Split => (
+                if self.show_image1 { 1.0 } else { 0.0 },
+                if self.show_image2 { 1.0 } else { 0.0 },
+            ),
+        }
+    }
+
+    fn effective_peek_image_mode(&self) -> PeekImageMode {
+        if self.view_mode == ViewMode::Solo {
+            if self.solo_view_source == 0 {
+                PeekImageMode::Image1
+            } else {
+                PeekImageMode::Image2
+            }
+        } else {
+            self.peek_image_mode
+        }
+    }
+
     fn update_uniform_buffer(&self) {
         let player = self.player.read();
         let (left_texture, right_texture) = (player.get_left_texture(), player.get_right_texture());
@@ -3481,6 +3581,8 @@ impl AppState {
         } else {
             ([self.size.width as f32, self.size.height as f32], [self.size.width as f32, self.size.height as f32])
         };
+
+        let (show_image1, show_image2) = self.effective_show_images();
 
         let uniforms = UniformData {
             cursor_x: self.cursor_x / self.size.width as f32,
@@ -3495,8 +3597,8 @@ impl AppState {
                 self.fixed_zoom_center.1 + self.zoom_center_offset.1
             ],
             window_size: [self.size.width as f32, self.size.height as f32],
-            show_image1: if self.show_image1 { 1.0 } else { 0.0 },
-            show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+            show_image1,
+            show_image2,
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
             peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
             peek_factor: self.peek_zoom_factor,
@@ -3504,7 +3606,7 @@ impl AppState {
             diff_multiplier: self.diff_enhance_factor,
             pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
             time: self.start_time.elapsed().as_secs_f32(),
-            peek_show_image: self.peek_image_mode.as_f32(),
+            peek_show_image: self.effective_peek_image_mode().as_f32(),
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
