@@ -1936,6 +1936,28 @@ impl AppState {
                         let (left_index, right_index) = player.current_images();
                         let left_total = player.frame_count1;
                         let right_total = player.frame_count2;
+                        let left_frame_label = player
+                            .config
+                            .image_data1
+                            .get(left_index)
+                            .and_then(|(path, _, _)| {
+                                std::path::Path::new(path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(ToString::to_string)
+                            })
+                            .unwrap_or_else(|| self.left_label.clone());
+                        let right_frame_label = player
+                            .config
+                            .image_data2
+                            .get(right_index)
+                            .and_then(|(path, _, _)| {
+                                std::path::Path::new(path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(ToString::to_string)
+                            })
+                            .unwrap_or_else(|| self.right_label.clone());
                         let speed = player.playback_speed();
                         let playing = player.is_playing();
                         drop(player);
@@ -1995,42 +2017,81 @@ impl AppState {
                             hud_text,
                         );
 
-                        // Draw image source labels at the bottom corners of each panel.
+                        // Draw source labels inside the source-image region, relative to split lines.
                         if !self.single_image_mode {
                             let x_off_ui = (ui_width - render_width * to_ui) / 2.0;
                             let y_off_ui = (ui_height - render_height * to_ui) / 2.0;
                             let render_w_ui = render_width * to_ui;
                             let render_h_ui = render_height * to_ui;
-                            let lpad = 6.0_f32;
+                            let split_x_ui = x_off_ui + self.cursor_x * to_ui;
+                            let original_bottom_ui = if self.comparison_mode == ComparisonMode::None {
+                                y_off_ui + render_h_ui
+                            } else {
+                                y_off_ui + self.cursor_y * to_ui
+                            };
+                            let lpad = 8.0_f32;
                             let vpad = 4.0_f32;
+                            let left_text_size = ui.calc_text_size(&left_frame_label);
+                            let right_text_size = ui.calc_text_size(&right_frame_label);
+                            let hud_reserved_top = padding + box_h + 6.0;
+                            let top_y = (y_off_ui + vpad).max(hud_reserved_top);
+                            let label_h = left_text_size[1].max(right_text_size[1]);
+                            let max_top_y = original_bottom_ui - label_h - vpad;
+                            if top_y <= max_top_y {
+                                // Left label centered in the left source region.
+                                let left_region_start = x_off_ui;
+                                let left_region_end = split_x_ui;
+                                let left_center = (left_region_start + left_region_end) * 0.5;
+                                let left_bound_min = left_region_start + lpad;
+                                let left_bound_max = left_region_end - lpad;
+                                let lx = if left_bound_max - left_bound_min >= left_text_size[0] {
+                                    (left_center - left_text_size[0] * 0.5).clamp(
+                                        left_bound_min,
+                                        left_bound_max - left_text_size[0],
+                                    )
+                                } else {
+                                    -1.0
+                                };
+                                if lx >= 0.0 {
+                                    let ly = top_y;
+                                    draw_list
+                                        .add_rect(
+                                            [lx - vpad, ly - vpad],
+                                            [lx + left_text_size[0] + vpad, ly + left_text_size[1] + vpad],
+                                            [0.0, 0.0, 0.0, 0.65],
+                                        )
+                                        .filled(true)
+                                        .build();
+                                    draw_list.add_text([lx, ly], [1.0, 1.0, 1.0, 1.0], &left_frame_label);
+                                }
 
-                            // Left label — bottom-left of the render area.
-                            let left_text_size = ui.calc_text_size(&self.left_label);
-                            let lx = x_off_ui + lpad;
-                            let ly = y_off_ui + render_h_ui - left_text_size[1] - vpad * 2.0;
-                            draw_list
-                                .add_rect(
-                                    [lx - vpad, ly - vpad],
-                                    [lx + left_text_size[0] + vpad, ly + left_text_size[1] + vpad],
-                                    [0.0, 0.0, 0.0, 0.65],
-                                )
-                                .filled(true)
-                                .build();
-                            draw_list.add_text([lx, ly], [1.0, 1.0, 1.0, 1.0], &self.left_label);
-
-                            // Right label — bottom-right of the render area.
-                            let right_text_size = ui.calc_text_size(&self.right_label);
-                            let rx = x_off_ui + render_w_ui - right_text_size[0] - lpad;
-                            let ry = y_off_ui + render_h_ui - right_text_size[1] - vpad * 2.0;
-                            draw_list
-                                .add_rect(
-                                    [rx - vpad, ry - vpad],
-                                    [rx + right_text_size[0] + vpad, ry + right_text_size[1] + vpad],
-                                    [0.0, 0.0, 0.0, 0.65],
-                                )
-                                .filled(true)
-                                .build();
-                            draw_list.add_text([rx, ry], [1.0, 1.0, 1.0, 1.0], &self.right_label);
+                                // Right label centered in the right source region.
+                                let right_region_start = split_x_ui;
+                                let right_region_end = x_off_ui + render_w_ui;
+                                let right_center = (right_region_start + right_region_end) * 0.5;
+                                let right_bound_min = right_region_start + lpad;
+                                let right_bound_max = right_region_end - lpad;
+                                let rx = if right_bound_max - right_bound_min >= right_text_size[0] {
+                                    (right_center - right_text_size[0] * 0.5).clamp(
+                                        right_bound_min,
+                                        right_bound_max - right_text_size[0],
+                                    )
+                                } else {
+                                    -1.0
+                                };
+                                if rx >= 0.0 {
+                                    let ry = top_y;
+                                    draw_list
+                                        .add_rect(
+                                            [rx - vpad, ry - vpad],
+                                            [rx + right_text_size[0] + vpad, ry + right_text_size[1] + vpad],
+                                            [0.0, 0.0, 0.0, 0.65],
+                                        )
+                                        .filled(true)
+                                        .build();
+                                    draw_list.add_text([rx, ry], [1.0, 1.0, 1.0, 1.0], &right_frame_label);
+                                }
+                            }
                         }
                     }
 
@@ -3588,6 +3649,28 @@ impl AppState {
     pub fn save_combined_screenshot(&mut self) {
         let player = self.player.read();
         let (left_index, right_index) = player.current_images();
+        let left_frame_label = player
+            .config
+            .image_data1
+            .get(left_index)
+            .and_then(|(path, _, _)| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| self.left_label.clone());
+        let right_frame_label = player
+            .config
+            .image_data2
+            .get(right_index)
+            .and_then(|(path, _, _)| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| self.right_label.clone());
 
         let left = player.get_current_frame_image_data(left_index, true);
         let right = if self.single_image_mode {
@@ -3656,8 +3739,8 @@ impl AppState {
                 ComparisonMode::None | ComparisonMode::Overlay => "",
             };
             let panel_labels: [&str; 3] = [
-                &self.left_label,
-                &self.right_label,
+                &left_frame_label,
+                &right_frame_label,
                 diff_label,
             ];
             for (i, (pixels, width, height)) in panels.iter_mut().enumerate() {
