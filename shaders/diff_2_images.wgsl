@@ -26,6 +26,10 @@ struct Uniforms {
     peek_active: f32,
     peek_factor: f32,
     peek_radius: f32,
+    diff_multiplier: f32,
+    pump_active: f32,
+    time: f32,
+    _padding: f32,
 }
 
 @group(1) @binding(0)
@@ -95,8 +99,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if mode == MODE_OVERLAY || mode == MODE_ABS_DIFF {
         let overlay_color = mix(color1, color2, 0.5);
         let diff = abs(color1 - color2);
-        let abs_diff_color = vec4<f32>(clamp(diff.rgb * 10.0, vec3(0.0), vec3(1.0)), 1.0);
-        let mode_color = select(abs_diff_color, overlay_color, mode == MODE_OVERLAY);
+        let abs_diff_color = vec4<f32>(clamp(diff.rgb * uniforms.diff_multiplier, vec3(0.0), vec3(1.0)), 1.0);
+        var mode_color = select(abs_diff_color, overlay_color, mode == MODE_OVERLAY);
+
+        // Pumping animation: all small-diff pixels pulse in unison, making clusters visible.
+        // A global sine wave means adjacent diff pixels all change together, so clusters
+        // of small diffs appear as cohesive blinking regions rather than disconnected arcs.
+        if uniforms.pump_active > 0.5 && mode == MODE_ABS_DIFF {
+            let diff_mag = dot(diff.rgb, vec3(0.333, 0.333, 0.334));
+            // Only highlight small diffs:
+            //   diff_mag > 0.001 filters out pure-black/no-diff pixels (noise floor).
+            //   scaled_mag < 0.5 skips diffs already bright enough to see without help.
+            let scaled_mag = diff_mag * uniforms.diff_multiplier;
+            if diff_mag > 0.001 && scaled_mag < 0.5 {
+                // Global synchronized pulse at 1 Hz — all qualifying pixels breathe together.
+                let pulse = 0.5 + 0.5 * sin(uniforms.time * 6.2832);
+                // Blend toward bright yellow; intensity scaled by diff magnitude so larger
+                // diffs show a stronger highlight even if they are below the "obvious" threshold.
+                let diff_weight = clamp(scaled_mag * 2.0, 0.0, 1.0);
+                let highlight_strength = pulse * 0.85 * diff_weight;
+                let highlight = vec3(1.0, 1.0, 0.0);
+                mode_color = vec4(mix(mode_color.rgb, highlight, highlight_strength), 1.0);
+            }
+        }
+
         let show_mode = step(uniforms.cursor_y, in.tex_coords.y);
         let combined = mix(mixed_color, mode_color, show_mode);
         return vec4<f32>(combined.rgb, combined.a * alpha);

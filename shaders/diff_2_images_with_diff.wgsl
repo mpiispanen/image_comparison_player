@@ -24,6 +24,10 @@ struct Uniforms {
     peek_active: f32,
     peek_factor: f32,
     peek_radius: f32,
+    diff_multiplier: f32,
+    pump_active: f32,
+    time: f32,
+    _padding: f32,
 }
 
 @group(1) @binding(0)
@@ -80,7 +84,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let show_flip_diff = step(uniforms.cursor_y, in.tex_coords.y);
 
     let color_top = mix(color1 * uniforms.show_image1, color2 * uniforms.show_image2, t_x);
-    let final_color = mix(color_top, color_diff, show_flip_diff);
+
+    // Apply diff_multiplier to FLIP diff visualization.
+    // diff_multiplier defaults to 1.0 (no amplification); increasing it boosts brightness of
+    // the FLIP colormap, making faint errors (dark/purple on the magma scale) easier to see.
+    var modified_diff = vec4(clamp(color_diff.rgb * uniforms.diff_multiplier, vec3(0.0), vec3(1.0)), color_diff.a);
+
+    // Pump animation for small FLIP diffs: global synchronized pulse so clusters of low-error
+    // pixels blink in unison rather than creating independent per-pixel ring patterns.
+    if uniforms.pump_active > 0.5 {
+        // Use luminance of the raw FLIP texture (before multiplier) as the magnitude proxy.
+        // Magma colormap: near-black = very small FLIP error, bright yellow = large error.
+        let flip_lum = dot(color_diff.rgb, vec3(0.299, 0.587, 0.114));
+        // Highlight diffs above the noise floor (0.005) but not already visually prominent.
+        if flip_lum > 0.005 && flip_lum < 0.25 {
+            let pulse = 0.5 + 0.5 * sin(uniforms.time * 6.2832);
+            // Scale highlight strength by magnitude so larger small-diffs are highlighted more.
+            let lum_weight = clamp(flip_lum * 4.0, 0.0, 1.0);
+            let highlight_strength = pulse * 0.85 * lum_weight;
+            let highlight = vec3(1.0, 1.0, 0.0);
+            modified_diff = vec4(mix(modified_diff.rgb, highlight, highlight_strength), 1.0);
+        }
+    }
+
+    let final_color = mix(color_top, modified_diff, show_flip_diff);
 
     // Calculate alpha based on whether the zoomed coordinates are within bounds
     let alpha = 1.0 - step(1.0, max(abs(zoomed_tex_coords.x - 0.5), abs(zoomed_tex_coords.y - 0.5)) * 2.0);
