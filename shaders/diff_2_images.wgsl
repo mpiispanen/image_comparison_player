@@ -29,7 +29,7 @@ struct Uniforms {
     diff_multiplier: f32,
     pump_active: f32,
     time: f32,
-    _padding: f32,
+    peek_show_image: f32,
 }
 
 @group(1) @binding(0)
@@ -157,8 +157,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let ztc = clamp(uniforms.zoom_center + zoom_ofs, vec2(0.0), vec2(1.0));
             let p1 = textureSampleLevel(t_diffuse1, s_diffuse1, ztc, 0.0);
             let p2 = textureSampleLevel(t_diffuse2, s_diffuse2, ztc, 0.0);
-            let t_p = both_shown * step(uniforms.cursor_x, tc.x) + only_image2;
-            let peek_color = mix(p1 * uniforms.show_image1, p2 * uniforms.show_image2, t_p);
+            var peek_color: vec4<f32>;
+            if uniforms.peek_show_image < 0.5 {
+                // Follow the split line (default behaviour)
+                let t_p = both_shown * step(uniforms.cursor_x, tc.x) + only_image2;
+                peek_color = mix(p1 * uniforms.show_image1, p2 * uniforms.show_image2, t_p);
+            } else if uniforms.peek_show_image < 1.5 {
+                // Always show image 1
+                peek_color = p1 * uniforms.show_image1;
+            } else {
+                // Always show image 2
+                peek_color = p2 * uniforms.show_image2;
+            }
             return vec4<f32>(peek_color.rgb, peek_color.a);
         }
     }
