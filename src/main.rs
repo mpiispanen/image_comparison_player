@@ -286,13 +286,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if app_state.should_exit {
             *control_flow = ControlFlow::Exit;
+            return;
         }
 
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => *control_flow = ControlFlow::Exit,
+            } => {
+                app_state.should_exit = true;
+            }
             Event::MainEventsCleared => {
                 window.request_redraw();
             }
