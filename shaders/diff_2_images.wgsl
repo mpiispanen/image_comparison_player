@@ -26,6 +26,10 @@ struct Uniforms {
     peek_active: f32,
     peek_factor: f32,
     peek_radius: f32,
+    diff_multiplier: f32,
+    pump_active: f32,
+    time: f32,
+    _padding: f32,
 }
 
 @group(1) @binding(0)
@@ -95,8 +99,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if mode == MODE_OVERLAY || mode == MODE_ABS_DIFF {
         let overlay_color = mix(color1, color2, 0.5);
         let diff = abs(color1 - color2);
-        let abs_diff_color = vec4<f32>(clamp(diff.rgb * 10.0, vec3(0.0), vec3(1.0)), 1.0);
-        let mode_color = select(abs_diff_color, overlay_color, mode == MODE_OVERLAY);
+        let abs_diff_color = vec4<f32>(clamp(diff.rgb * uniforms.diff_multiplier, vec3(0.0), vec3(1.0)), 1.0);
+        var mode_color = select(abs_diff_color, overlay_color, mode == MODE_OVERLAY);
+
+        // Pumping animation: draw animated ripple rings at screen-space positions of small diffs.
+        if uniforms.pump_active > 0.5 && mode == MODE_ABS_DIFF {
+            let diff_mag = dot(diff.rgb, vec3(0.333, 0.333, 0.334));
+            // Only highlight small diffs:
+            //   diff_mag > 0.001 filters out pure-black/no-diff pixels (noise floor).
+            //   scaled_mag < 0.5 skips diffs already bright enough to see without help.
+            let scaled_mag = diff_mag * uniforms.diff_multiplier;
+            if diff_mag > 0.001 && scaled_mag < 0.5 {
+                // Tile the ring pattern in screen space (pixel coordinates).
+                // Rings emanate from a regular 40-px grid; where they sweep through a diff
+                // pixel the pixel is highlighted.  The expanding radius is driven by time.
+                let tile_size = 40.0;
+                let ring_width = 2.0;
+                let tile_x = fract(in.clip_position.x / tile_size) * tile_size;
+                let tile_y = fract(in.clip_position.y / tile_size) * tile_size;
+                let tile_dist = sqrt(tile_x * tile_x + tile_y * tile_y);
+                // ring_phase advances from 0 → tile_size every (2/3) s, looping continuously.
+                let ring_phase = fract(uniforms.time * 1.5) * tile_size;
+                let ring_dist = abs(tile_dist - ring_phase);
+                let ring_mask = 1.0 - smoothstep(0.0, ring_width, ring_dist);
+                // Overlay pulse: slow sine so the rings gently fade in and out.
+                let pulse = 0.5 + 0.5 * sin(uniforms.time * 6.2832 * 1.5);
+                let ring_intensity = ring_mask * pulse * 0.7;
+                // Blend a bright yellow highlight onto the diff colour.
+                let highlight = vec3(1.0, 1.0, 0.0);
+                mode_color = vec4(mix(mode_color.rgb, highlight, ring_intensity), 1.0);
+            }
+        }
+
         let show_mode = step(uniforms.cursor_y, in.tex_coords.y);
         let combined = mix(mixed_color, mode_color, show_mode);
         return vec4<f32>(combined.rgb, combined.a * alpha);

@@ -24,6 +24,10 @@ struct Uniforms {
     peek_active: f32,
     peek_factor: f32,
     peek_radius: f32,
+    diff_multiplier: f32,
+    pump_active: f32,
+    time: f32,
+    _padding: f32,
 }
 
 @group(1) @binding(0)

@@ -49,10 +49,14 @@ struct UniformData {
     peek_active: f32,  // 1.0 when peek zoom is held (Z key)
     peek_factor: f32,  // peek magnification factor
     peek_radius: f32,  // peek window radius in screen pixels
+    diff_multiplier: f32,  // multiplier applied to abs-diff values (default 10.0)
+    pump_active: f32,  // 1.0 when pumping animation is enabled
+    time: f32,         // elapsed seconds (for animation)
+    _padding: f32,
 }
 
 // SAFETY: UniformData is #[repr(C)] and all fields are plain f32 arrays/scalars.
-// Layout matches the WGSL Uniforms struct exactly (80 bytes, 8-byte aligned).
+// Layout matches the WGSL Uniforms struct exactly (96 bytes, 8-byte aligned).
 unsafe impl bytemuck::Zeroable for UniformData {}
 unsafe impl bytemuck::Pod for UniformData {}
 
@@ -884,6 +888,8 @@ impl HelpOverlay {
                     ui.text("                 (Normal -> FLIP -> Overlay -> Abs Diff)");
                     ui.text("  1 / 2          Show only left / right image");
                     ui.text("  P              Save FLIP diff image");
+                    ui.text("  , / .          Decrease / Increase diff multiplier");
+                    ui.text("  T              Toggle diff highlight animation");
                     ui.dummy([0.0, 4.0]);
                 }
 
@@ -1093,6 +1099,12 @@ pub struct AppState {
     marker_drag_start: Option<(f32, f32)>,
     /// Current end position (screen px) of an in-progress marker creation drag.
     marker_drag_current: (f32, f32),
+    /// Multiplier applied to abs-diff colour values (default 10.0).
+    diff_enhance_factor: f32,
+    /// When true, animated pumping rings are drawn around small diff regions.
+    pump_animation_active: bool,
+    /// App start time used to compute the `time` uniform for animations.
+    start_time: Instant,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1603,6 +1615,9 @@ impl AppState {
             marker_overlay: MarkerOverlay::new(),
             marker_drag_start: None,
             marker_drag_current: (0.0, 0.0),
+            diff_enhance_factor: 10.0,
+            pump_animation_active: false,
+            start_time: Instant::now(),
         })
     }
 
@@ -1725,6 +1740,10 @@ impl AppState {
             peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
             peek_factor: self.peek_zoom_factor,
             peek_radius: self.peek_zoom_radius,
+            diff_multiplier: self.diff_enhance_factor,
+            pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
+            time: self.start_time.elapsed().as_secs_f32(),
+            _padding: 0.0,
         };
 
         debug!("Created texture view");
@@ -1956,6 +1975,12 @@ impl AppState {
                                 ComparisonMode::None => [1.0, 1.0, 1.0, 1.0],
                             };
                             ui.text_colored(color, self.comparison_mode.label());
+                            if self.comparison_mode == ComparisonMode::AbsDiff {
+                                ui.text_colored([1.0, 0.9, 0.5, 1.0], format!("Diff x{:.0}", self.diff_enhance_factor));
+                                if self.pump_animation_active {
+                                    ui.text_colored([0.5, 1.0, 0.5, 1.0], "Highlight ON");
+                                }
+                            }
                         }
                     }
 
@@ -2264,6 +2289,10 @@ impl AppState {
                     peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
                     peek_factor: self.peek_zoom_factor,
                     peek_radius: self.peek_zoom_radius,
+                    diff_multiplier: self.diff_enhance_factor,
+                    pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
+                    time: self.start_time.elapsed().as_secs_f32(),
+                    _padding: 0.0,
                 };
 
                 self.queue
@@ -2874,6 +2903,21 @@ impl AppState {
                         self.cycle_comparison_mode();
                     }
                 }
+                VirtualKeyCode::T => {
+                    if !self.single_image_mode {
+                        self.toggle_pump_animation();
+                    }
+                }
+                VirtualKeyCode::Comma => {
+                    if !self.single_image_mode {
+                        self.adjust_diff_multiplier(-1.0);
+                    }
+                }
+                VirtualKeyCode::Period => {
+                    if !self.single_image_mode {
+                        self.adjust_diff_multiplier(1.0);
+                    }
+                }
                 VirtualKeyCode::Left | VirtualKeyCode::Right => {
                     if *keycode == VirtualKeyCode::Left {
                         self.previous_frame();
@@ -3210,6 +3254,10 @@ impl AppState {
             peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
             peek_factor: self.peek_zoom_factor,
             peek_radius: self.peek_zoom_radius,
+            diff_multiplier: self.diff_enhance_factor,
+            pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
+            time: self.start_time.elapsed().as_secs_f32(),
+            _padding: 0.0,
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
@@ -3275,6 +3323,26 @@ impl AppState {
             .clamp(MIN_PEEK_ZOOM_FACTOR, MAX_PEEK_ZOOM_FACTOR);
         self.status_message = Some((
             format!("Peek zoom: {:.2}x", self.peek_zoom_factor),
+            Instant::now(),
+        ));
+        self.update_uniform_buffer();
+    }
+
+    fn toggle_pump_animation(&mut self) {
+        self.pump_animation_active = !self.pump_animation_active;
+        let msg = if self.pump_animation_active {
+            "Diff highlight: on"
+        } else {
+            "Diff highlight: off"
+        };
+        self.status_message = Some((msg.to_string(), Instant::now()));
+        self.update_uniform_buffer();
+    }
+
+    fn adjust_diff_multiplier(&mut self, delta: f32) {
+        self.diff_enhance_factor = (self.diff_enhance_factor + delta).clamp(1.0, 1000.0);
+        self.status_message = Some((
+            format!("Diff multiplier: {:.0}x", self.diff_enhance_factor),
             Instant::now(),
         ));
         self.update_uniform_buffer();
