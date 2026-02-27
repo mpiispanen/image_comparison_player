@@ -284,6 +284,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app_state.handle_event(&window, &event);
         }
 
+        if app_state.should_exit {
+            *control_flow = ControlFlow::Exit;
+        }
+
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,

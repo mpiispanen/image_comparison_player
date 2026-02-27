@@ -13,7 +13,6 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use std::process;
 use wgpu::util::DeviceExt;
 use winit::event::TouchPhase;
 use winit::event::VirtualKeyCode;
@@ -1185,6 +1184,8 @@ pub struct AppState {
     left_label: String,
     /// Short display label for the right/second image source (shown in HUD).
     right_label: String,
+    /// Set to true when the application should exit gracefully (allows destructors to run).
+    pub should_exit: bool,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1712,6 +1713,7 @@ impl AppState {
             start_time: Instant::now(),
             left_label,
             right_label,
+            should_exit: false,
         })
     }
 
@@ -3130,8 +3132,8 @@ impl AppState {
                         if self.help_overlay.is_open {
                             self.help_overlay.close();
                         } else {
-                            // Exit the application when Esc is pressed
-                            process::exit(0);
+                            // Signal the event loop to exit gracefully (runs all destructors)
+                            self.should_exit = true;
                         }
                     }
                 }
