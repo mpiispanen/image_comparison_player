@@ -1019,6 +1019,38 @@ fn read_two_texture_pixels(
 type FlipDiffReceiver = Arc<Mutex<mpsc::Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
 type FlipDiffTexture = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
 
+/// Derive a short display label for an image source from config fields.
+/// Prefers the last path component of a directory, then the filename (single
+/// image) or parent directory name (multiple images).  Falls back to `default`.
+fn derive_image_label(dir: Option<&str>, images: Option<&[String]>, default: &str) -> String {
+    if let Some(d) = dir {
+        return std::path::Path::new(d)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(default)
+            .to_string();
+    }
+    if let Some(imgs) = images {
+        if !imgs.is_empty() {
+            let p = std::path::Path::new(&imgs[0]);
+            if imgs.len() == 1 {
+                return p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(default)
+                    .to_string();
+            }
+            return p
+                .parent()
+                .and_then(|par| par.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or(default)
+                .to_string();
+        }
+    }
+    default.to_string()
+}
+
 #[derive(Clone)]
 pub struct AppConfig {
     pub dir1: Option<String>,
@@ -1105,6 +1137,10 @@ pub struct AppState {
     pump_animation_active: bool,
     /// App start time used to compute the `time` uniform for animations.
     start_time: Instant,
+    /// Short display label for the left/first image source (shown in HUD).
+    left_label: String,
+    /// Short display label for the right/second image source (shown in HUD).
+    right_label: String,
 }
 
 fn decode_flip_error_from_magma_rgb(rgb: [u8; 3]) -> Option<f32> {
@@ -1199,6 +1235,17 @@ impl AppState {
         debug!(
             "Loaded {} images from input1 and {} images from input2",
             image_len1, image_len2
+        );
+
+        let left_label = derive_image_label(
+            app_config.dir1.as_deref(),
+            app_config.images1.as_deref(),
+            "Left",
+        );
+        let right_label = derive_image_label(
+            app_config.dir2.as_deref(),
+            app_config.images2.as_deref(),
+            "Right",
         );
 
         let size = window.inner_size();
@@ -1618,6 +1665,8 @@ impl AppState {
             diff_enhance_factor: 1.0,
             pump_animation_active: false,
             start_time: Instant::now(),
+            left_label,
+            right_label,
         })
     }
 
@@ -1887,6 +1936,28 @@ impl AppState {
                         let (left_index, right_index) = player.current_images();
                         let left_total = player.frame_count1;
                         let right_total = player.frame_count2;
+                        let left_frame_label = player
+                            .config
+                            .image_data1
+                            .get(left_index)
+                            .and_then(|(path, _, _)| {
+                                std::path::Path::new(path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(ToString::to_string)
+                            })
+                            .unwrap_or_else(|| self.left_label.clone());
+                        let right_frame_label = player
+                            .config
+                            .image_data2
+                            .get(right_index)
+                            .and_then(|(path, _, _)| {
+                                std::path::Path::new(path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(ToString::to_string)
+                            })
+                            .unwrap_or_else(|| self.right_label.clone());
                         let speed = player.playback_speed();
                         let playing = player.is_playing();
                         drop(player);
@@ -1945,6 +2016,114 @@ impl AppState {
                             [1.0, 1.0, 1.0, 1.0],
                             hud_text,
                         );
+
+                        // Draw source labels inside the source-image region, relative to split lines.
+                        if !self.single_image_mode {
+                            let x_off_ui = (ui_width - render_width * to_ui) / 2.0;
+                            let y_off_ui = (ui_height - render_height * to_ui) / 2.0;
+                            let render_w_ui = render_width * to_ui;
+                            let render_h_ui = render_height * to_ui;
+                            let split_x_ui = x_off_ui + self.cursor_x * to_ui;
+                            let original_bottom_ui = if self.comparison_mode == ComparisonMode::None {
+                                y_off_ui + render_h_ui
+                            } else {
+                                y_off_ui + self.cursor_y * to_ui
+                            };
+                            let lpad = 8.0_f32;
+                            let vpad = 4.0_f32;
+                            let left_text_size = ui.calc_text_size(&left_frame_label);
+                            let right_text_size = ui.calc_text_size(&right_frame_label);
+                            let hud_reserved_top = padding + box_h + 6.0;
+                            let top_y = (y_off_ui + vpad).max(hud_reserved_top);
+                            let label_h = left_text_size[1].max(right_text_size[1]);
+                            let max_top_y = original_bottom_ui - label_h - vpad;
+                            if top_y <= max_top_y {
+                                // Left label centered in the left source region.
+                                let left_region_start = x_off_ui;
+                                let left_region_end = split_x_ui;
+                                let left_center = (left_region_start + left_region_end) * 0.5;
+                                let left_bound_min = left_region_start + lpad;
+                                let left_bound_max = left_region_end - lpad;
+                                let lx = if left_bound_max - left_bound_min >= left_text_size[0] {
+                                    (left_center - left_text_size[0] * 0.5).clamp(
+                                        left_bound_min,
+                                        left_bound_max - left_text_size[0],
+                                    )
+                                } else {
+                                    -1.0
+                                };
+                                if lx >= 0.0 {
+                                    let ly = top_y;
+                                    draw_list
+                                        .add_rect(
+                                            [lx - vpad, ly - vpad],
+                                            [lx + left_text_size[0] + vpad, ly + left_text_size[1] + vpad],
+                                            [0.0, 0.0, 0.0, 0.65],
+                                        )
+                                        .filled(true)
+                                        .build();
+                                    draw_list.add_text([lx, ly], [1.0, 1.0, 1.0, 1.0], &left_frame_label);
+                                }
+
+                                // Right label centered in the right source region.
+                                let right_region_start = split_x_ui;
+                                let right_region_end = x_off_ui + render_w_ui;
+                                let right_center = (right_region_start + right_region_end) * 0.5;
+                                let right_bound_min = right_region_start + lpad;
+                                let right_bound_max = right_region_end - lpad;
+                                let rx = if right_bound_max - right_bound_min >= right_text_size[0] {
+                                    (right_center - right_text_size[0] * 0.5).clamp(
+                                        right_bound_min,
+                                        right_bound_max - right_text_size[0],
+                                    )
+                                } else {
+                                    -1.0
+                                };
+                                if rx >= 0.0 {
+                                    let ry = top_y;
+                                    draw_list
+                                        .add_rect(
+                                            [rx - vpad, ry - vpad],
+                                            [rx + right_text_size[0] + vpad, ry + right_text_size[1] + vpad],
+                                            [0.0, 0.0, 0.0, 0.65],
+                                        )
+                                        .filled(true)
+                                        .build();
+                                    draw_list.add_text([rx, ry], [1.0, 1.0, 1.0, 1.0], &right_frame_label);
+                                }
+                            }
+
+                            if self.comparison_mode != ComparisonMode::None {
+                                let diff_label = match self.comparison_mode {
+                                    ComparisonMode::Flip => "FLIP Diff",
+                                    ComparisonMode::Overlay => "Overlay",
+                                    ComparisonMode::AbsDiff => "Abs Diff",
+                                    ComparisonMode::None => "",
+                                };
+                                let diff_text_size = ui.calc_text_size(diff_label);
+                                let diff_y = y_off_ui + render_h_ui - diff_text_size[1] - vpad * 2.0;
+                                let split_y_ui = y_off_ui + self.cursor_y * to_ui;
+                                let diff_top = diff_y - vpad;
+                                if split_y_ui <= diff_top {
+                                    let diff_x = (x_off_ui + (render_w_ui - diff_text_size[0]) * 0.5).clamp(
+                                        x_off_ui + lpad,
+                                        x_off_ui + render_w_ui - diff_text_size[0] - lpad,
+                                    );
+                                    draw_list
+                                        .add_rect(
+                                            [diff_x - vpad, diff_y - vpad],
+                                            [
+                                                diff_x + diff_text_size[0] + vpad,
+                                                diff_y + diff_text_size[1] + vpad,
+                                            ],
+                                            [0.0, 0.0, 0.0, 0.65],
+                                        )
+                                        .filled(true)
+                                        .build();
+                                    draw_list.add_text([diff_x, diff_y], [1.0, 1.0, 1.0, 1.0], diff_label);
+                                }
+                            }
+                        }
                     }
 
                     // Draw persistent comparison mode indicator in the top-right corner
@@ -2780,6 +2959,22 @@ impl AppState {
         self.fixed_zoom_center = (0.5, 0.5);
         self.zoom_center_offset = (0.0, 0.0);
 
+        // Update labels to reflect the newly-loaded paths.
+        let path_label = |p: &std::path::PathBuf| -> String {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string()
+        };
+        if count == 2 {
+            self.left_label = path_label(&paths[0]);
+            self.right_label = path_label(&paths[1]);
+        } else if self.single_image_mode || drop_on_left {
+            self.left_label = path_label(&paths[0]);
+        } else {
+            self.right_label = path_label(&paths[0]);
+        }
+
         self.status_message = Some((display_msg, Instant::now()));
         self.load_and_update_textures();
     }
@@ -3485,6 +3680,28 @@ impl AppState {
     pub fn save_combined_screenshot(&mut self) {
         let player = self.player.read();
         let (left_index, right_index) = player.current_images();
+        let left_frame_label = player
+            .config
+            .image_data1
+            .get(left_index)
+            .and_then(|(path, _, _)| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| self.left_label.clone());
+        let right_frame_label = player
+            .config
+            .image_data2
+            .get(right_index)
+            .and_then(|(path, _, _)| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| self.right_label.clone());
 
         let left = player.get_current_frame_image_data(left_index, true);
         let right = if self.single_image_mode {
@@ -3541,6 +3758,26 @@ impl AppState {
         if self.marker_overlay.visible && !self.marker_overlay.markers.is_empty() {
             for (pixels, width, height) in &mut panels {
                 draw_markers_on_image(pixels, *width, *height, &self.marker_overlay.markers);
+            }
+        }
+
+        // Draw image source labels on each panel when the HUD is active.
+        if self.show_hud && !self.single_image_mode {
+            let diff_label = match self.comparison_mode {
+                ComparisonMode::Flip => "FLIP Diff",
+                ComparisonMode::AbsDiff => "Abs Diff",
+                // None and Overlay have no separate diff panel.
+                ComparisonMode::None | ComparisonMode::Overlay => "",
+            };
+            let panel_labels: [&str; 3] = [
+                &left_frame_label,
+                &right_frame_label,
+                diff_label,
+            ];
+            for (i, (pixels, width, height)) in panels.iter_mut().enumerate() {
+                if let Some(label) = panel_labels.get(i) {
+                    draw_label_bottom_left_on_image(pixels, *width, *height, label);
+                }
             }
         }
 
@@ -3693,6 +3930,64 @@ fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[
             );
             draw_text(pixels, width, height, tx, ty, &marker.label, color);
         }
+    }
+}
+
+/// Draw a short text label with a semi-transparent dark background at the
+/// bottom-left corner of an RGBA image buffer in-place.  Uses the 8×8
+/// font8x8 bitmap font (same rendering approach as `draw_markers_on_image`).
+fn draw_label_bottom_left_on_image(pixels: &mut [u8], width: u32, height: u32, label: &str) {
+    if width == 0 || height == 0 || label.is_empty() {
+        return;
+    }
+    let char_w: i32 = 8;
+    let char_h: i32 = 8;
+    let text_w = label.chars().count() as i32 * char_w;
+    let pad: i32 = 4;
+    let tx = pad;
+    let ty = height as i32 - char_h - pad * 2;
+    if ty < 0 {
+        return;
+    }
+    // Dark semi-transparent background: darken existing pixels by 75 %.
+    let bg_x0 = (tx - pad).max(0) as u32;
+    let bg_y0 = (ty - pad).max(0) as u32;
+    let bg_x1 = (tx + text_w + pad - 1).min(width as i32 - 1) as u32;
+    let bg_y1 = (ty + char_h + pad - 1).min(height as i32 - 1) as u32;
+    for y in bg_y0..=bg_y1 {
+        for x in bg_x0..=bg_x1 {
+            let idx = ((y * width + x) * 4) as usize;
+            if idx + 3 < pixels.len() {
+                pixels[idx] = (pixels[idx] as f32 * 0.25) as u8;
+                pixels[idx + 1] = (pixels[idx + 1] as f32 * 0.25) as u8;
+                pixels[idx + 2] = (pixels[idx + 2] as f32 * 0.25) as u8;
+                pixels[idx + 3] = 255;
+            }
+        }
+    }
+    // White text using font8x8.
+    let mut pen_x = tx;
+    for ch in label.chars() {
+        if let Some(glyph) = font8x8::BASIC_FONTS.get(ch) {
+            for (row, bits) in glyph.iter().enumerate() {
+                for col in 0..8_u8 {
+                    if ((bits >> col) & 1) != 0 {
+                        let px = pen_x + col as i32;
+                        let py = ty + row as i32;
+                        if px >= 0 && py >= 0 && (px as u32) < width && (py as u32) < height {
+                            let idx = ((py as u32 * width + px as u32) * 4) as usize;
+                            if idx + 3 < pixels.len() {
+                                pixels[idx] = 255;
+                                pixels[idx + 1] = 255;
+                                pixels[idx + 2] = 255;
+                                pixels[idx + 3] = 255;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pen_x += char_w;
     }
 }
 
@@ -4067,5 +4362,82 @@ mod tests {
         assert!(!overlay.visible);
         overlay.visible = !overlay.visible;
         assert!(overlay.visible);
+    }
+
+    // ── derive_image_label unit tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_derive_label_from_dir() {
+        use super::derive_image_label;
+        let label = derive_image_label(Some("/some/path/mydir"), None, "Left");
+        assert_eq!(label, "mydir");
+    }
+
+    #[test]
+    fn test_derive_label_from_dir_trailing_slash() {
+        use super::derive_image_label;
+        // Path::file_name handles trailing separators on most platforms.
+        let label = derive_image_label(Some("/images/renders"), None, "Left");
+        assert_eq!(label, "renders");
+    }
+
+    #[test]
+    fn test_derive_label_from_single_image() {
+        use super::derive_image_label;
+        let label = derive_image_label(None, Some(&["foo/bar/frame001.png".to_string()]), "Left");
+        assert_eq!(label, "frame001.png");
+    }
+
+    #[test]
+    fn test_derive_label_from_multiple_images_uses_parent_dir() {
+        use super::derive_image_label;
+        let images = vec![
+            "renders/a/frame001.png".to_string(),
+            "renders/a/frame002.png".to_string(),
+        ];
+        let label = derive_image_label(None, Some(&images), "Left");
+        assert_eq!(label, "a");
+    }
+
+    #[test]
+    fn test_derive_label_falls_back_to_default() {
+        use super::derive_image_label;
+        assert_eq!(derive_image_label(None, None, "Left"), "Left");
+        assert_eq!(derive_image_label(None, Some(&[]), "Right"), "Right");
+    }
+
+    // ── draw_label_bottom_left_on_image unit tests ────────────────────────────
+
+    #[test]
+    fn test_draw_label_does_not_panic_on_empty_image() {
+        use super::draw_label_bottom_left_on_image;
+        let mut pixels: Vec<u8> = vec![];
+        // Should not panic.
+        draw_label_bottom_left_on_image(&mut pixels, 0, 0, "Test");
+    }
+
+    #[test]
+    fn test_draw_label_modifies_pixels() {
+        use super::draw_label_bottom_left_on_image;
+        // 40×20 white image.
+        let w = 40u32;
+        let h = 20u32;
+        let mut pixels = vec![200u8; (w * h * 4) as usize];
+        draw_label_bottom_left_on_image(&mut pixels, w, h, "Hi");
+        // After drawing the dark background, at least some pixels should have
+        // been darkened (R < 200).
+        let has_darkened = pixels.chunks(4).any(|c| c[0] < 200);
+        assert!(has_darkened, "label background should darken some pixels");
+    }
+
+    #[test]
+    fn test_draw_label_empty_string_is_noop() {
+        use super::draw_label_bottom_left_on_image;
+        let w = 20u32;
+        let h = 20u32;
+        let original = vec![128u8; (w * h * 4) as usize];
+        let mut pixels = original.clone();
+        draw_label_bottom_left_on_image(&mut pixels, w, h, "");
+        assert_eq!(pixels, original, "empty label should not modify any pixels");
     }
 }
