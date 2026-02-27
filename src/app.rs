@@ -3205,6 +3205,7 @@ impl AppState {
                 .write()
                 .generate_flip_diff(current_left, current_right);
         }
+        self.normalize_peek_image_mode();
         let label = self.comparison_mode.label();
         self.status_message = Some((format!("Comparison mode: {}", label), Instant::now()));
         self.update_uniform_buffer();
@@ -3216,6 +3217,7 @@ impl AppState {
         } else {
             self.show_image2 = !self.show_image2;
         }
+        self.normalize_peek_image_mode();
         self.update_uniform_buffer();
     }
 
@@ -3378,8 +3380,45 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
+    fn is_peek_mode_available(&self, mode: PeekImageMode) -> bool {
+        match mode {
+            PeekImageMode::Both => self.show_image1 && self.show_image2,
+            PeekImageMode::Image1 => self.show_image1,
+            PeekImageMode::Image2 => self.show_image2,
+            PeekImageMode::CurrentView => self.show_image1 || self.show_image2,
+            PeekImageMode::DiffOnly => self.comparison_mode != ComparisonMode::None,
+        }
+    }
+
+    fn normalize_peek_image_mode(&mut self) {
+        if self.is_peek_mode_available(self.peek_image_mode) {
+            return;
+        }
+        let mut next_mode = self.peek_image_mode;
+        for _ in 0..5 {
+            next_mode = next_mode.cycle();
+            if self.is_peek_mode_available(next_mode) {
+                self.peek_image_mode = next_mode;
+                return;
+            }
+        }
+        self.peek_image_mode = PeekImageMode::Both;
+    }
+
     fn cycle_peek_image_mode(&mut self) {
-        self.peek_image_mode = self.peek_image_mode.cycle();
+        let current_mode = self.peek_image_mode;
+        for _ in 0..5 {
+            self.peek_image_mode = self.peek_image_mode.cycle();
+            if self.is_peek_mode_available(self.peek_image_mode) {
+                self.status_message = Some((
+                    self.peek_image_mode.label().to_string(),
+                    Instant::now(),
+                ));
+                self.update_uniform_buffer();
+                return;
+            }
+        }
+        self.peek_image_mode = current_mode;
         self.status_message = Some((
             self.peek_image_mode.label().to_string(),
             Instant::now(),
