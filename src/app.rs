@@ -108,6 +108,48 @@ enum ViewMode {
     Solo,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum PeekImageMode {
+    #[default]
+    Both,
+    Image1,
+    Image2,
+    CurrentView,
+    DiffOnly,
+}
+
+impl PeekImageMode {
+    fn cycle(self) -> Self {
+        match self {
+            PeekImageMode::Both => PeekImageMode::Image1,
+            PeekImageMode::Image1 => PeekImageMode::Image2,
+            PeekImageMode::Image2 => PeekImageMode::CurrentView,
+            PeekImageMode::CurrentView => PeekImageMode::DiffOnly,
+            PeekImageMode::DiffOnly => PeekImageMode::Both,
+        }
+    }
+
+    fn as_f32(self) -> f32 {
+        match self {
+            PeekImageMode::Both => 0.0,
+            PeekImageMode::Image1 => 1.0,
+            PeekImageMode::Image2 => 2.0,
+            PeekImageMode::CurrentView => 3.0,
+            PeekImageMode::DiffOnly => 4.0,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            PeekImageMode::Both => "Peek: split",
+            PeekImageMode::Image1 => "Peek: image 1",
+            PeekImageMode::Image2 => "Peek: image 2",
+            PeekImageMode::CurrentView => "Peek: current view",
+            PeekImageMode::DiffOnly => "Peek: diff only",
+        }
+    }
+}
+
 /// A single rectangular marker anchored in image UV space [0, 1].
 #[derive(Clone, Debug, PartialEq)]
 struct Marker {
@@ -1790,6 +1832,8 @@ impl AppState {
             (scaled_width, scaled_height)
         };
 
+        let (show_image1, show_image2) = self.effective_show_images();
+
         let uniforms = UniformData {
             cursor_x: if self.single_image_mode { 1.0 } else { self.cursor_x / render_width },
             cursor_y: self.cursor_y / render_height,
@@ -1803,8 +1847,8 @@ impl AppState {
                 self.fixed_zoom_center.1 + self.zoom_center_offset.1
             ],
             window_size: [window_size.width as f32, window_size.height as f32],
-            show_image1: if self.show_image1 { 1.0 } else { 0.0 },
-            show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+            show_image1,
+            show_image2,
             show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
             peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
             peek_factor: self.peek_zoom_factor,
@@ -1812,7 +1856,7 @@ impl AppState {
             diff_multiplier: self.diff_enhance_factor,
             pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
             time: self.start_time.elapsed().as_secs_f32(),
-            peek_show_image: self.peek_image_mode.as_f32(),
+            peek_show_image: self.effective_peek_image_mode().as_f32(),
         };
 
         debug!("Created texture view");
@@ -2505,6 +2549,8 @@ impl AppState {
                     flip_diff_texture.height() as f32,
                 ];
 
+                let (show_image1, show_image2) = self.effective_show_images();
+
                 let uniforms = UniformData {
                     cursor_x: self.cursor_x / render_width,
                     cursor_y: mouse_y / window_height,
@@ -2518,8 +2564,8 @@ impl AppState {
                         self.fixed_zoom_center.1 + self.zoom_center_offset.1
                     ],
                     window_size: [window_size.width as f32, window_size.height as f32],
-                    show_image1: if self.show_image1 { 1.0 } else { 0.0 },
-                    show_image2: if self.show_image2 { 1.0 } else { 0.0 },
+                    show_image1,
+                    show_image2,
                     show_split_line: if self.show_split_line { 1.0 } else { 0.0 },
                     peek_active: if self.peek_zoom_active { 1.0 } else { 0.0 },
                     peek_factor: self.peek_zoom_factor,
@@ -2527,7 +2573,7 @@ impl AppState {
                     diff_multiplier: self.diff_enhance_factor,
                     pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
                     time: self.start_time.elapsed().as_secs_f32(),
-                    peek_show_image: self.peek_image_mode.as_f32(),
+                    peek_show_image: self.effective_peek_image_mode().as_f32(),
                 };
 
                 self.queue
@@ -3272,7 +3318,7 @@ impl AppState {
                     self.peek_zoom_active = true;
                 }
                 VirtualKeyCode::X => {
-                    if !self.single_image_mode {
+                    if !self.single_image_mode && self.view_mode != ViewMode::Solo {
                         self.cycle_peek_image_mode();
                     }
                 }
@@ -3501,6 +3547,31 @@ impl AppState {
         self.update_uniform_buffer();
     }
 
+    fn effective_show_images(&self) -> (f32, f32) {
+        match self.view_mode {
+            ViewMode::Solo => (
+                if self.solo_view_source == 0 { 1.0 } else { 0.0 },
+                if self.solo_view_source == 1 { 1.0 } else { 0.0 },
+            ),
+            ViewMode::Split => (
+                if self.show_image1 { 1.0 } else { 0.0 },
+                if self.show_image2 { 1.0 } else { 0.0 },
+            ),
+        }
+    }
+
+    fn effective_peek_image_mode(&self) -> PeekImageMode {
+        if self.view_mode == ViewMode::Solo {
+            if self.solo_view_source == 0 {
+                PeekImageMode::Image1
+            } else {
+                PeekImageMode::Image2
+            }
+        } else {
+            self.peek_image_mode
+        }
+    }
+
     fn update_uniform_buffer(&self) {
         let player = self.player.read();
         let (left_texture, right_texture) = (player.get_left_texture(), player.get_right_texture());
@@ -3511,16 +3582,7 @@ impl AppState {
             ([self.size.width as f32, self.size.height as f32], [self.size.width as f32, self.size.height as f32])
         };
 
-        let (show_image1, show_image2) = match self.view_mode {
-            ViewMode::Solo => (
-                if self.solo_view_source == 0 { 1.0 } else { 0.0 },
-                if self.solo_view_source == 1 { 1.0 } else { 0.0 },
-            ),
-            ViewMode::Split => (
-                if self.show_image1 { 1.0 } else { 0.0 },
-                if self.show_image2 { 1.0 } else { 0.0 },
-            ),
-        };
+        let (show_image1, show_image2) = self.effective_show_images();
 
         let uniforms = UniformData {
             cursor_x: self.cursor_x / self.size.width as f32,
@@ -3544,7 +3606,7 @@ impl AppState {
             diff_multiplier: self.diff_enhance_factor,
             pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
             time: self.start_time.elapsed().as_secs_f32(),
-            peek_show_image: self.peek_image_mode.as_f32(),
+            peek_show_image: self.effective_peek_image_mode().as_f32(),
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
