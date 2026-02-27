@@ -2092,6 +2092,37 @@ impl AppState {
                                     draw_list.add_text([rx, ry], [1.0, 1.0, 1.0, 1.0], &right_frame_label);
                                 }
                             }
+
+                            if self.comparison_mode != ComparisonMode::None {
+                                let diff_label = match self.comparison_mode {
+                                    ComparisonMode::Flip => "FLIP Diff",
+                                    ComparisonMode::Overlay => "Overlay",
+                                    ComparisonMode::AbsDiff => "Abs Diff",
+                                    ComparisonMode::None => "",
+                                };
+                                let diff_text_size = ui.calc_text_size(diff_label);
+                                let diff_y = y_off_ui + render_h_ui - diff_text_size[1] - vpad * 2.0;
+                                let split_y_ui = y_off_ui + self.cursor_y * to_ui;
+                                let diff_top = diff_y - vpad;
+                                if split_y_ui <= diff_top {
+                                    let diff_x = (x_off_ui + (render_w_ui - diff_text_size[0]) * 0.5).clamp(
+                                        x_off_ui + lpad,
+                                        x_off_ui + render_w_ui - diff_text_size[0] - lpad,
+                                    );
+                                    draw_list
+                                        .add_rect(
+                                            [diff_x - vpad, diff_y - vpad],
+                                            [
+                                                diff_x + diff_text_size[0] + vpad,
+                                                diff_y + diff_text_size[1] + vpad,
+                                            ],
+                                            [0.0, 0.0, 0.0, 0.65],
+                                        )
+                                        .filled(true)
+                                        .build();
+                                    draw_list.add_text([diff_x, diff_y], [1.0, 1.0, 1.0, 1.0], diff_label);
+                                }
+                            }
                         }
                     }
 
