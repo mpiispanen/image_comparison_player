@@ -52,7 +52,7 @@ struct UniformData {
     diff_multiplier: f32,  // multiplier applied to abs-diff values (default 1.0)
     pump_active: f32,  // 1.0 when pumping animation is enabled
     time: f32,         // elapsed seconds (for animation)
-    peek_show_image: f32, // 0=split, 1=image1 only, 2=image2 only (in peek zoom)
+    peek_show_image: f32, // 0=split, 1=image1 only, 2=image2 only, 3=current view, 4=diff only (in peek zoom)
 }
 
 // SAFETY: UniformData is #[repr(C)] and all fields are plain f32 arrays/scalars.
@@ -104,6 +104,8 @@ enum PeekImageMode {
     Both,
     Image1,
     Image2,
+    CurrentView,
+    DiffOnly,
 }
 
 impl PeekImageMode {
@@ -111,7 +113,9 @@ impl PeekImageMode {
         match self {
             PeekImageMode::Both => PeekImageMode::Image1,
             PeekImageMode::Image1 => PeekImageMode::Image2,
-            PeekImageMode::Image2 => PeekImageMode::Both,
+            PeekImageMode::Image2 => PeekImageMode::CurrentView,
+            PeekImageMode::CurrentView => PeekImageMode::DiffOnly,
+            PeekImageMode::DiffOnly => PeekImageMode::Both,
         }
     }
 
@@ -120,6 +124,8 @@ impl PeekImageMode {
             PeekImageMode::Both => 0.0,
             PeekImageMode::Image1 => 1.0,
             PeekImageMode::Image2 => 2.0,
+            PeekImageMode::CurrentView => 3.0,
+            PeekImageMode::DiffOnly => 4.0,
         }
     }
 
@@ -128,6 +134,8 @@ impl PeekImageMode {
             PeekImageMode::Both => "Peek: split",
             PeekImageMode::Image1 => "Peek: image 1",
             PeekImageMode::Image2 => "Peek: image 2",
+            PeekImageMode::CurrentView => "Peek: current view",
+            PeekImageMode::DiffOnly => "Peek: diff only",
         }
     }
 }
@@ -911,7 +919,7 @@ impl HelpOverlay {
                 ui.text("  Left drag      Zoom to dragged region");
                 ui.text("  R              Reset zoom to full frame");
                 ui.text("  Z (hold)       Peek zoom magnifier");
-                ui.text("  X              Cycle peek zoom image (split / image 1 / image 2)");
+                ui.text("  X              Cycle peek zoom image (split / image 1 / image 2 / current view / diff only)");
                 ui.text("  - / =          Decrease / Increase peek magnifier");
                 ui.dummy([0.0, 4.0]);
 
