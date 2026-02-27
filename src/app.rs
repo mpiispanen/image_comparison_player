@@ -3650,13 +3650,14 @@ impl AppState {
         // Draw image source labels on each panel when the HUD is active.
         if self.show_hud && !self.single_image_mode {
             let diff_label = match self.comparison_mode {
-                ComparisonMode::Flip => "FLIP Diff".to_string(),
-                ComparisonMode::AbsDiff => "Abs Diff".to_string(),
-                _ => String::new(),
+                ComparisonMode::Flip => "FLIP Diff",
+                ComparisonMode::AbsDiff => "Abs Diff",
+                // None and Overlay have no separate diff panel.
+                ComparisonMode::None | ComparisonMode::Overlay => "",
             };
-            let panel_labels = [
-                self.left_label.clone(),
-                self.right_label.clone(),
+            let panel_labels: [&str; 3] = [
+                &self.left_label,
+                &self.right_label,
                 diff_label,
             ];
             for (i, (pixels, width, height)) in panels.iter_mut().enumerate() {
@@ -3834,7 +3835,7 @@ fn draw_label_bottom_left_on_image(pixels: &mut [u8], width: u32, height: u32, l
     if ty < 0 {
         return;
     }
-    // Dark semi-transparent background: darken existing pixels by 70 %.
+    // Dark semi-transparent background: darken existing pixels by 75 %.
     let bg_x0 = (tx - pad).max(0) as u32;
     let bg_y0 = (ty - pad).max(0) as u32;
     let bg_x1 = (tx + text_w + pad - 1).min(width as i32 - 1) as u32;
