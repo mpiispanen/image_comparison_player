@@ -52,7 +52,7 @@ struct UniformData {
     diff_multiplier: f32,  // multiplier applied to abs-diff values (default 1.0)
     pump_active: f32,  // 1.0 when pumping animation is enabled
     time: f32,         // elapsed seconds (for animation)
-    _padding: f32,
+    peek_show_image: f32, // 0=split, 1=image1 only, 2=image2 only, 3=current view, 4=diff only (in peek zoom)
 }
 
 // SAFETY: UniformData is #[repr(C)] and all fields are plain f32 arrays/scalars.
@@ -94,6 +94,48 @@ impl ComparisonMode {
             ComparisonMode::Flip => "FLIP",
             ComparisonMode::Overlay => "Alpha Overlay",
             ComparisonMode::AbsDiff => "Abs Diff",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+enum PeekImageMode {
+    #[default]
+    Both,
+    Image1,
+    Image2,
+    CurrentView,
+    DiffOnly,
+}
+
+impl PeekImageMode {
+    fn cycle(self) -> Self {
+        match self {
+            PeekImageMode::Both => PeekImageMode::Image1,
+            PeekImageMode::Image1 => PeekImageMode::Image2,
+            PeekImageMode::Image2 => PeekImageMode::CurrentView,
+            PeekImageMode::CurrentView => PeekImageMode::DiffOnly,
+            PeekImageMode::DiffOnly => PeekImageMode::Both,
+        }
+    }
+
+    fn as_f32(self) -> f32 {
+        match self {
+            PeekImageMode::Both => 0.0,
+            PeekImageMode::Image1 => 1.0,
+            PeekImageMode::Image2 => 2.0,
+            PeekImageMode::CurrentView => 3.0,
+            PeekImageMode::DiffOnly => 4.0,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            PeekImageMode::Both => "Peek: split",
+            PeekImageMode::Image1 => "Peek: image 1",
+            PeekImageMode::Image2 => "Peek: image 2",
+            PeekImageMode::CurrentView => "Peek: current view",
+            PeekImageMode::DiffOnly => "Peek: diff only",
         }
     }
 }
@@ -877,6 +919,7 @@ impl HelpOverlay {
                 ui.text("  Left drag      Zoom to dragged region");
                 ui.text("  R              Reset zoom to full frame");
                 ui.text("  Z (hold)       Peek zoom magnifier");
+                ui.text("  X              Cycle peek zoom image (split / image 1 / image 2 / current view / diff only)");
                 ui.text("  - / =          Decrease / Increase peek magnifier");
                 ui.dummy([0.0, 4.0]);
 
@@ -1126,6 +1169,7 @@ pub struct AppState {
     peek_zoom_active: bool,
     peek_zoom_factor: f32,
     peek_zoom_radius: f32,
+    peek_image_mode: PeekImageMode,
     marker_overlay: MarkerOverlay,
     /// Start position (screen px) of an in-progress marker creation drag.
     marker_drag_start: Option<(f32, f32)>,
@@ -1659,6 +1703,7 @@ impl AppState {
             peek_zoom_active: false,
             peek_zoom_factor,
             peek_zoom_radius: 100.0,
+            peek_image_mode: PeekImageMode::Both,
             marker_overlay: MarkerOverlay::new(),
             marker_drag_start: None,
             marker_drag_current: (0.0, 0.0),
@@ -1792,7 +1837,7 @@ impl AppState {
             diff_multiplier: self.diff_enhance_factor,
             pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
             time: self.start_time.elapsed().as_secs_f32(),
-            _padding: 0.0,
+            peek_show_image: self.peek_image_mode.as_f32(),
         };
 
         debug!("Created texture view");
@@ -2471,7 +2516,7 @@ impl AppState {
                     diff_multiplier: self.diff_enhance_factor,
                     pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
                     time: self.start_time.elapsed().as_secs_f32(),
-                    _padding: 0.0,
+                    peek_show_image: self.peek_image_mode.as_f32(),
                 };
 
                 self.queue
@@ -3187,6 +3232,11 @@ impl AppState {
                 VirtualKeyCode::Z => {
                     self.peek_zoom_active = true;
                 }
+                VirtualKeyCode::X => {
+                    if !self.single_image_mode {
+                        self.cycle_peek_image_mode();
+                    }
+                }
                 _ => {}
             }
         }
@@ -3350,6 +3400,7 @@ impl AppState {
                 .write()
                 .generate_flip_diff(current_left, current_right);
         }
+        self.normalize_peek_image_mode();
         let label = self.comparison_mode.label();
         self.status_message = Some((format!("Comparison mode: {}", label), Instant::now()));
         self.update_uniform_buffer();
@@ -3361,6 +3412,7 @@ impl AppState {
         } else {
             self.show_image2 = !self.show_image2;
         }
+        self.normalize_peek_image_mode();
         self.update_uniform_buffer();
     }
 
@@ -3452,7 +3504,7 @@ impl AppState {
             diff_multiplier: self.diff_enhance_factor,
             pump_active: if self.pump_animation_active { 1.0 } else { 0.0 },
             time: self.start_time.elapsed().as_secs_f32(),
-            _padding: 0.0,
+            peek_show_image: self.peek_image_mode.as_f32(),
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
@@ -3518,6 +3570,52 @@ impl AppState {
             .clamp(MIN_PEEK_ZOOM_FACTOR, MAX_PEEK_ZOOM_FACTOR);
         self.status_message = Some((
             format!("Peek zoom: {:.2}x", self.peek_zoom_factor),
+            Instant::now(),
+        ));
+        self.update_uniform_buffer();
+    }
+
+    fn is_peek_mode_available(&self, mode: PeekImageMode) -> bool {
+        match mode {
+            PeekImageMode::Both => self.show_image1 && self.show_image2,
+            PeekImageMode::Image1 => self.show_image1,
+            PeekImageMode::Image2 => self.show_image2,
+            PeekImageMode::CurrentView => self.show_image1 || self.show_image2,
+            PeekImageMode::DiffOnly => self.comparison_mode != ComparisonMode::None,
+        }
+    }
+
+    fn normalize_peek_image_mode(&mut self) {
+        if self.is_peek_mode_available(self.peek_image_mode) {
+            return;
+        }
+        let mut next_mode = self.peek_image_mode;
+        for _ in 0..5 {
+            next_mode = next_mode.cycle();
+            if self.is_peek_mode_available(next_mode) {
+                self.peek_image_mode = next_mode;
+                return;
+            }
+        }
+        self.peek_image_mode = PeekImageMode::Both;
+    }
+
+    fn cycle_peek_image_mode(&mut self) {
+        let current_mode = self.peek_image_mode;
+        for _ in 0..5 {
+            self.peek_image_mode = self.peek_image_mode.cycle();
+            if self.is_peek_mode_available(self.peek_image_mode) {
+                self.status_message = Some((
+                    self.peek_image_mode.label().to_string(),
+                    Instant::now(),
+                ));
+                self.update_uniform_buffer();
+                return;
+            }
+        }
+        self.peek_image_mode = current_mode;
+        self.status_message = Some((
+            self.peek_image_mode.label().to_string(),
             Instant::now(),
         ));
         self.update_uniform_buffer();

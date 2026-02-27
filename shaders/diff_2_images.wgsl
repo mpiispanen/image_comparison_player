@@ -29,7 +29,7 @@ struct Uniforms {
     diff_multiplier: f32,
     pump_active: f32,
     time: f32,
-    _padding: f32,
+    peek_show_image: f32,
 }
 
 @group(1) @binding(0)
@@ -94,6 +94,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let only_image2 = (1.0 - uniforms.show_image1) * uniforms.show_image2;
     let t = both_shown * step(uniforms.cursor_x, in.tex_coords.x) + only_image2;
     let mixed_color = mix(color1 * uniforms.show_image1, color2 * uniforms.show_image2, t);
+    var final_color = mixed_color;
 
     // Overlay/Abs Diff are shown below cursor_y so you can compare against originals interactively.
     if mode == MODE_OVERLAY || mode == MODE_ABS_DIFF {
@@ -124,8 +125,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         let show_mode = step(uniforms.cursor_y, in.tex_coords.y);
-        let combined = mix(mixed_color, mode_color, show_mode);
-        return vec4<f32>(combined.rgb, combined.a * alpha);
+        final_color = mix(mixed_color, mode_color, show_mode);
     }
 
     // Peek zoom magnifier: active while Z is held
@@ -158,7 +158,62 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let p1 = textureSampleLevel(t_diffuse1, s_diffuse1, ztc, 0.0);
             let p2 = textureSampleLevel(t_diffuse2, s_diffuse2, ztc, 0.0);
             let t_p = both_shown * step(uniforms.cursor_x, tc.x) + only_image2;
-            let peek_color = mix(p1 * uniforms.show_image1, p2 * uniforms.show_image2, t_p);
+            let p_mixed = mix(p1 * uniforms.show_image1, p2 * uniforms.show_image2, t_p);
+            var peek_color: vec4<f32>;
+            if uniforms.peek_show_image < 0.5 {
+                // Follow the split line (default behaviour)
+                peek_color = p_mixed;
+            } else if uniforms.peek_show_image < 1.5 {
+                // Always show image 1
+                peek_color = p1 * uniforms.show_image1;
+            } else if uniforms.peek_show_image < 2.5 {
+                // Always show image 2
+                peek_color = p2 * uniforms.show_image2;
+            } else if uniforms.peek_show_image < 3.5 {
+                // Show exactly what is currently rendered at this sample point.
+                if mode == MODE_OVERLAY || mode == MODE_ABS_DIFF {
+                    let p_overlay = mix(p1, p2, 0.5);
+                    let p_diff = abs(p1 - p2);
+                    var p_abs_diff = vec4<f32>(clamp(p_diff.rgb * uniforms.diff_multiplier, vec3(0.0), vec3(1.0)), 1.0);
+                    if uniforms.pump_active > 0.5 && mode == MODE_ABS_DIFF {
+                        let diff_mag = dot(p_diff.rgb, vec3(0.333, 0.333, 0.334));
+                        let scaled_mag = diff_mag * uniforms.diff_multiplier;
+                        if diff_mag > 0.001 && scaled_mag < 0.5 {
+                            let pulse = 0.5 + 0.5 * sin(uniforms.time * 6.2832);
+                            let diff_weight = clamp(scaled_mag * 2.0, 0.0, 1.0);
+                            let highlight_strength = pulse * 0.85 * diff_weight;
+                            let highlight = vec3(1.0, 1.0, 0.0);
+                            p_abs_diff = vec4(mix(p_abs_diff.rgb, highlight, highlight_strength), 1.0);
+                        }
+                    }
+                    let p_mode = select(p_abs_diff, p_overlay, mode == MODE_OVERLAY);
+                    peek_color = mix(p_mixed, p_mode, step(uniforms.cursor_y, tc.y));
+                } else {
+                    peek_color = p_mixed;
+                }
+            } else {
+                // Show only the active diff mode output.
+                if mode == MODE_OVERLAY {
+                    peek_color = mix(p1, p2, 0.5);
+                } else if mode == MODE_ABS_DIFF {
+                    let p_diff = abs(p1 - p2);
+                    var p_abs_diff = vec4<f32>(clamp(p_diff.rgb * uniforms.diff_multiplier, vec3(0.0), vec3(1.0)), 1.0);
+                    if uniforms.pump_active > 0.5 {
+                        let diff_mag = dot(p_diff.rgb, vec3(0.333, 0.333, 0.334));
+                        let scaled_mag = diff_mag * uniforms.diff_multiplier;
+                        if diff_mag > 0.001 && scaled_mag < 0.5 {
+                            let pulse = 0.5 + 0.5 * sin(uniforms.time * 6.2832);
+                            let diff_weight = clamp(scaled_mag * 2.0, 0.0, 1.0);
+                            let highlight_strength = pulse * 0.85 * diff_weight;
+                            let highlight = vec3(1.0, 1.0, 0.0);
+                            p_abs_diff = vec4(mix(p_abs_diff.rgb, highlight, highlight_strength), 1.0);
+                        }
+                    }
+                    peek_color = p_abs_diff;
+                } else {
+                    peek_color = p_mixed;
+                }
+            }
             return vec4<f32>(peek_color.rgb, peek_color.a);
         }
     }
@@ -176,5 +231,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the line
     }
 
-    return vec4<f32>(mixed_color.rgb, mixed_color.a * alpha);
+    return vec4<f32>(final_color.rgb, final_color.a * alpha);
 }

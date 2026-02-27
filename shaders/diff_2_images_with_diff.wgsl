@@ -27,7 +27,7 @@ struct Uniforms {
     diff_multiplier: f32,
     pump_active: f32,
     time: f32,
-    _padding: f32,
+    peek_show_image: f32,
 }
 
 @group(1) @binding(0)
@@ -141,8 +141,37 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let ztc = clamp(uniforms.zoom_center + zoom_ofs, vec2(0.0), vec2(1.0));
             let p1 = textureSampleLevel(t_diffuse, s_diffuse, ztc, 0.0);
             let p2 = textureSampleLevel(t_diffuse2, s_diffuse2, ztc, 0.0);
-            let t_p = both_shown * step(uniforms.cursor_x, tc.x) + only_image2;
-            let peek_color = mix(p1 * uniforms.show_image1, p2 * uniforms.show_image2, t_p);
+            let top_color = mix(p1 * uniforms.show_image1, p2 * uniforms.show_image2, both_shown * step(uniforms.cursor_x, tc.x) + only_image2);
+            let p_diff_raw = textureSampleLevel(t_flip_diff, s_flip_diff, ztc, 0.0);
+            var p_diff = vec4(clamp(p_diff_raw.rgb * uniforms.diff_multiplier, vec3(0.0), vec3(1.0)), p_diff_raw.a);
+            if uniforms.pump_active > 0.5 {
+                let flip_lum = dot(p_diff_raw.rgb, vec3(0.299, 0.587, 0.114));
+                if flip_lum > 0.005 && flip_lum < 0.25 {
+                    let pulse = 0.5 + 0.5 * sin(uniforms.time * 6.2832);
+                    let lum_weight = clamp(flip_lum * 4.0, 0.0, 1.0);
+                    let highlight_strength = pulse * 0.85 * lum_weight;
+                    let highlight = vec3(1.0, 1.0, 0.0);
+                    p_diff = vec4(mix(p_diff.rgb, highlight, highlight_strength), 1.0);
+                }
+            }
+            var peek_color: vec4<f32>;
+            if uniforms.peek_show_image < 0.5 {
+                // Follow the split line (default behaviour)
+                let t_p = both_shown * step(uniforms.cursor_x, tc.x) + only_image2;
+                peek_color = mix(p1 * uniforms.show_image1, p2 * uniforms.show_image2, t_p);
+            } else if uniforms.peek_show_image < 1.5 {
+                // Always show image 1
+                peek_color = p1 * uniforms.show_image1;
+            } else if uniforms.peek_show_image < 2.5 {
+                // Always show image 2
+                peek_color = p2 * uniforms.show_image2;
+            } else if uniforms.peek_show_image < 3.5 {
+                // Show the current comparison output inside the magnifier
+                peek_color = mix(top_color, p_diff, step(uniforms.cursor_y, tc.y));
+            } else {
+                // Show only FLIP diff
+                peek_color = p_diff;
+            }
             return vec4<f32>(peek_color.rgb, peek_color.a);
         }
     }
