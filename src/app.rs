@@ -1345,15 +1345,15 @@ impl AppState {
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
 
-        // Prefer Mailbox (low latency, no tearing) over Immediate and Fifo to
-        // minimize the delay between mouse movement and the rendered split line.
-        let present_mode = if surface_caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else if surface_caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
-            wgpu::PresentMode::Immediate
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        // Use Fifo (vsync) to avoid Vulkan semaphore reuse validation errors
+        // (VUID-vkQueueSubmit-pSignalSemaphores-00067) that occur with Mailbox
+        // and Immediate modes in wgpu's Vulkan HAL when multiple frames are
+        // in-flight and a single render-complete semaphore is reused before the
+        // presentation engine has finished with it.
+        // TODO: Switch back to Mailbox when wgpu's Vulkan HAL correctly uses
+        // per-swapchain-image semaphores (see the Vulkan semaphore reuse guide:
+        // https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html).
+        let present_mode = wgpu::PresentMode::Fifo;
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
