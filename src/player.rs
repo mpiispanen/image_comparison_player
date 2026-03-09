@@ -981,7 +981,13 @@ impl Player {
 
         let (img, dimensions) = if file_size > 15 * 1024 * 1024 {
             let mmap = unsafe { Mmap::map(&file)? };
-            let img = image::load_from_memory(&mmap)?;
+            // TGA files have no magic bytes, so load_from_memory cannot detect the
+            // format automatically.  Detect the format from the file extension and
+            // fall back to load_from_memory only when the extension is unknown.
+            let img = match image::ImageFormat::from_path(path).ok() {
+                Some(fmt) => image::load_from_memory_with_format(&mmap, fmt)?,
+                None => image::load_from_memory(&mmap)?,
+            };
             let dimensions = img.dimensions();
             (img, dimensions)
         } else {
@@ -1607,6 +1613,28 @@ mod tests {
         assert_eq!(size.width, 1);
         assert_eq!(size.height, 1);
         assert_eq!(rgba, vec![127, 127, 127, 255]);
+    }
+
+    #[test]
+    fn test_load_image_data_from_path_tga() {
+        let dir = std::env::temp_dir().join("icp_tests").join("player_load_tga");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pixel.tga");
+
+        // Create a minimal TGA file using the image crate so we have a valid file
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        img.save(&path).unwrap();
+
+        let (rgba, size) =
+            Player::load_image_data_from_path(path.to_str().unwrap(), None).unwrap();
+        assert_eq!(size.width, 2);
+        assert_eq!(size.height, 2);
+        // All 4 pixels should be red (255, 0, 0, 255)
+        assert_eq!(rgba.len(), 2 * 2 * 4);
+        for pixel in rgba.chunks(4) {
+            assert_eq!(pixel, &[255, 0, 0, 255]);
+        }
     }
 
     // ── compute_sorted_time_points ──────────────────────────────────────────
