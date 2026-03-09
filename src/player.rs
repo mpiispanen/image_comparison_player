@@ -5,7 +5,6 @@ use nv_flip::{flip, magma_lut, FlipImageRgb8, FlipPool};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
-use std::io::BufReader;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -383,10 +382,12 @@ impl Player {
     fn determine_expected_dimensions(
         first_image_path: &str,
     ) -> Result<(u32, u32), Box<dyn std::error::Error>> {
-        let file = File::open(first_image_path)?;
-        let reader = BufReader::new(file);
-        let dimensions = image::io::Reader::new(reader)
-            .with_guessed_format()?
+        // Use Reader::open so that format detection can fall back to the file
+        // extension when magic bytes are absent (e.g. TGA has no magic bytes).
+        // Reader::new + with_guessed_format() only inspects magic bytes and
+        // silently fails for TGA, causing every subsequent load to be rejected
+        // by the dimension-mismatch check.
+        let dimensions = image::io::Reader::open(first_image_path)?
             .into_dimensions()?;
         Ok(dimensions)
     }
@@ -1635,6 +1636,25 @@ mod tests {
         for pixel in rgba.chunks(4) {
             assert_eq!(pixel, &[255, 0, 0, 255]);
         }
+    }
+
+    #[test]
+    fn test_determine_expected_dimensions_tga() {
+        let dir = std::env::temp_dir().join("icp_tests").join("player_dims_tga");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("frame.tga");
+
+        let img = image::RgbaImage::new(32, 16);
+        img.save(&path).unwrap();
+
+        // This must succeed and return the correct dimensions.
+        // Previously, Reader::new + with_guessed_format() failed for TGA
+        // because TGA has no magic bytes, causing determine_expected_dimensions
+        // to return (0,0) and every subsequent TGA load to be rejected silently.
+        let dims = Player::determine_expected_dimensions(path.to_str().unwrap())
+            .expect("determine_expected_dimensions should succeed for TGA");
+        assert_eq!(dims, (32, 16));
     }
 
     // ── compute_sorted_time_points ──────────────────────────────────────────
