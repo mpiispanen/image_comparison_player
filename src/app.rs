@@ -1310,8 +1310,18 @@ impl AppState {
         let size = window.inner_size();
         let surface_scale = window.scale_factor().ceil() as u32;
 
+        // On Windows, exclude the Vulkan backend: wgpu 0.17's Vulkan HAL has a
+        // semaphore reuse bug (VUID-vkQueueSubmit-pSignalSemaphores-00067) that
+        // fires on every frame regardless of present mode.  DX12 is native on
+        // Windows 10+ and does not share this issue.  On every other platform
+        // keep the full backend set so Metal, GL, etc. are still available.
+        #[cfg(target_os = "windows")]
+        let backends = wgpu::Backends::DX12;
+        #[cfg(not(target_os = "windows"))]
+        let backends = wgpu::Backends::all();
+
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             dx12_shader_compiler: Default::default(),
         });
 
@@ -1345,14 +1355,9 @@ impl AppState {
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
 
-        // Use Fifo (vsync) to avoid Vulkan semaphore reuse validation errors
-        // (VUID-vkQueueSubmit-pSignalSemaphores-00067) that occur with Mailbox
-        // and Immediate modes in wgpu's Vulkan HAL when multiple frames are
-        // in-flight and a single render-complete semaphore is reused before the
-        // presentation engine has finished with it.
-        // TODO: Switch back to Mailbox when wgpu's Vulkan HAL correctly uses
-        // per-swapchain-image semaphores (see the Vulkan semaphore reuse guide:
-        // https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html).
+        // Use Fifo (vsync) as a conservative default. With the Vulkan backend
+        // excluded on Windows (see above), this is mainly relevant for Linux/macOS
+        // where all backends have correct semaphore handling.
         let present_mode = wgpu::PresentMode::Fifo;
 
         let config = wgpu::SurfaceConfiguration {
