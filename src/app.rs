@@ -4023,7 +4023,7 @@ impl AppState {
 
 /// Crop an RGBA image to the region that is visible given the current zoom and pan.
 ///
-/// `zoom_center` is the effective zoom center in normalised \[0, 1\] image-UV space
+/// `zoom_center` is the effective zoom center in normalized \[0, 1\] image-UV space
 /// (i.e. `fixed_zoom_center + zoom_center_offset`).  When `zoom_level` is ≤ 1.0
 /// the original image is returned unchanged.
 ///
@@ -4055,10 +4055,13 @@ fn crop_image_to_zoom(
     let top_px = ((top_uv * height as f32).round() as u32).min(height);
     let bottom_px = ((bottom_uv * height as f32).round() as u32).min(height);
 
-    let crop_w = right_px.saturating_sub(left_px).max(1).min(width.saturating_sub(left_px));
-    let crop_h = bottom_px.saturating_sub(top_px).max(1).min(height.saturating_sub(top_px));
+    let crop_w = right_px.saturating_sub(left_px).min(width.saturating_sub(left_px));
+    let crop_h = bottom_px.saturating_sub(top_px).min(height.saturating_sub(top_px));
 
-    // Short-circuit: nothing to crop.
+    // Return unchanged if degenerate (no visible area) or nothing to crop.
+    if crop_w == 0 || crop_h == 0 {
+        return (pixels, width, height);
+    }
     if left_px == 0 && top_px == 0 && crop_w == width && crop_h == height {
         return (pixels, width, height);
     }
