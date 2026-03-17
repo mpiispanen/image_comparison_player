@@ -223,11 +223,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let window_aspect_ratio_fs = uniforms.window_size.x / uniforms.window_size.y;
     let image_aspect_ratio_fs = uniforms.image1_size.x / uniforms.image1_size.y;
     let scale_x_fs = select(1.0, image_aspect_ratio_fs / window_aspect_ratio_fs, window_aspect_ratio_fs > image_aspect_ratio_fs);
+    let scale_y_fs = select(window_aspect_ratio_fs / image_aspect_ratio_fs, 1.0, window_aspect_ratio_fs > image_aspect_ratio_fs);
     let render_width_fs = scale_x_fs * uniforms.window_size.x;
+    let render_height_fs = scale_y_fs * uniforms.window_size.y;
     let x_offset_fs = (uniforms.window_size.x - render_width_fs) / 2.0;
+    let y_offset_fs = (uniforms.window_size.y - render_height_fs) / 2.0;
     let cursor_screen_x = x_offset_fs + uniforms.cursor_x * render_width_fs;
+    let cursor_screen_y = y_offset_fs + uniforms.cursor_y * render_height_fs;
     let in_original_region = mode <= MODE_FLIP || in.tex_coords.y < uniforms.cursor_y;
     if (both_shown > 0.5 && uniforms.show_split_line > 0.5 && in_original_region && abs(in.clip_position.x - cursor_screen_x) < 1.0) {
+        return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the line
+    }
+    if ((mode == MODE_OVERLAY || mode == MODE_ABS_DIFF) && uniforms.show_split_line > 0.5 && abs(in.clip_position.y - cursor_screen_y) < 1.0) {
         return vec4<f32>(1.0, 1.0, 1.0, alpha); // White color for the line
     }
 
