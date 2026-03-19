@@ -1310,8 +1310,18 @@ impl AppState {
         let size = window.inner_size();
         let surface_scale = window.scale_factor().ceil() as u32;
 
+        // On Windows, exclude the Vulkan backend: wgpu 0.17's Vulkan HAL has a
+        // semaphore reuse bug (VUID-vkQueueSubmit-pSignalSemaphores-00067) that
+        // fires on every frame regardless of present mode.  DX12 is native on
+        // Windows 10+ and does not share this issue.  On every other platform
+        // keep the full backend set so Metal, GL, etc. are still available.
+        #[cfg(target_os = "windows")]
+        let backends = wgpu::Backends::DX12;
+        #[cfg(not(target_os = "windows"))]
+        let backends = wgpu::Backends::all();
+
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             dx12_shader_compiler: Default::default(),
         });
 
@@ -1345,15 +1355,10 @@ impl AppState {
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
 
-        // Prefer Mailbox (low latency, no tearing) over Immediate and Fifo to
-        // minimize the delay between mouse movement and the rendered split line.
-        let present_mode = if surface_caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else if surface_caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
-            wgpu::PresentMode::Immediate
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        // Use Fifo (vsync) as a conservative default. With the Vulkan backend
+        // excluded on Windows (see above), this is mainly relevant for Linux/macOS
+        // where all backends have correct semaphore handling.
+        let present_mode = wgpu::PresentMode::Fifo;
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
