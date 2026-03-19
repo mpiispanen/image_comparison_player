@@ -4021,7 +4021,12 @@ impl AppState {
     }
 }
 
-/// Crop an RGBA image to the region that is visible given the current zoom and pan.
+/// Crop an RGBA image to the region that is visible given the current zoom and pan,
+/// then scale that region back up to the original image dimensions.
+///
+/// This produces an output image that looks like what is shown in the window:
+/// the visible region is enlarged to fill the same pixel canvas as the original,
+/// using nearest-neighbor scaling to match the texture sampler used by the shader.
 ///
 /// `zoom_center` is the effective zoom center in normalized \[0, 1\] image-UV space
 /// (i.e. `fixed_zoom_center + zoom_center_offset`).  When `zoom_level` is ≤ 1.0
@@ -4066,6 +4071,7 @@ fn crop_image_to_zoom(
         return (pixels, width, height);
     }
 
+    // Extract the cropped region.
     let mut cropped = Vec::with_capacity((crop_w * crop_h * 4) as usize);
     for row in 0..crop_h {
         let src_row = top_px + row;
@@ -4074,7 +4080,19 @@ fn crop_image_to_zoom(
         cropped.extend_from_slice(&pixels[src_start..src_end]);
     }
 
-    (cropped, crop_w, crop_h)
+    // Scale the cropped region back up to the original image dimensions using
+    // nearest-neighbor filtering, matching the nearest-filter texture sampler
+    // used by the rendering shader.
+    let cropped_img =
+        image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(crop_w, crop_h, cropped)
+            .expect("cropped buffer dimensions are consistent");
+    let scaled = image::imageops::resize(
+        &cropped_img,
+        width,
+        height,
+        image::imageops::FilterType::Nearest,
+    );
+    (scaled.into_raw(), width, height)
 }
 
 /// Stitch multiple RGBA images side-by-side into a single image.
@@ -4719,7 +4737,7 @@ mod tests {
 
     // ── crop_image_to_zoom unit tests ─────────────────────────────────────────
 
-    /// Create a simple 4×4 RGBA test image where each pixel stores its (row, col)
+    /// Create a simple RGBA test image where each pixel stores its (row, col)
     /// as R=row, G=col and B=A=255.
     fn make_test_image(width: u32, height: u32) -> Vec<u8> {
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
@@ -4744,29 +4762,31 @@ mod tests {
     }
 
     #[test]
-    fn test_crop_zoom_2x_center_halves_dimensions() {
+    fn test_crop_zoom_2x_preserves_original_dimensions() {
         use super::crop_image_to_zoom;
         let w = 100u32;
         let h = 100u32;
         let pixels = make_test_image(w, h);
+        // After crop + scale-up the output dimensions must equal the original.
         let (_, ow, oh) = crop_image_to_zoom(pixels, w, h, 2.0, (0.5, 0.5));
-        // 2x zoom centred → visible UV [0.25, 0.75] → 50% of original size.
-        assert_eq!(ow, 50);
-        assert_eq!(oh, 50);
+        assert_eq!(ow, w);
+        assert_eq!(oh, h);
     }
 
     #[test]
-    fn test_crop_zoom_2x_center_correct_pixels() {
+    fn test_crop_zoom_2x_center_top_left_pixel() {
         use super::crop_image_to_zoom;
         let w = 100u32;
         let h = 100u32;
         let pixels = make_test_image(w, h);
-        let (cropped, ow, oh) = crop_image_to_zoom(pixels, w, h, 2.0, (0.5, 0.5));
-        assert_eq!(ow, 50);
-        assert_eq!(oh, 50);
-        // Top-left pixel of cropped image should be row=25, col=25.
-        assert_eq!(cropped[0], 25, "first pixel R should be row 25");
-        assert_eq!(cropped[1], 25, "first pixel G should be col 25");
+        // 2× zoom centred at (0.5, 0.5): visible UV [0.25, 0.75].
+        // After scaling back up, the top-left output pixel maps to source row≈25, col≈25.
+        let (scaled, ow, oh) = crop_image_to_zoom(pixels, w, h, 2.0, (0.5, 0.5));
+        assert_eq!(ow, w);
+        assert_eq!(oh, h);
+        // Nearest-neighbor: first output pixel is the first source pixel (row=25, col=25).
+        assert_eq!(scaled[0], 25, "first pixel R should be source row 25");
+        assert_eq!(scaled[1], 25, "first pixel G should be source col 25");
     }
 
     #[test]
@@ -4779,17 +4799,18 @@ mod tests {
     }
 
     #[test]
-    fn test_crop_zoom_top_left_corner() {
+    fn test_crop_zoom_top_left_corner_preserves_dimensions() {
         use super::crop_image_to_zoom;
         let w = 100u32;
         let h = 100u32;
         let pixels = make_test_image(w, h);
-        // Zoom center at (0, 0): visible region should be [0, 0.5] × [0, 0.5].
-        let (cropped, ow, oh) = crop_image_to_zoom(pixels, w, h, 2.0, (0.0, 0.0));
-        assert_eq!(ow, 50);
-        assert_eq!(oh, 50);
-        // Top-left of cropped image is the top-left of the original.
-        assert_eq!(cropped[0], 0, "first pixel R should be row 0");
-        assert_eq!(cropped[1], 0, "first pixel G should be col 0");
+        // Zoom center at (0, 0): visible UV region is [0, 0.5] × [0, 0.5].
+        // Output must be scaled back to original size.
+        let (scaled, ow, oh) = crop_image_to_zoom(pixels, w, h, 2.0, (0.0, 0.0));
+        assert_eq!(ow, w);
+        assert_eq!(oh, h);
+        // Top-left of the output is the top-left of the original image (row=0, col=0).
+        assert_eq!(scaled[0], 0, "first pixel R should be source row 0");
+        assert_eq!(scaled[1], 0, "first pixel G should be source col 0");
     }
 }
