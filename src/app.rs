@@ -4054,11 +4054,33 @@ fn crop_image_to_zoom(
     let top_uv = (cy + (0.0 - cy) / zoom_level).clamp(0.0, 1.0);
     let bottom_uv = (cy + (1.0 - cy) / zoom_level).clamp(0.0, 1.0);
 
-    // Convert UV to pixel coordinates, clamped to image bounds.
-    let left_px = ((left_uv * width as f32).round() as u32).min(width);
-    let right_px = ((right_uv * width as f32).round() as u32).min(width);
-    let top_px = ((top_uv * height as f32).round() as u32).min(height);
-    let bottom_px = ((bottom_uv * height as f32).round() as u32).min(height);
+    // Convert UV to pixel coordinates.
+    //
+    // Treat UVs as covering texel centers in [0, 1], with 1.0 mapping to the last
+    // texel, and use a half-open pixel range [left_px, right_px) /
+    // [top_px, bottom_px) to avoid collapsing narrow but non-empty intervals.
+    let max_x = width.saturating_sub(1);
+    let max_y = height.saturating_sub(1);
+
+    let left_incl = ((left_uv * max_x as f32).floor() as u32).min(max_x);
+    let right_incl = ((right_uv * max_x as f32).ceil() as u32).min(max_x);
+    let top_incl = ((top_uv * max_y as f32).floor() as u32).min(max_y);
+    let bottom_incl = ((bottom_uv * max_y as f32).ceil() as u32).min(max_y);
+
+    // Build half-open ranges and clamp to image bounds.
+    let mut left_px = left_incl.min(right_incl);
+    let mut right_px = right_incl.max(left_incl).saturating_add(1).min(width);
+    let mut top_px = top_incl.min(bottom_incl);
+    let mut bottom_px = bottom_incl.max(top_incl).saturating_add(1).min(height);
+
+    // Ensure at least a 1×1 crop when the UV range is non-empty, guarding
+    // against any pathological floating-point cases.
+    if right_uv > left_uv && right_px <= left_px {
+        right_px = (left_px + 1).min(width);
+    }
+    if bottom_uv > top_uv && bottom_px <= top_px {
+        bottom_px = (top_px + 1).min(height);
+    }
 
     let crop_w = right_px.saturating_sub(left_px).min(width.saturating_sub(left_px));
     let crop_h = bottom_px.saturating_sub(top_px).min(height.saturating_sub(top_px));
