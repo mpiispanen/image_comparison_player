@@ -3845,7 +3845,7 @@ impl AppState {
         match player.get_flip_diff_raw_data(left_index, right_index) {
             Some((mut data, width, height)) => {
                 if self.marker_overlay.visible && !self.marker_overlay.markers.is_empty() {
-                    draw_markers_on_image(&mut data, width, height, &self.marker_overlay.markers);
+                    draw_markers_on_image(&mut data, width, height, &self.marker_overlay.markers, 1.0);
                 }
                 let path = generate_output_filename("flip_diff", "png");
                 match image::save_buffer(&path, &data, width, height, image::ColorType::Rgba8) {
@@ -3956,8 +3956,11 @@ impl AppState {
         }
 
         if self.marker_overlay.visible && !self.marker_overlay.markers.is_empty() {
+            // Scale markers down by 1/zoom_level so that after the crop+upscale
+            // they appear at a consistent visual size regardless of zoom.
+            let marker_scale = 1.0 / self.zoom_level.max(1.0);
             for (pixels, width, height) in &mut panels {
-                draw_markers_on_image(pixels, *width, *height, &self.marker_overlay.markers);
+                draw_markers_on_image(pixels, *width, *height, &self.marker_overlay.markers, marker_scale);
             }
         }
 
@@ -4072,9 +4075,9 @@ fn crop_image_to_zoom(
     let bottom_incl = ((bottom_uv * max_y as f32).ceil() as u32).min(max_y);
 
     // Build half-open ranges and clamp to image bounds.
-    let mut left_px = left_incl.min(right_incl);
+    let left_px = left_incl.min(right_incl);
     let mut right_px = right_incl.max(left_incl).saturating_add(1).min(width);
-    let mut top_px = top_incl.min(bottom_incl);
+    let top_px = top_incl.min(bottom_incl);
     let mut bottom_px = bottom_incl.max(top_incl).saturating_add(1).min(height);
 
     // Ensure at least a 1×1 crop when the UV range is non-empty, guarding
@@ -4144,7 +4147,13 @@ fn stitch_images_side_by_side(panels: &[(Vec<u8>, u32, u32)]) -> (Vec<u8>, u32, 
 }
 
 /// Draw marker outlines onto an RGBA image buffer in-place.
-fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[Marker]) {
+fn draw_markers_on_image(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    markers: &[Marker],
+    pixel_scale: f32,
+) {
     fn put_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: [u8; 4]) {
         if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
             return;
@@ -4169,7 +4178,10 @@ fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[
             }
         }
     }
-    fn draw_text(
+    // Draw text using nearest-neighbor scaled font8x8 glyphs.  `scale` controls the
+    // rendered character size: 1.0 → 8×8 px per char, 0.5 → 4×4 px, 2.0 → 16×16 px.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_scaled(
         pixels: &mut [u8],
         width: u32,
         height: u32,
@@ -4177,32 +4189,41 @@ fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[
         y: i32,
         text: &str,
         color: [u8; 4],
+        scale: f32,
     ) {
+        let char_w = (8.0 * scale).round().max(1.0) as i32;
+        let char_h = (8.0 * scale).round().max(1.0) as i32;
         let mut pen_x = x;
         for ch in text.chars() {
             if let Some(glyph) = font8x8::BASIC_FONTS.get(ch) {
-                for (row, bits) in glyph.iter().enumerate() {
-                    for col in 0..8_u8 {
-                        if ((bits >> col) & 1) != 0 {
-                            put_pixel(
-                                pixels,
-                                width,
-                                height,
-                                pen_x + col as i32,
-                                y + row as i32,
-                                color,
-                            );
+                for out_row in 0..char_h {
+                    let src_row = ((out_row as f32 * 8.0 / char_h as f32) as usize).min(7);
+                    let bits = glyph[src_row];
+                    for out_col in 0..char_w {
+                        let src_col = ((out_col as f32 * 8.0 / char_w as f32) as usize).min(7);
+                        if ((bits >> src_col) & 1) != 0 {
+                            put_pixel(pixels, width, height, pen_x + out_col, y + out_row, color);
                         }
                     }
                 }
             }
-            pen_x += 8;
+            pen_x += char_w;
         }
     }
 
     if width == 0 || height == 0 {
         return;
     }
+
+    // Derive scaled dimensions from pixel_scale so markers appear at a consistent
+    // visual size regardless of any post-draw zoom crop+upscale.
+    let scale = pixel_scale.max(0.0625); // floor at 1/16 to avoid degenerate zero sizes
+    let thickness = (2.0 * scale).round().max(1.0) as i32;
+    let char_w = (8.0 * scale).round().max(1.0) as i32;
+    let char_h = (8.0 * scale).round().max(1.0) as i32;
+    let label_gap = (11.0 * scale).round().max(1.0) as i32;
+    let pad_x = (2.0 * scale).round().max(1.0) as i32;
+    let pad_y = (1.0 * scale).round().max(0.0) as i32;
 
     for marker in markers {
         let color = [
@@ -4217,7 +4238,6 @@ fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[
         let y2 = (marker.y2.clamp(0.0, 1.0) * (height.saturating_sub(1)) as f32).round() as i32;
         let (left, right) = (x1.min(x2), x1.max(x2));
         let (top, bottom) = (y1.min(y2), y1.max(y2));
-        let thickness = 2;
 
         for t in 0..thickness {
             let lt = left - t;
@@ -4235,20 +4255,20 @@ fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[
         }
 
         if !marker.label.is_empty() {
-            let text_w = (marker.label.chars().count() as i32) * 8;
+            let text_w = (marker.label.chars().count() as i32) * char_w;
             let tx = left.max(0);
-            let ty = (top - 11).max(0);
+            let ty = (top - label_gap).max(0);
             fill_rect(
                 pixels,
                 width,
                 height,
-                tx - 2,
-                ty - 1,
-                tx + text_w + 1,
-                (ty + 8).min(height as i32 - 1),
+                tx - pad_x,
+                ty - pad_y,
+                tx + text_w + pad_x - 1,
+                (ty + char_h).min(height as i32 - 1),
                 [0, 0, 0, 200],
             );
-            draw_text(pixels, width, height, tx, ty, &marker.label, color);
+            draw_text_scaled(pixels, width, height, tx, ty, &marker.label, color, scale);
         }
     }
 }
@@ -4451,7 +4471,7 @@ mod tests {
         let mut pixels = vec![0u8; 8 * 8 * 4];
         let mut overlay = MarkerOverlay::new();
         overlay.add_marker(0.25, 0.25, 0.75, 0.75);
-        draw_markers_on_image(&mut pixels, 8, 8, &overlay.markers);
+        draw_markers_on_image(&mut pixels, 8, 8, &overlay.markers, 1.0);
 
         // Interior should remain transparent.
         let interior_idx = ((4 * 8 + 4) * 4) as usize;
