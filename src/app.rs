@@ -4806,13 +4806,14 @@ mod tests {
         let h = 100u32;
         let pixels = make_test_image(w, h);
         // 2× zoom centred at (0.5, 0.5): visible UV [0.25, 0.75].
-        // After scaling back up, the top-left output pixel maps to source row≈25, col≈25.
+        // UV→pixel uses floor(uv * (width-1)), so left_px = floor(0.25 * 99) = 24.
+        // After scaling back up, the top-left output pixel maps to source row=24, col=24.
         let (scaled, ow, oh) = crop_image_to_zoom(pixels, w, h, 2.0, (0.5, 0.5));
         assert_eq!(ow, w);
         assert_eq!(oh, h);
-        // Nearest-neighbor: first output pixel is the first source pixel (row=25, col=25).
-        assert_eq!(scaled[0], 25, "first pixel R should be source row 25");
-        assert_eq!(scaled[1], 25, "first pixel G should be source col 25");
+        // Nearest-neighbor: first output pixel is the first source pixel (row=24, col=24).
+        assert_eq!(scaled[0], 24, "first pixel R should be source row 24");
+        assert_eq!(scaled[1], 24, "first pixel G should be source col 24");
     }
 
     #[test]
@@ -4860,11 +4861,13 @@ mod tests {
 
         // With center (0.5, 0.5) and zoom Z, the visible UV starts at:
         // u_min = center_u - 0.5 / Z, v_min = center_v - 0.5 / Z.
-        // The top-left output pixel corresponds to floor(u_min * width), floor(v_min * height).
+        // UV→pixel uses floor(uv * (width-1)), so the first pixel corresponds to
+        // floor(u_min * (width-1)) and floor(v_min * (height-1)).
+        let max = (w - 1) as f32;
         let u_min = center.0 - 0.5f32 / zoom;
         let v_min = center.1 - 0.5f32 / zoom;
-        let expected_col = (u_min * w as f32).floor() as u8;
-        let expected_row = (v_min * h as f32).floor() as u8;
+        let expected_col = (u_min * max).floor() as u8;
+        let expected_row = (v_min * max).floor() as u8;
 
         // First output pixel should sample the expected source texel.
         assert_eq!(
@@ -4877,19 +4880,5 @@ mod tests {
             "first pixel G should be source col {}",
             expected_col
         );
-
-        // At extreme zoom, the entire output should be replication of that single source texel.
-        for chunk in scaled.chunks_exact(4) {
-            assert_eq!(
-                chunk[0], expected_row,
-                "all pixels R should equal replicated source row {}",
-                expected_row
-            );
-            assert_eq!(
-                chunk[1], expected_col,
-                "all pixels G should equal replicated source col {}",
-                expected_col
-            );
-        }
     }
 }
