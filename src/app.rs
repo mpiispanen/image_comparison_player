@@ -4813,4 +4813,57 @@ mod tests {
         assert_eq!(scaled[0], 0, "first pixel R should be source row 0");
         assert_eq!(scaled[1], 0, "first pixel G should be source col 0");
     }
+
+    #[test]
+    fn test_crop_zoom_extreme_zoom_small_image_replication() {
+        use super::crop_image_to_zoom;
+        let w = 16u32;
+        let h = 16u32;
+        let zoom = 100.0f32;
+        let center = (0.5f32, 0.5f32);
+        let pixels = make_test_image(w, h);
+
+        let (scaled, ow, oh) = crop_image_to_zoom(pixels.clone(), w, h, zoom, center);
+
+        // Output dimensions must always match the original.
+        assert_eq!(ow, w);
+        assert_eq!(oh, h);
+
+        // Extreme zoom must not be a no-op: the sampled region should change the data.
+        assert_ne!(scaled, pixels, "crop + extreme zoom should modify the image data");
+
+        // With center (0.5, 0.5) and zoom Z, the visible UV starts at:
+        // u_min = center_u - 0.5 / Z, v_min = center_v - 0.5 / Z.
+        // The top-left output pixel corresponds to floor(u_min * width), floor(v_min * height).
+        let u_min = center.0 - 0.5f32 / zoom;
+        let v_min = center.1 - 0.5f32 / zoom;
+        let expected_col = (u_min * w as f32).floor() as u8;
+        let expected_row = (v_min * h as f32).floor() as u8;
+
+        // First output pixel should sample the expected source texel.
+        assert_eq!(
+            scaled[0], expected_row,
+            "first pixel R should be source row {}",
+            expected_row
+        );
+        assert_eq!(
+            scaled[1], expected_col,
+            "first pixel G should be source col {}",
+            expected_col
+        );
+
+        // At extreme zoom, the entire output should be replication of that single source texel.
+        for chunk in scaled.chunks_exact(4) {
+            assert_eq!(
+                chunk[0], expected_row,
+                "all pixels R should equal replicated source row {}",
+                expected_row
+            );
+            assert_eq!(
+                chunk[1], expected_col,
+                "all pixels G should equal replicated source col {}",
+                expected_col
+            );
+        }
+    }
 }
