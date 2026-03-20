@@ -4028,9 +4028,13 @@ impl AppState {
 /// the visible region is enlarged to fill the same pixel canvas as the original,
 /// using nearest-neighbor scaling to match the texture sampler used by the shader.
 ///
-/// `zoom_center` is the effective zoom center in normalized \[0, 1\] image-UV space
-/// (i.e. `fixed_zoom_center + zoom_center_offset`).  When `zoom_level` is ≤ 1.0
-/// the original image is returned unchanged.
+/// `zoom_center` is the nominal zoom center in normalized \[0, 1\] image-UV space
+/// (`0.0` at the left/top edge, `1.0` at the right/bottom edge). It is typically
+/// computed as `fixed_zoom_center + zoom_center_offset` and may therefore be
+/// slightly outside the \[0.0, 1.0\] range at high zoom levels. In that case, the
+/// effective sampled/cropped region is shifted accordingly and clamped to the
+/// valid image bounds. When `zoom_level` is ≤ 1.0 the original image is returned
+/// unchanged.
 ///
 /// The shader maps a screen-space coordinate `s ∈ [0,1]` to a texture coordinate
 /// via `t = zoom_center + (s – zoom_center) / zoom_level`, so the visible UV range
