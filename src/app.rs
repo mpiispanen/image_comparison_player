@@ -3960,9 +3960,49 @@ impl AppState {
             panels.push(d);
         }
 
+        // Apply zoom/pan crop so the combined screenshot matches what is currently
+        // visible on screen.  Do this BEFORE drawing markers so that:
+        //  - markers outside the visible region are excluded (correct)
+        //  - markers inside are drawn at their original visual size (no unwanted upscaling)
+        let zoom_center = (
+            self.fixed_zoom_center.0 + self.zoom_center_offset.0,
+            self.fixed_zoom_center.1 + self.zoom_center_offset.1,
+        );
+        if self.zoom_level > 1.0 {
+            for panel in &mut panels {
+                let (new_pixels, new_w, new_h) = crop_image_to_zoom(
+                    std::mem::take(&mut panel.0),
+                    panel.1,
+                    panel.2,
+                    self.zoom_level,
+                    zoom_center,
+                );
+                *panel = (new_pixels, new_w, new_h);
+            }
+        }
+
+        // Draw markers AFTER the crop+upscale.  Transform each marker's UV coordinates
+        // from source-image space to the visible-region space using the inverse of the
+        // shader UV mapping:  s = zoom_center + (t - zoom_center) * zoom_level
+        // where t is the source UV and s is the output UV.  When zoom_level == 1 this
+        // is the identity transform.  The existing clamp(0,1) in draw_markers_on_image
+        // clips markers that are only partially visible to the image boundary.
         if self.marker_overlay.visible && !self.marker_overlay.markers.is_empty() {
+            let zoom_level = self.zoom_level;
+            let (cx, cy) = zoom_center;
+            let transformed: Vec<Marker> = self.marker_overlay.markers.iter().map(|m| {
+                Marker {
+                    id: m.id,
+                    x1: cx + (m.x1 - cx) * zoom_level,
+                    y1: cy + (m.y1 - cy) * zoom_level,
+                    x2: cx + (m.x2 - cx) * zoom_level,
+                    y2: cy + (m.y2 - cy) * zoom_level,
+                    label: m.label.clone(),
+                    color: m.color,
+                }
+            }).collect();
             for (pixels, width, height) in &mut panels {
-                draw_markers_on_image(pixels, *width, *height, &self.marker_overlay.markers);
+                draw_markers_on_image(pixels, *width, *height, &transformed);
             }
         }
 
@@ -4004,6 +4044,106 @@ impl AppState {
             }
         }
     }
+}
+
+/// Crop an RGBA image to the region that is visible given the current zoom and pan,
+/// then scale that region back up to the original image dimensions.
+///
+/// This produces an output image that looks like what is shown in the window:
+/// the visible region is enlarged to fill the same pixel canvas as the original,
+/// using nearest-neighbor scaling to match the texture sampler used by the shader.
+///
+/// `zoom_center` is the nominal zoom center in normalized \[0, 1\] image-UV space
+/// (`0.0` at the left/top edge, `1.0` at the right/bottom edge). It is typically
+/// computed as `fixed_zoom_center + zoom_center_offset` and may therefore be
+/// slightly outside the \[0.0, 1.0\] range at high zoom levels. In that case, the
+/// effective sampled/cropped region is shifted accordingly and clamped to the
+/// valid image bounds. When `zoom_level` is ≤ 1.0 the original image is returned
+/// unchanged.
+///
+/// The shader maps a screen-space coordinate `s ∈ [0,1]` to a texture coordinate
+/// via `t = zoom_center + (s – zoom_center) / zoom_level`, so the visible UV range
+/// is `[zoom_center – zoom_center/zoom_level,  zoom_center + (1–zoom_center)/zoom_level]`.
+fn crop_image_to_zoom(
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    zoom_level: f32,
+    zoom_center: (f32, f32),
+) -> (Vec<u8>, u32, u32) {
+    if zoom_level <= 1.0 || width == 0 || height == 0 {
+        return (pixels, width, height);
+    }
+
+    let (cx, cy) = zoom_center;
+
+    // Visible UV range derived from the shader zoom formula.
+    let left_uv = (cx + (0.0 - cx) / zoom_level).clamp(0.0, 1.0);
+    let right_uv = (cx + (1.0 - cx) / zoom_level).clamp(0.0, 1.0);
+    let top_uv = (cy + (0.0 - cy) / zoom_level).clamp(0.0, 1.0);
+    let bottom_uv = (cy + (1.0 - cy) / zoom_level).clamp(0.0, 1.0);
+
+    // Convert UV to pixel coordinates.
+    //
+    // Treat UVs as covering texel centers in [0, 1], with 1.0 mapping to the last
+    // texel, and use a half-open pixel range [left_px, right_px) /
+    // [top_px, bottom_px) to avoid collapsing narrow but non-empty intervals.
+    let max_x = width.saturating_sub(1);
+    let max_y = height.saturating_sub(1);
+
+    let left_incl = ((left_uv * max_x as f32).floor() as u32).min(max_x);
+    let right_incl = ((right_uv * max_x as f32).ceil() as u32).min(max_x);
+    let top_incl = ((top_uv * max_y as f32).floor() as u32).min(max_y);
+    let bottom_incl = ((bottom_uv * max_y as f32).ceil() as u32).min(max_y);
+
+    // Build half-open ranges and clamp to image bounds.
+    let left_px = left_incl.min(right_incl);
+    let mut right_px = right_incl.max(left_incl).saturating_add(1).min(width);
+    let top_px = top_incl.min(bottom_incl);
+    let mut bottom_px = bottom_incl.max(top_incl).saturating_add(1).min(height);
+
+    // Ensure at least a 1×1 crop when the UV range is non-empty, guarding
+    // against any pathological floating-point cases.
+    if right_uv > left_uv && right_px <= left_px {
+        right_px = (left_px + 1).min(width);
+    }
+    if bottom_uv > top_uv && bottom_px <= top_px {
+        bottom_px = (top_px + 1).min(height);
+    }
+
+    let crop_w = right_px.saturating_sub(left_px).min(width.saturating_sub(left_px));
+    let crop_h = bottom_px.saturating_sub(top_px).min(height.saturating_sub(top_px));
+
+    // Return unchanged if degenerate (no visible area) or nothing to crop.
+    if crop_w == 0 || crop_h == 0 {
+        return (pixels, width, height);
+    }
+    if left_px == 0 && top_px == 0 && crop_w == width && crop_h == height {
+        return (pixels, width, height);
+    }
+
+    // Extract the cropped region.
+    let mut cropped = Vec::with_capacity((crop_w * crop_h * 4) as usize);
+    for row in 0..crop_h {
+        let src_row = top_px + row;
+        let src_start = ((src_row * width + left_px) * 4) as usize;
+        let src_end = src_start + (crop_w * 4) as usize;
+        cropped.extend_from_slice(&pixels[src_start..src_end]);
+    }
+
+    // Scale the cropped region back up to the original image dimensions using
+    // nearest-neighbor filtering, matching the nearest-filter texture sampler
+    // used by the rendering shader.
+    let cropped_img =
+        image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(crop_w, crop_h, cropped)
+            .expect("cropped buffer dimensions are consistent");
+    let scaled = image::imageops::resize(
+        &cropped_img,
+        width,
+        height,
+        image::imageops::FilterType::Nearest,
+    );
+    (scaled.into_raw(), width, height)
 }
 
 /// Stitch multiple RGBA images side-by-side into a single image.
@@ -4089,6 +4229,12 @@ fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[
         return;
     }
 
+    const MARKER_THICKNESS: i32 = 2;
+    const CHAR_W: i32 = 8;
+    const LABEL_GAP: i32 = 11; // pixels above the marker top edge for the label
+    const PAD_X: i32 = 2;      // horizontal padding around label text
+    const PAD_Y: i32 = 1;      // vertical padding around label text
+
     for marker in markers {
         let color = [
             (marker.color[0].clamp(0.0, 1.0) * 255.0) as u8,
@@ -4102,9 +4248,8 @@ fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[
         let y2 = (marker.y2.clamp(0.0, 1.0) * (height.saturating_sub(1)) as f32).round() as i32;
         let (left, right) = (x1.min(x2), x1.max(x2));
         let (top, bottom) = (y1.min(y2), y1.max(y2));
-        let thickness = 2;
 
-        for t in 0..thickness {
+        for t in 0..MARKER_THICKNESS {
             let lt = left - t;
             let rt = right + t;
             let tt = top - t;
@@ -4120,17 +4265,17 @@ fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[
         }
 
         if !marker.label.is_empty() {
-            let text_w = (marker.label.chars().count() as i32) * 8;
+            let text_w = (marker.label.chars().count() as i32) * CHAR_W;
             let tx = left.max(0);
-            let ty = (top - 11).max(0);
+            let ty = (top - LABEL_GAP).max(0);
             fill_rect(
                 pixels,
                 width,
                 height,
-                tx - 2,
-                ty - 1,
-                tx + text_w + 1,
-                (ty + 8).min(height as i32 - 1),
+                tx - PAD_X,
+                ty - PAD_Y,
+                tx + text_w + PAD_X - 1,
+                (ty + CHAR_W).min(height as i32 - 1),
                 [0, 0, 0, 200],
             );
             draw_text(pixels, width, height, tx, ty, &marker.label, color);
@@ -4644,5 +4789,126 @@ mod tests {
         let mut pixels = original.clone();
         draw_label_bottom_left_on_image(&mut pixels, w, h, "");
         assert_eq!(pixels, original, "empty label should not modify any pixels");
+    }
+
+    // ── crop_image_to_zoom unit tests ─────────────────────────────────────────
+
+    /// Create a simple RGBA test image where each pixel stores its (row, col)
+    /// as R=row, G=col and B=A=255.
+    fn make_test_image(width: u32, height: u32) -> Vec<u8> {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for row in 0..height {
+            for col in 0..width {
+                pixels.extend_from_slice(&[row as u8, col as u8, 255, 255]);
+            }
+        }
+        pixels
+    }
+
+    #[test]
+    fn test_crop_no_zoom_returns_original() {
+        use super::crop_image_to_zoom;
+        let w = 4u32;
+        let h = 4u32;
+        let pixels = make_test_image(w, h);
+        let (out, ow, oh) = crop_image_to_zoom(pixels.clone(), w, h, 1.0, (0.5, 0.5));
+        assert_eq!(ow, w);
+        assert_eq!(oh, h);
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn test_crop_zoom_2x_preserves_original_dimensions() {
+        use super::crop_image_to_zoom;
+        let w = 100u32;
+        let h = 100u32;
+        let pixels = make_test_image(w, h);
+        // After crop + scale-up the output dimensions must equal the original.
+        let (_, ow, oh) = crop_image_to_zoom(pixels, w, h, 2.0, (0.5, 0.5));
+        assert_eq!(ow, w);
+        assert_eq!(oh, h);
+    }
+
+    #[test]
+    fn test_crop_zoom_2x_center_top_left_pixel() {
+        use super::crop_image_to_zoom;
+        let w = 100u32;
+        let h = 100u32;
+        let pixels = make_test_image(w, h);
+        // 2× zoom centred at (0.5, 0.5): visible UV [0.25, 0.75].
+        // UV→pixel uses floor(uv * (width-1)), so left_px = floor(0.25 * 99) = 24.
+        // After scaling back up, the top-left output pixel maps to source row=24, col=24.
+        let (scaled, ow, oh) = crop_image_to_zoom(pixels, w, h, 2.0, (0.5, 0.5));
+        assert_eq!(ow, w);
+        assert_eq!(oh, h);
+        // Nearest-neighbor: first output pixel is the first source pixel (row=24, col=24).
+        assert_eq!(scaled[0], 24, "first pixel R should be source row 24");
+        assert_eq!(scaled[1], 24, "first pixel G should be source col 24");
+    }
+
+    #[test]
+    fn test_crop_empty_image_returns_unchanged() {
+        use super::crop_image_to_zoom;
+        let (out, ow, oh) = crop_image_to_zoom(vec![], 0, 0, 4.0, (0.5, 0.5));
+        assert_eq!(ow, 0);
+        assert_eq!(oh, 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_crop_zoom_top_left_corner_preserves_dimensions() {
+        use super::crop_image_to_zoom;
+        let w = 100u32;
+        let h = 100u32;
+        let pixels = make_test_image(w, h);
+        // Zoom center at (0, 0): visible UV region is [0, 0.5] × [0, 0.5].
+        // Output must be scaled back to original size.
+        let (scaled, ow, oh) = crop_image_to_zoom(pixels, w, h, 2.0, (0.0, 0.0));
+        assert_eq!(ow, w);
+        assert_eq!(oh, h);
+        // Top-left of the output is the top-left of the original image (row=0, col=0).
+        assert_eq!(scaled[0], 0, "first pixel R should be source row 0");
+        assert_eq!(scaled[1], 0, "first pixel G should be source col 0");
+    }
+
+    #[test]
+    fn test_crop_zoom_extreme_zoom_small_image_replication() {
+        use super::crop_image_to_zoom;
+        let w = 16u32;
+        let h = 16u32;
+        let zoom = 100.0f32;
+        let center = (0.5f32, 0.5f32);
+        let pixels = make_test_image(w, h);
+
+        let (scaled, ow, oh) = crop_image_to_zoom(pixels.clone(), w, h, zoom, center);
+
+        // Output dimensions must always match the original.
+        assert_eq!(ow, w);
+        assert_eq!(oh, h);
+
+        // Extreme zoom must not be a no-op: the sampled region should change the data.
+        assert_ne!(scaled, pixels, "crop + extreme zoom should modify the image data");
+
+        // With center (0.5, 0.5) and zoom Z, the visible UV starts at:
+        // u_min = center_u - 0.5 / Z, v_min = center_v - 0.5 / Z.
+        // UV→pixel uses floor(uv * (width-1)), so the first pixel corresponds to
+        // floor(u_min * (width-1)) and floor(v_min * (height-1)).
+        let max = (w - 1) as f32;
+        let u_min = center.0 - 0.5f32 / zoom;
+        let v_min = center.1 - 0.5f32 / zoom;
+        let expected_col = (u_min * max).floor() as u8;
+        let expected_row = (v_min * max).floor() as u8;
+
+        // First output pixel should sample the expected source texel.
+        assert_eq!(
+            scaled[0], expected_row,
+            "first pixel R should be source row {}",
+            expected_row
+        );
+        assert_eq!(
+            scaled[1], expected_col,
+            "first pixel G should be source col {}",
+            expected_col
+        );
     }
 }
