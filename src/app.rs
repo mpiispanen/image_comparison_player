@@ -926,7 +926,8 @@ impl HelpOverlay {
                 ui.text("  Up / Down      Zoom in / out");
                 ui.text("  Q / E          Zoom out / in");
                 ui.text("  W A S D        Pan up / left / down / right");
-                ui.text("  Left drag      Zoom to dragged region");
+                ui.text("  Left drag      Pan (drag to move view)");
+                ui.text("  Right drag     Zoom to dragged region");
                 ui.text("  R              Reset zoom to full frame");
                 ui.text("  Z (hold)       Peek zoom magnifier");
                 ui.text("  X              Cycle peek zoom image (split / image 1 / image 2 / current view / diff only)");
@@ -1172,6 +1173,10 @@ pub struct AppState {
     flip_error_value: Option<f32>,
     drag_zoom_start: Option<(f32, f32)>,
     drag_zoom_current: (f32, f32),
+    /// Start position (screen px) of an in-progress left-drag pan.
+    drag_pan_start: Option<(f32, f32)>,
+    /// Effective zoom center (fixed_zoom_center + zoom_center_offset) at the start of the pan drag.
+    drag_pan_initial_center: (f32, f32),
     show_hud: bool,
     app_config: AppConfig,
     pending_drop_paths: Vec<std::path::PathBuf>,
@@ -1699,7 +1704,7 @@ impl AppState {
             swipe_threshold: 50.0,
             config,
             zoom_center_offset: (0.0, 0.0),
-            zoom_move_speed: 0.01,
+            zoom_move_speed: 0.1,
             screenshot_requested: false,
             surface_scale,
             status_message: None,
@@ -1715,6 +1720,8 @@ impl AppState {
             flip_error_value: None,
             drag_zoom_start: None,
             drag_zoom_current: (0.0, 0.0),
+            drag_pan_start: None,
+            drag_pan_initial_center: (0.5, 0.5),
             show_hud: true,
             app_config: stored_config,
             pending_drop_paths: Vec::new(),
@@ -3122,15 +3129,39 @@ impl AppState {
             ..
         } = event
         {
-            self.update_mouse_position(position.x as f32, position.y as f32);
+            let pos = (position.x as f32, position.y as f32);
+            self.update_mouse_position(pos.0, pos.1);
             if let Some(start) = self.drag_zoom_start {
-                self.drag_zoom_current = self.constrain_drag_to_window_aspect(
-                    start,
-                    (position.x as f32, position.y as f32),
-                );
+                self.drag_zoom_current =
+                    self.constrain_drag_to_window_aspect(start, pos);
             }
             if self.marker_drag_start.is_some() {
-                self.marker_drag_current = (position.x as f32, position.y as f32);
+                self.marker_drag_current = pos;
+            }
+            // Update pan drag: keep the grabbed image pixel under the cursor.
+            if let Some(pan_start) = self.drag_pan_start {
+                let (render_width, render_height) = self.compute_render_dimensions();
+                let d_uv_x = (pos.0 - pan_start.0) / render_width;
+                let d_uv_y = (pos.1 - pan_start.1) / render_height;
+                // Exact "pixel-under-cursor" pan formula:
+                //   new_center = initial_center - d_uv / (zoom_level - 1)
+                // A minimum denominator of 0.1 prevents erratic behaviour near
+                // zoom == 1.0 while the max_offset clamp still limits movement
+                // to what is actually visible at the current zoom level.
+                let z_minus_1 = (self.zoom_level - 1.0).max(0.1);
+                let max_offset_x = (1.0 - 1.0 / self.zoom_level) / 2.0;
+                let max_offset_y = (1.0 - 1.0 / self.zoom_level) / 2.0;
+                let c_new_x = (self.drag_pan_initial_center.0 - d_uv_x / z_minus_1)
+                    .clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
+                let c_new_y = (self.drag_pan_initial_center.1 - d_uv_y / z_minus_1)
+                    .clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
+                // fixed_zoom_center was set to drag_pan_initial_center at drag start,
+                // so the offset is the delta from the initial center.
+                self.zoom_center_offset = (
+                    c_new_x - self.fixed_zoom_center.0,
+                    c_new_y - self.fixed_zoom_center.1,
+                );
+                self.update_uniform_buffer();
             }
         }
 
@@ -3352,8 +3383,16 @@ impl AppState {
                             self.marker_drag_start = Some(start);
                             self.marker_drag_current = start;
                         } else {
-                            self.drag_zoom_start = Some(start);
-                            self.drag_zoom_current = start;
+                            // Start a pan drag: record the effective zoom center at drag start.
+                            let effective_cx =
+                                self.fixed_zoom_center.0 + self.zoom_center_offset.0;
+                            let effective_cy =
+                                self.fixed_zoom_center.1 + self.zoom_center_offset.1;
+                            // Merge offset into fixed center so zoom_center_offset tracks only this drag.
+                            self.fixed_zoom_center = (effective_cx, effective_cy);
+                            self.zoom_center_offset = (0.0, 0.0);
+                            self.drag_pan_start = Some(start);
+                            self.drag_pan_initial_center = (effective_cx, effective_cy);
                         }
                     }
                 }
@@ -3384,9 +3423,38 @@ impl AppState {
                             self.marker_overlay.create_mode = false;
                         }
                     }
-                    // Finish a drag-zoom.
+                    // Finish a pan drag: fold the accumulated offset into fixed_zoom_center.
+                    if self.drag_pan_start.take().is_some() {
+                        self.fixed_zoom_center.0 += self.zoom_center_offset.0;
+                        self.fixed_zoom_center.1 += self.zoom_center_offset.1;
+                        self.zoom_center_offset = (0.0, 0.0);
+                    }
+                }
+            }
+        }
+
+        // Right-click drag: zoom to a selected region.
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::MouseInput {
+                button: winit::event::MouseButton::Right,
+                state,
+                ..
+            },
+            ..
+        } = event
+        {
+            match state {
+                winit::event::ElementState::Pressed => {
+                    if !self.imgui_context.io().want_capture_mouse {
+                        let start = self.clamp_to_render_rect(self.mouse_position);
+                        self.drag_zoom_start = Some(start);
+                        self.drag_zoom_current = start;
+                    }
+                }
+                winit::event::ElementState::Released => {
                     if let Some(start) = self.drag_zoom_start.take() {
-                        let current = self.constrain_drag_to_window_aspect(start, self.drag_zoom_current);
+                        let current =
+                            self.constrain_drag_to_window_aspect(start, self.drag_zoom_current);
                         let dx = (current.0 - start.0).abs();
                         let dy = (current.1 - start.1).abs();
                         if dx > MIN_DRAG_ZOOM_DISTANCE_PX || dy > MIN_DRAG_ZOOM_DISTANCE_PX {
@@ -3656,18 +3724,23 @@ impl AppState {
     pub fn handle_zoom_move(&mut self, direction: (f32, f32)) {
         let (dx, dy) = direction;
         let (mut offset_x, mut offset_y) = self.zoom_center_offset;
-        
-        // Calculate the maximum allowed offset based on zoom level
+
+        // Calculate the maximum allowed offset based on zoom level.
         let max_offset_x = (1.0 - 1.0 / self.zoom_level) / 2.0;
         let max_offset_y = (1.0 - 1.0 / self.zoom_level) / 2.0;
-        
-        offset_x += dx * self.zoom_move_speed;
-        offset_y += dy * self.zoom_move_speed;
-        
-        // Clamp the offset to keep the zoom center within the image
+
+        // Scale the step by 1/zoom_level so that each key press moves a consistent
+        // fraction of the *visible* area regardless of the current zoom level.
+        // zoom_move_speed is interpreted as the desired fraction of the visible width
+        // per key press (e.g. 0.1 = 10 % of the visible area).
+        let step = self.zoom_move_speed / self.zoom_level;
+        offset_x += dx * step;
+        offset_y += dy * step;
+
+        // Clamp the offset to keep the zoom center within the image.
         offset_x = offset_x.clamp(-max_offset_x, max_offset_x);
         offset_y = offset_y.clamp(-max_offset_y, max_offset_y);
-        
+
         self.zoom_center_offset = (offset_x, offset_y);
         self.update_uniform_buffer();
     }
