@@ -3909,16 +3909,23 @@ impl AppState {
 
         // Choose the zoom level that fully shows the rectangle.
         let new_zoom_level = (1.0_f32 / du).min(1.0 / dv).clamp(1.0, MAX_ZOOM_LEVEL);
-        let new_center_x = (u1 + u2) / 2.0;
-        let new_center_y = (v1 + v2) / 2.0;
 
-        let max_offset_x = (1.0 - 1.0 / new_zoom_level) / 2.0;
-        let max_offset_y = (1.0 - 1.0 / new_zoom_level) / 2.0;
-        let clamped_center_x = new_center_x.clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
-        let clamped_center_y = new_center_y.clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
+        // The desired visible center is the UV midpoint of the drag rectangle.
+        // Clamp it so the zoomed viewport stays within [0, 1] on both axes.
+        let half_vp = 0.5 / new_zoom_level;
+        let visible_center_x = ((u1 + u2) / 2.0).clamp(half_vp, 1.0 - half_vp);
+        let visible_center_y = ((v1 + v2) / 2.0).clamp(half_vp, 1.0 - half_vp);
+
+        // Convert the visible center to the shader zoom_center anchor.
+        // The shader formula maps screen UV `t` to texture UV `p`:
+        //   p = zoom_center + (t - zoom_center) / zoom_level
+        // Solving for zoom_center such that screen UV 0.5 shows texture UV visible_center:
+        //   zoom_center = (visible_center * zoom_level - 0.5) / (zoom_level - 1)
+        let zoom_center_x = (visible_center_x * new_zoom_level - 0.5) / (new_zoom_level - 1.0);
+        let zoom_center_y = (visible_center_y * new_zoom_level - 0.5) / (new_zoom_level - 1.0);
 
         self.zoom_level = new_zoom_level;
-        self.fixed_zoom_center = (clamped_center_x, clamped_center_y);
+        self.fixed_zoom_center = (zoom_center_x.clamp(0.0, 1.0), zoom_center_y.clamp(0.0, 1.0));
         self.zoom_center_offset = (0.0, 0.0);
         self.update_uniform_buffer();
     }
@@ -4432,7 +4439,7 @@ fn generate_output_filename(prefix: &str, extension: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{draw_markers_on_image, generate_output_filename, stitch_images_side_by_side, MarkerOverlay};
+    use super::{draw_markers_on_image, generate_output_filename, stitch_images_side_by_side, MarkerOverlay, MAX_ZOOM_LEVEL};
 
     #[test]
     fn test_generate_output_filename_format() {
@@ -4990,5 +4997,93 @@ mod tests {
             "first pixel G should be source col {}",
             expected_col
         );
+    }
+
+    // ── drag-zoom center formula unit tests ───────────────────────────────────
+
+    /// Simulate the drag-zoom center computation used in `apply_drag_zoom` for a
+    /// given UV rectangle, and return `(zoom_level, zoom_center_x, zoom_center_y)`.
+    fn simulate_drag_zoom(u1: f32, u2: f32, v1: f32, v2: f32) -> (f32, f32, f32) {
+        let du = u2 - u1;
+        let dv = v2 - v1;
+        let zoom_level = (1.0_f32 / du).min(1.0 / dv).clamp(1.0, MAX_ZOOM_LEVEL);
+        let half_vp = 0.5 / zoom_level;
+        let vc_x = ((u1 + u2) / 2.0).clamp(half_vp, 1.0 - half_vp);
+        let vc_y = ((v1 + v2) / 2.0).clamp(half_vp, 1.0 - half_vp);
+        let zc_x = ((vc_x * zoom_level - 0.5) / (zoom_level - 1.0)).clamp(0.0, 1.0);
+        let zc_y = ((vc_y * zoom_level - 0.5) / (zoom_level - 1.0)).clamp(0.0, 1.0);
+        (zoom_level, zc_x, zc_y)
+    }
+
+    /// Apply the shader zoom formula: texture UV seen at a given screen UV.
+    fn shader_sample(screen_uv: f32, zoom_center: f32, zoom_level: f32) -> f32 {
+        zoom_center + (screen_uv - zoom_center) / zoom_level
+    }
+
+    /// After a drag-zoom on the center quarter of the image, the screen edges
+    /// should show exactly u1 and u2 (or v1/v2).
+    #[test]
+    fn test_drag_zoom_center_selection_maps_edges_correctly() {
+        let (zoom_level, zc_x, zc_y) = simulate_drag_zoom(0.25, 0.75, 0.25, 0.75);
+        assert!((zoom_level - 2.0).abs() < 1e-5, "zoom_level should be 2.0, got {}", zoom_level);
+        let left = shader_sample(0.0, zc_x, zoom_level);
+        let right = shader_sample(1.0, zc_x, zoom_level);
+        let top = shader_sample(0.0, zc_y, zoom_level);
+        let bottom = shader_sample(1.0, zc_y, zoom_level);
+        assert!((left - 0.25).abs() < 1e-5, "left edge UV should be 0.25, got {}", left);
+        assert!((right - 0.75).abs() < 1e-5, "right edge UV should be 0.75, got {}", right);
+        assert!((top - 0.25).abs() < 1e-5, "top edge UV should be 0.25, got {}", top);
+        assert!((bottom - 0.75).abs() < 1e-5, "bottom edge UV should be 0.75, got {}", bottom);
+    }
+
+    /// Drag-zoom on a region in the top-left corner.
+    #[test]
+    fn test_drag_zoom_top_left_corner() {
+        let (zoom_level, zc_x, _zc_y) = simulate_drag_zoom(0.0, 0.5, 0.0, 0.5);
+        assert!((zoom_level - 2.0).abs() < 1e-5, "zoom_level should be 2.0, got {}", zoom_level);
+        let left = shader_sample(0.0, zc_x, zoom_level);
+        let right = shader_sample(1.0, zc_x, zoom_level);
+        assert!((left - 0.0).abs() < 1e-5, "left edge UV should be 0.0, got {}", left);
+        assert!((right - 0.5).abs() < 1e-5, "right edge UV should be 0.5, got {}", right);
+    }
+
+    /// Drag-zoom on a region in the bottom-right corner.
+    #[test]
+    fn test_drag_zoom_bottom_right_corner() {
+        let (zoom_level, zc_x, zc_y) = simulate_drag_zoom(0.5, 1.0, 0.5, 1.0);
+        assert!((zoom_level - 2.0).abs() < 1e-5, "zoom_level should be 2.0, got {}", zoom_level);
+        let left = shader_sample(0.0, zc_x, zoom_level);
+        let right = shader_sample(1.0, zc_x, zoom_level);
+        let top = shader_sample(0.0, zc_y, zoom_level);
+        let bottom = shader_sample(1.0, zc_y, zoom_level);
+        assert!((left - 0.5).abs() < 1e-5, "left edge UV should be 0.5, got {}", left);
+        assert!((right - 1.0).abs() < 1e-5, "right edge UV should be 1.0, got {}", right);
+        assert!((top - 0.5).abs() < 1e-5, "top edge UV should be 0.5, got {}", top);
+        assert!((bottom - 1.0).abs() < 1e-5, "bottom edge UV should be 1.0, got {}", bottom);
+    }
+
+    /// Drag-zoom with an off-center small selection.
+    #[test]
+    fn test_drag_zoom_off_center_selection() {
+        let (zoom_level, zc_x, zc_y) = simulate_drag_zoom(0.1, 0.3, 0.6, 0.8);
+        assert!((zoom_level - 5.0).abs() < 1e-5, "zoom_level should be 5.0, got {}", zoom_level);
+        let left = shader_sample(0.0, zc_x, zoom_level);
+        let right = shader_sample(1.0, zc_x, zoom_level);
+        let top = shader_sample(0.0, zc_y, zoom_level);
+        let bottom = shader_sample(1.0, zc_y, zoom_level);
+        assert!((left - 0.1).abs() < 1e-5, "left edge UV should be 0.1, got {}", left);
+        assert!((right - 0.3).abs() < 1e-5, "right edge UV should be 0.3, got {}", right);
+        assert!((top - 0.6).abs() < 1e-5, "top edge UV should be 0.6, got {}", top);
+        assert!((bottom - 0.8).abs() < 1e-5, "bottom edge UV should be 0.8, got {}", bottom);
+    }
+
+    /// The screen center (UV 0.5) should display the midpoint of the selected region.
+    #[test]
+    fn test_drag_zoom_screen_center_shows_selection_midpoint() {
+        let (zoom_level, zc_x, zc_y) = simulate_drag_zoom(0.1, 0.5, 0.2, 0.6);
+        let mid_u = shader_sample(0.5, zc_x, zoom_level);
+        let mid_v = shader_sample(0.5, zc_y, zoom_level);
+        assert!((mid_u - 0.3).abs() < 1e-5, "screen center U should be 0.3, got {}", mid_u);
+        assert!((mid_v - 0.4).abs() < 1e-5, "screen center V should be 0.4, got {}", mid_v);
     }
 }
