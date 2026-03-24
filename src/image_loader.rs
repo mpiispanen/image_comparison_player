@@ -36,7 +36,8 @@ pub fn load_image_paths_from_files(files: &[String], fps: f32) -> Result<(Vec<Im
 
 pub fn load_image_paths(dir: &str, fps: f32) -> Result<(Vec<ImageInfo>, usize)> {
     info!("Loading image paths from directory: {}", dir);
-    let absolute_dir = std::fs::canonicalize(dir)?;
+    let absolute_dir = std::fs::canonicalize(dir)
+        .with_context(|| format!("Directory not found: '{}'", dir))?;
     let ffmpeg_input = absolute_dir.join("input.txt");
 
     if ffmpeg_input.exists() {

@@ -232,7 +232,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(4.0);
 
-    let (width, height) = parse_window_size(window_size)?;
+    let (width, height) = parse_window_size(window_size)
+        .map_err(|e| format!("Invalid --window-size argument: {}", e))?;
+
+    if !test_mode {
+        validate_paths(
+            dir1.as_deref(),
+            dir2.as_deref(),
+            images1.as_deref(),
+            images2.as_deref(),
+        )?;
+    }
 
     info!(
         "Starting image comparison player with input1: {}, input2: {}, window size: {}x{}",
@@ -306,6 +316,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 }
 
+fn validate_paths(
+    dir1: Option<&str>,
+    dir2: Option<&str>,
+    images1: Option<&[String]>,
+    images2: Option<&[String]>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (arg, dir) in [("--dir1", dir1), ("--dir2", dir2)]
+        .iter()
+        .filter_map(|(arg, d)| d.map(|d| (*arg, d)))
+    {
+        let path = std::path::Path::new(dir);
+        if !path.exists() {
+            return Err(format!("{} directory not found: '{}'", arg, dir).into());
+        }
+        if !path.is_dir() {
+            return Err(format!("{} path is not a directory: '{}'", arg, dir).into());
+        }
+    }
+    for (arg, files) in [("--images1", images1), ("--images2", images2)]
+        .iter()
+        .filter_map(|(arg, f)| f.map(|f| (*arg, f)))
+    {
+        for file in files {
+            let path = std::path::Path::new(file);
+            if !path.exists() {
+                return Err(format!("{} file not found: '{}'", arg, file).into());
+            }
+            if !path.is_file() {
+                return Err(format!("{} path is not a file: '{}'", arg, file).into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_window_size(size: &str) -> Result<(f32, f32), String> {
     let parts: Vec<&str> = size.split('x').collect();
     if parts.len() != 2 {
@@ -318,7 +363,7 @@ fn parse_window_size(size: &str) -> Result<(f32, f32), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_window_size;
+    use super::{parse_window_size, validate_paths};
 
     #[test]
     fn test_parse_window_size_valid() {
@@ -343,5 +388,80 @@ mod tests {
     fn test_parse_window_size_non_numeric() {
         assert!(parse_window_size("WIDTHxHEIGHT").is_err());
         assert!(parse_window_size("1920xabc").is_err());
+    }
+
+    #[test]
+    fn test_validate_paths_nonexistent_dir1() {
+        let result = validate_paths(Some("/nonexistent/path/that/does/not/exist"), None, None, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("--dir1"), "error should mention --dir1");
+        assert!(msg.contains("not found"), "error should mention 'not found'");
+    }
+
+    #[test]
+    fn test_validate_paths_nonexistent_dir2() {
+        let result = validate_paths(None, Some("/nonexistent/path/that/does/not/exist"), None, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("--dir2"), "error should mention --dir2");
+    }
+
+    #[test]
+    fn test_validate_paths_file_as_dir() {
+        // Create a temporary file and use it as a dir argument
+        let tmp = std::env::temp_dir().join("icp_test_file_as_dir.txt");
+        std::fs::write(&tmp, b"test").unwrap();
+        let result = validate_paths(Some(tmp.to_str().expect("temp path is valid UTF-8")), None, None, None);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not a directory"), "error should mention 'not a directory'");
+    }
+
+    #[test]
+    fn test_validate_paths_nonexistent_image_file() {
+        let files = vec!["/nonexistent/image.png".to_string()];
+        let result = validate_paths(None, None, Some(&files), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("--images1"), "error should mention --images1");
+        assert!(msg.contains("not found"), "error should mention 'not found'");
+    }
+
+    #[test]
+    fn test_validate_paths_nonexistent_images2_file() {
+        let files = vec!["/nonexistent/image.png".to_string()];
+        let result = validate_paths(None, None, None, Some(&files));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("--images2"), "error should mention --images2");
+    }
+
+    #[test]
+    fn test_validate_paths_dir_as_image_file() {
+        // Pass a directory where a file is expected
+        let files = vec![std::env::temp_dir().to_string_lossy().into_owned()];
+        let result = validate_paths(None, None, Some(&files), None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not a file"), "error should mention 'not a file'");
+    }
+
+    #[test]
+    fn test_validate_paths_valid_dir() {
+        let result = validate_paths(
+            Some(std::env::temp_dir().to_str().expect("temp dir is valid UTF-8")),
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_paths_none_args() {
+        let result = validate_paths(None, None, None, None);
+        assert!(result.is_ok());
     }
 }
