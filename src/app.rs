@@ -3553,11 +3553,6 @@ impl AppState {
         self.cursor_y = (y - y_offset).max(0.0).min(render_height);
     }
 
-    pub fn update_mouse_position(&mut self, x: f32, y: f32) {
-        self.update_cursor_state(x, y);
-        self.update_uniform_buffer();
-    }
-
     pub fn cycle_comparison_mode(&mut self) {
         self.comparison_mode = self.comparison_mode.cycle();
         if self.comparison_mode == ComparisonMode::Flip {
