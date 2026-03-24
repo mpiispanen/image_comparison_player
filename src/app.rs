@@ -3130,7 +3130,10 @@ impl AppState {
         } = event
         {
             let pos = (position.x as f32, position.y as f32);
-            self.update_mouse_position(pos.0, pos.1);
+            // Update cursor state without writing the uniform buffer yet so that
+            // the pan-drag computation below can see the updated cursor position,
+            // and we only write the buffer once at the end of this branch.
+            self.update_cursor_state(pos.0, pos.1);
             if let Some(start) = self.drag_zoom_start {
                 self.drag_zoom_current =
                     self.constrain_drag_to_window_aspect(start, pos);
@@ -3161,8 +3164,9 @@ impl AppState {
                     c_new_x - self.fixed_zoom_center.0,
                     c_new_y - self.fixed_zoom_center.1,
                 );
-                self.update_uniform_buffer();
             }
+            // Write the uniform buffer exactly once for this cursor-moved event.
+            self.update_uniform_buffer();
         }
 
         if let winit::event::Event::WindowEvent {
@@ -3537,7 +3541,7 @@ impl AppState {
         )
     }
 
-    pub fn update_mouse_position(&mut self, x: f32, y: f32) {
+    fn update_cursor_state(&mut self, x: f32, y: f32) {
         let (x_offset, y_offset, render_width, render_height) = self.compute_render_rect();
 
         self.mouse_position = (x, y);
@@ -3547,6 +3551,10 @@ impl AppState {
             (x - x_offset).max(0.0).min(render_width)
         };
         self.cursor_y = (y - y_offset).max(0.0).min(render_height);
+    }
+
+    pub fn update_mouse_position(&mut self, x: f32, y: f32) {
+        self.update_cursor_state(x, y);
         self.update_uniform_buffer();
     }
 
