@@ -3723,25 +3723,29 @@ impl AppState {
 
     pub fn handle_zoom_move(&mut self, direction: (f32, f32)) {
         let (dx, dy) = direction;
-        let (mut offset_x, mut offset_y) = self.zoom_center_offset;
-
-        // Calculate the maximum allowed offset based on zoom level.
-        let max_offset_x = (1.0 - 1.0 / self.zoom_level) / 2.0;
-        let max_offset_y = (1.0 - 1.0 / self.zoom_level) / 2.0;
 
         // Scale the step by 1/zoom_level so that each key press moves a consistent
         // fraction of the *visible* area regardless of the current zoom level.
         // zoom_move_speed is interpreted as the desired fraction of the visible width
         // per key press (e.g. 0.1 = 10 % of the visible area).
         let step = self.zoom_move_speed / self.zoom_level;
-        offset_x += dx * step;
-        offset_y += dy * step;
 
-        // Clamp the offset to keep the zoom center within the image.
-        offset_x = offset_x.clamp(-max_offset_x, max_offset_x);
-        offset_y = offset_y.clamp(-max_offset_y, max_offset_y);
+        // Compute the new effective center (fixed + offset + delta).
+        let eff_x = self.fixed_zoom_center.0 + self.zoom_center_offset.0 + dx * step;
+        let eff_y = self.fixed_zoom_center.1 + self.zoom_center_offset.1 + dy * step;
 
-        self.zoom_center_offset = (offset_x, offset_y);
+        // Clamp the *effective* center so it never leaves the valid range,
+        // regardless of where fixed_zoom_center already sits.
+        let max_offset_x = (1.0 - 1.0 / self.zoom_level) / 2.0;
+        let max_offset_y = (1.0 - 1.0 / self.zoom_level) / 2.0;
+        let clamped_x = eff_x.clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
+        let clamped_y = eff_y.clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
+
+        // Derive the new offset as the difference from the (unchanged) fixed center.
+        self.zoom_center_offset = (
+            clamped_x - self.fixed_zoom_center.0,
+            clamped_y - self.fixed_zoom_center.1,
+        );
         self.update_uniform_buffer();
     }
 
