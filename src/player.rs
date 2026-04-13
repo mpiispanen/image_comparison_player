@@ -290,6 +290,7 @@ pub struct Player {
     playback_speed: f32,
     pub flip_stats: Arc<RwLock<HashMap<(usize, usize), FlipStats>>>,
     expected_image_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
+    expected_image_dimensions_right: Arc<Mutex<Option<(u32, u32)>>>,
     pub flip_diff_raw_data: FlipDiffRawData,
     pub single_image_mode: bool,
     /// Pre-computed sorted unique time points for O(log N) frame navigation
@@ -324,6 +325,9 @@ impl Player {
         let expected_dimensions =
             Self::determine_expected_dimensions(&config.image_data1[0].0).unwrap_or((0, 0));
         let expected_image_dimensions = Arc::new(Mutex::new(Some(expected_dimensions)));
+        let expected_dimensions_right =
+            Self::determine_expected_dimensions(&config.image_data2[0].0).unwrap_or((0, 0));
+        let expected_image_dimensions_right = Arc::new(Mutex::new(Some(expected_dimensions_right)));
 
         let single_image_mode = config.single_image_mode;
         let sorted_time_points = Self::compute_sorted_time_points(&config.image_data1, &config.image_data2);
@@ -372,6 +376,7 @@ impl Player {
             playback_speed: 1.0,
             flip_stats: Arc::new(RwLock::new(HashMap::new())),
             expected_image_dimensions,
+            expected_image_dimensions_right,
             flip_diff_raw_data: Arc::new(RwLock::new(HashMap::new())),
             single_image_mode,
             sorted_time_points,
@@ -585,7 +590,11 @@ impl Player {
             let texture_process_sender = self.texture_process_sender.clone();
             let processing_textures = Arc::clone(&self.processing_textures);
             let texture_timings = Arc::clone(&self.texture_timings);
-            let expected_dimensions = *self.expected_image_dimensions.lock();
+            let side_expected_dimensions = if request.is_left {
+                *self.expected_image_dimensions.lock()
+            } else {
+                *self.expected_image_dimensions_right.lock()
+            };
             self.texture_load_pool.execute(move || {
                 let request = TextureLoadRequest::new(
                     request.path.to_string(),
@@ -593,7 +602,7 @@ impl Player {
                     request.is_left,
                 );
                 if let Ok((image_data, size)) =
-                    Self::load_image_data_from_path(&request.path, expected_dimensions)
+                    Self::load_image_data_from_path(&request.path, side_expected_dimensions)
                 {
                     let load_end = Instant::now();
                     let load_time = load_end - request.load_start;
@@ -1719,5 +1728,58 @@ mod tests {
         assert_eq!(next_time_point_backward(&times, 200), 100);
         assert_eq!(next_time_point_backward(&times, 150), 100);
         assert_eq!(next_time_point_backward(&times, 100), 0);
+    }
+
+    #[test]
+    fn test_load_image_data_different_dimensions_per_side() {
+        // Verify that load_image_data_from_path accepts different expected_dimensions
+        // for left vs. right images.  This is the key scenario that was broken:
+        // after a second drag-and-drop, image_data1 and image_data2 can have images
+        // of different sizes; each side must be validated against its OWN first frame,
+        // not the other side's.
+        let dir = std::env::temp_dir()
+            .join("icp_tests")
+            .join("player_diff_dims");
+        let _ = fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+
+        // Write a 2×2 PPM (left side).
+        let path_left = dir.join("left.ppm");
+        fs::write(&path_left, b"P3\n2 2\n255\n255 0 0\n0 255 0\n0 0 255\n255 255 0\n").unwrap();
+
+        // Write a 1×1 PPM (right side – deliberately different dimensions).
+        let path_right = dir.join("right.ppm");
+        fs::write(&path_right, b"P3\n1 1\n255\n0 0 255\n").unwrap();
+
+        // The left-side expected dimensions come from the first left image (2×2).
+        let (_, left_size) = Player::load_image_data_from_path(
+            path_left.to_str().unwrap(),
+            Some((2, 2)),
+        )
+        .expect("left image should load with matching expected dimensions");
+        assert_eq!(left_size.width, 2);
+        assert_eq!(left_size.height, 2);
+
+        // The right-side expected dimensions come from the first right image (1×1).
+        // Before the fix this call used the LEFT expected dimensions (2×2), causing
+        // a mismatch error and silently dropping the right texture.
+        let (_, right_size) = Player::load_image_data_from_path(
+            path_right.to_str().unwrap(),
+            Some((1, 1)),
+        )
+        .expect("right image should load with its own matching expected dimensions");
+        assert_eq!(right_size.width, 1);
+        assert_eq!(right_size.height, 1);
+
+        // Confirm that using the WRONG (left-side) expected dimensions for the right
+        // image is what caused the original failure.
+        let result = Player::load_image_data_from_path(
+            path_right.to_str().unwrap(),
+            Some((2, 2)),
+        );
+        assert!(
+            result.is_err(),
+            "loading right image with left-side dimensions should fail (regression guard)"
+        );
     }
 }
