@@ -3735,11 +3735,15 @@ impl AppState {
         let eff_x = self.fixed_zoom_center.0 + self.zoom_center_offset.0 + dx * step;
         let eff_y = self.fixed_zoom_center.1 + self.zoom_center_offset.1 + dy * step;
 
-        // Clamp the *effective* center to [0, 1] so we can pan all the way to the
-        // image edge. A zoom center of 0 maps the left/top image edge to the left/top
-        // of the screen; a value of 1 does the same for the right/bottom edge.
-        let clamped_x = eff_x.clamp(0.0, 1.0);
-        let clamped_y = eff_y.clamp(0.0, 1.0);
+        // Clamp the *effective* center just inside [0, 1] so we can pan to the
+        // image edge without producing exact 0.0/1.0 texture coordinates at the
+        // screen boundary. The shaders currently treat the upper boundary
+        // exclusively, so hitting an exact endpoint can introduce a 1 px transparent
+        // border.
+        let min_zoom_center = f32::EPSILON;
+        let max_zoom_center = 1.0 - f32::EPSILON;
+        let clamped_x = eff_x.clamp(min_zoom_center, max_zoom_center);
+        let clamped_y = eff_y.clamp(min_zoom_center, max_zoom_center);
 
         // Derive the new offset as the difference from the (unchanged) fixed center.
         self.zoom_center_offset = (
