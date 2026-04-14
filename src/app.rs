@@ -3149,13 +3149,15 @@ impl AppState {
                 // Exact "pixel-under-cursor" pan formula:
                 //   new_center = initial_center - d_uv / (zoom_level - 1)
                 // A minimum denominator of 0.1 prevents erratic behaviour near
-                // zoom == 1.0. Clamping to [0, 1] allows panning all the way to
-                // the image edge so every pixel is reachable when zoomed in.
+                // zoom == 1.0. Clamp just inside [0, 1] so drag panning can still
+                // reach the image edge without producing exact 0.0/1.0 coordinates,
+                // which current shaders may treat as transparent at the boundary.
                 let z_minus_1 = (self.zoom_level - 1.0).max(0.1);
+                let edge_epsilon = 1.0e-6_f32;
                 let c_new_x = (self.drag_pan_initial_center.0 - d_uv_x / z_minus_1)
-                    .clamp(0.0, 1.0);
+                    .clamp(edge_epsilon, 1.0 - edge_epsilon);
                 let c_new_y = (self.drag_pan_initial_center.1 - d_uv_y / z_minus_1)
-                    .clamp(0.0, 1.0);
+                    .clamp(edge_epsilon, 1.0 - edge_epsilon);
                 // fixed_zoom_center was set to drag_pan_initial_center at drag start,
                 // so the offset is the delta from the initial center.
                 self.zoom_center_offset = (
