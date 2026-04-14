@@ -289,7 +289,7 @@ pub struct Player {
     pub texture_available_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
     playback_speed: f32,
     pub flip_stats: Arc<RwLock<HashMap<(usize, usize), FlipStats>>>,
-    expected_image_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
+    expected_image_dimensions_left: Arc<Mutex<Option<(u32, u32)>>>,
     expected_image_dimensions_right: Arc<Mutex<Option<(u32, u32)>>>,
     pub flip_diff_raw_data: FlipDiffRawData,
     pub single_image_mode: bool,
@@ -322,14 +322,24 @@ impl Player {
         let (flip_diff_sender, flip_diff_receiver) = channel();
         let flip_diff_receiver = Arc::new(Mutex::new(flip_diff_receiver));
 
-        let expected_dimensions =
-            Self::determine_expected_dimensions(&config.image_data1[0].0).unwrap_or((0, 0));
-        let expected_image_dimensions = Arc::new(Mutex::new(Some(expected_dimensions)));
-        let expected_dimensions_right =
-            Self::determine_expected_dimensions(&config.image_data2[0].0).unwrap_or((0, 0));
-        let expected_image_dimensions_right = Arc::new(Mutex::new(Some(expected_dimensions_right)));
+        let expected_dimensions_left = config
+            .image_data1
+            .first()
+            .and_then(|(path, _, _)| Self::determine_expected_dimensions(path).ok())
+            .unwrap_or((0, 0));
+        let expected_image_dimensions_left = Arc::new(Mutex::new(Some(expected_dimensions_left)));
 
         let single_image_mode = config.single_image_mode;
+        let expected_dimensions_right = if single_image_mode {
+            expected_dimensions_left
+        } else {
+            config
+                .image_data2
+                .first()
+                .and_then(|(path, _, _)| Self::determine_expected_dimensions(path).ok())
+                .unwrap_or((0, 0))
+        };
+        let expected_image_dimensions_right = Arc::new(Mutex::new(Some(expected_dimensions_right)));
         let sorted_time_points = Self::compute_sorted_time_points(&config.image_data1, &config.image_data2);
 
         Self {
@@ -375,7 +385,7 @@ impl Player {
             texture_available_times: Arc::new(RwLock::new(HashMap::new())),
             playback_speed: 1.0,
             flip_stats: Arc::new(RwLock::new(HashMap::new())),
-            expected_image_dimensions,
+            expected_image_dimensions_left,
             expected_image_dimensions_right,
             flip_diff_raw_data: Arc::new(RwLock::new(HashMap::new())),
             single_image_mode,
@@ -591,7 +601,7 @@ impl Player {
             let processing_textures = Arc::clone(&self.processing_textures);
             let texture_timings = Arc::clone(&self.texture_timings);
             let side_expected_dimensions = if request.is_left {
-                *self.expected_image_dimensions.lock()
+                *self.expected_image_dimensions_left.lock()
             } else {
                 *self.expected_image_dimensions_right.lock()
             };

@@ -1182,6 +1182,12 @@ pub struct AppState {
     pending_drop_paths: Vec<std::path::PathBuf>,
     waiting_for_drop: bool,
     hovering_file: bool,
+    /// Which side (true = left, false = right) will receive the next dropped file.
+    /// Updated from cursor position on every CursorMoved event, and can be
+    /// toggled with the Left/Right arrow keys while a file is being dragged
+    /// (useful on platforms where CursorMoved is not emitted during drag-and-drop,
+    /// such as Linux X11/Wayland).
+    drop_target_left: bool,
     peek_zoom_active: bool,
     peek_zoom_factor: f32,
     peek_zoom_radius: f32,
@@ -1727,6 +1733,7 @@ impl AppState {
             pending_drop_paths: Vec::new(),
             waiting_for_drop: no_images_provided,
             hovering_file: false,
+            drop_target_left: true,
             peek_zoom_active: false,
             peek_zoom_factor,
             peek_zoom_radius: 100.0,
@@ -2419,8 +2426,12 @@ impl AppState {
                         let w = ui_width;
                         let h = ui_height;
                         let half = w / 2.0;
-                        let cx = self.mouse_position.0 * to_ui;
-                        let over_left = cx < half;
+                        // Use the stored drop_target_left so that the highlighted panel
+                        // matches the side that will actually receive the file.  On
+                        // platforms where CursorMoved fires during drag (Windows) this
+                        // is updated automatically; on others the user can press
+                        // Left/Right arrow to choose the target side.
+                        let over_left = self.drop_target_left;
 
                         let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([12.0, 10.0]));
 
@@ -2950,8 +2961,12 @@ impl AppState {
                 }
             };
 
-        // Determine which half the cursor is in at the time of the drop.
-        let drop_on_left = self.mouse_position.0 < self.size.width as f32 / 2.0;
+        // Determine which side should receive the dropped file.
+        // drop_target_left is kept in sync with cursor position by CursorMoved events
+        // (works on Windows) and can be overridden with the Left/Right arrow keys
+        // while the hover overlay is visible (fallback for Linux X11/Wayland where
+        // CursorMoved is not emitted during drag-and-drop operations).
+        let drop_on_left = self.drop_target_left;
 
         // Build final (images1, images2, single_image_mode) based on count + cursor position.
         let (images1, images2, single_image_mode, display_msg) = if count == 2 {
@@ -3165,6 +3180,10 @@ impl AppState {
                     c_new_y - self.fixed_zoom_center.1,
                 );
             }
+            // Keep the drop-target side in sync with cursor position so that
+            // platforms where CursorMoved fires during drag-and-drop (Windows)
+            // automatically track which side should receive a dropped file.
+            self.drop_target_left = pos.0 < self.size.width as f32 / 2.0;
             // Write the uniform buffer exactly once for this cursor-moved event.
             self.update_uniform_buffer();
         }
@@ -3256,7 +3275,14 @@ impl AppState {
                     }
                 }
                 VirtualKeyCode::Left | VirtualKeyCode::Right => {
-                    if *keycode == VirtualKeyCode::Left {
+                    if self.hovering_file {
+                        // While a file is being dragged over the window, Left/Right
+                        // arrow keys switch the drop target side.  This is the fallback
+                        // for platforms (Linux X11/Wayland) where CursorMoved is not
+                        // emitted during drag-and-drop, so the cursor-based tracking
+                        // would otherwise be stuck on whichever side was last active.
+                        self.drop_target_left = *keycode == VirtualKeyCode::Left;
+                    } else if *keycode == VirtualKeyCode::Left {
                         self.previous_frame();
                     } else {
                         self.next_frame();
