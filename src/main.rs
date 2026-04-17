@@ -7,11 +7,13 @@ use winit::{
     window::WindowBuilder,
 };
 mod app;
+mod batch_mode;
 mod image_loader;
 mod player;
 mod test_images;
 
 use crate::app::AppConfig;
+use crate::batch_mode::{BatchConfig, VideoLayout};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -154,6 +156,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Magnification factor for hold-to-peek zoom (Z key)")
                 .default_value("4.0"),
         )
+        .arg(
+            Arg::new("batch_mode")
+                .long("batch-mode")
+                .action(ArgAction::SetTrue)
+                .help("Run in headless batch mode (diff generation and/or video export)"),
+        )
+        .arg(
+            Arg::new("batch_diff_output")
+                .long("batch-diff-output")
+                .action(ArgAction::Set)
+                .value_name("DIR")
+                .help("Output directory for batch diff images"),
+        )
+        .arg(
+            Arg::new("video_output")
+                .long("video-output")
+                .action(ArgAction::Set)
+                .value_name("FILE")
+                .help("Output file path for generated video"),
+        )
+        .arg(
+            Arg::new("video_layout")
+                .long("video-layout")
+                .action(ArgAction::Set)
+                .value_name("LAYOUT")
+                .help("Video panel layout: single | side-by-side | side-by-side-diff")
+                .default_value("single"),
+        )
+        .arg(
+            Arg::new("video_fps")
+                .long("video-fps")
+                .action(ArgAction::Set)
+                .value_name("FPS")
+                .help("Output video frame rate")
+                .default_value("30"),
+        )
+        .arg(
+            Arg::new("video_crf")
+                .long("video-crf")
+                .action(ArgAction::Set)
+                .value_name("CRF")
+                .help("Video quality CRF (0..51, lower is better quality)")
+                .default_value("18"),
+        )
+        .arg(
+            Arg::new("video_preset")
+                .long("video-preset")
+                .action(ArgAction::Set)
+                .value_name("PRESET")
+                .help("Video encoder preset (e.g. ultrafast, medium, veryslow)")
+                .default_value("medium"),
+        )
+        .arg(
+            Arg::new("video_codec")
+                .long("video-codec")
+                .action(ArgAction::Set)
+                .value_name("CODEC")
+                .help("Video codec for ffmpeg (e.g. libx264, libx265, mpeg4)")
+                .default_value("libx264"),
+        )
+        .arg(
+            Arg::new("video_pixel_format")
+                .long("video-pixel-format")
+                .action(ArgAction::Set)
+                .value_name("PIX_FMT")
+                .help("Video pixel format for ffmpeg (e.g. yuv420p)")
+                .default_value("yuv420p"),
+        )
         .get_matches();
 
     let test_mode = matches.get_flag("test_mode");
@@ -231,15 +301,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .parse()
         .unwrap_or(4.0);
+    let batch_mode = matches.get_flag("batch_mode");
+    let batch_diff_output = matches.get_one::<String>("batch_diff_output").cloned();
+    let video_output = matches.get_one::<String>("video_output").cloned();
+    let video_layout = matches
+        .get_one::<String>("video_layout")
+        .unwrap()
+        .parse::<VideoLayout>()
+        .map_err(|e| format!("Invalid --video-layout: {}", e))?;
+    let video_fps: f32 = matches
+        .get_one::<String>("video_fps")
+        .unwrap()
+        .parse()
+        .map_err(|_| "Invalid --video-fps value")?;
+    let video_crf: u8 = matches
+        .get_one::<String>("video_crf")
+        .unwrap()
+        .parse()
+        .map_err(|_| "Invalid --video-crf value")?;
+    let video_preset = matches.get_one::<String>("video_preset").unwrap().clone();
+    let video_codec = matches.get_one::<String>("video_codec").unwrap().clone();
+    let video_pixel_format = matches
+        .get_one::<String>("video_pixel_format")
+        .unwrap()
+        .clone();
+
+    if batch_mode {
+        let left_images = resolve_batch_images(dir1.as_deref(), images1.as_deref(), fps)?;
+        let right_images = if dir2.is_some() || images2.is_some() {
+            Some(resolve_batch_images(
+                dir2.as_deref(),
+                images2.as_deref(),
+                fps,
+            )?)
+        } else {
+            None
+        };
+        let config = BatchConfig {
+            left_images,
+            right_images,
+            diff_output_dir: batch_diff_output.map(std::path::PathBuf::from),
+            video_output_path: video_output.map(std::path::PathBuf::from),
+            video_layout,
+            video_fps,
+            video_crf,
+            video_preset,
+            video_codec,
+            video_pixel_format,
+        };
+        batch_mode::run_batch_mode(config)?;
+        return Ok(());
+    }
 
     let (width, height) = parse_window_size(window_size)?;
 
     info!(
         "Starting image comparison player with input1: {}, input2: {}, window size: {}x{}",
-        dir1.as_deref()
-            .unwrap_or_else(|| images1.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("<none>")),
-        dir2.as_deref()
-            .unwrap_or_else(|| images2.as_ref().and_then(|v| v.first().map(|s| s.as_str())).unwrap_or("<none>")),
+        dir1.as_deref().unwrap_or_else(|| images1
+            .as_ref()
+            .and_then(|v| v.first().map(|s| s.as_str()))
+            .unwrap_or("<none>")),
+        dir2.as_deref().unwrap_or_else(|| images2
+            .as_ref()
+            .and_then(|v| v.first().map(|s| s.as_str()))
+            .unwrap_or("<none>")),
         width,
         height
     );
@@ -316,9 +441,24 @@ fn parse_window_size(size: &str) -> Result<(f32, f32), String> {
     Ok((width, height))
 }
 
+fn resolve_batch_images(
+    dir: Option<&str>,
+    images: Option<&[String]>,
+    fps: f32,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let paths = if let Some(files) = images {
+        image_loader::load_image_paths_from_files(files, fps)?.0
+    } else if let Some(input_dir) = dir {
+        image_loader::load_image_paths(input_dir, fps)?.0
+    } else {
+        return Err("Batch mode requires --dir1 or --images1".into());
+    };
+    Ok(paths.into_iter().map(|(path, _, _)| path).collect())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_window_size;
+    use super::{parse_window_size, resolve_batch_images};
 
     #[test]
     fn test_parse_window_size_valid() {
@@ -343,5 +483,11 @@ mod tests {
     fn test_parse_window_size_non_numeric() {
         assert!(parse_window_size("WIDTHxHEIGHT").is_err());
         assert!(parse_window_size("1920xabc").is_err());
+    }
+
+    #[test]
+    fn test_resolve_batch_images_requires_input() {
+        let result = resolve_batch_images(None, None, 30.0);
+        assert!(result.is_err());
     }
 }

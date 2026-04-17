@@ -43,10 +43,22 @@ The application accepts the following command-line arguments:
 --diff-preload-behind <COUNT> Number of diff images to preload behind (default: 0)
 --fps <FPS>                   Frames per second (default: 30)
 --peek-zoom-factor <FACTOR>   Magnification factor for hold-to-peek zoom (default: 4.0)
+--batch-mode                  Run in headless batch mode (diff generation / video export)
+--batch-diff-output <DIR>     Output directory for batch diff images
+--video-output <FILE>         Output file path for generated video
+--video-layout <LAYOUT>       Video layout: single | side-by-side | side-by-side-diff (default: single)
+--video-fps <FPS>             Output video frame rate (default: 30)
+--video-crf <CRF>             Video quality CRF 0..51 (default: 18)
+--video-preset <PRESET>       ffmpeg encoder preset (default: medium)
+--video-codec <CODEC>         ffmpeg video codec (default: libx264)
+--video-pixel-format <PIX_FMT> ffmpeg pixel format (default: yuv420p)
 ```
 
 Left side requires either `--dir1` (directory) or `--images1` (explicit file list), but not both.
 Right side is optional; when omitted (no `--dir2` and no `--images2`), the app runs in single image mode.
+
+Batch mode requires at least one output target (`--batch-diff-output` and/or `--video-output`).
+Diff generation and multi-panel video layouts require both left and right image sources.
 
 ## User Interface Controls
 
@@ -150,6 +162,23 @@ The application supports three methods of specifying input images:
    ./target/release/image_comparison_player \
      --images1 /path/to/img1.png /path/to/img2.png \
      --images2 /path/to/ref1.png /path/to/ref2.png
+
+   # Batch diff generation for a full sequence
+   ./target/release/image_comparison_player \
+     --batch-mode \
+     --dir1 /path/to/left \
+     --dir2 /path/to/right \
+     --batch-diff-output /tmp/diffs
+
+   # Batch video export (left | right | diff panels)
+   ./target/release/image_comparison_player \
+     --batch-mode \
+     --dir1 /path/to/left \
+     --dir2 /path/to/right \
+     --video-output /tmp/comparison.mp4 \
+     --video-layout side-by-side-diff \
+     --video-crf 16 \
+     --video-preset slow
    ```
 
 ## Dependencies
