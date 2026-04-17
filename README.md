@@ -183,7 +183,7 @@ The application supports three methods of specifying input images:
 
 ## Dependencies
 
-The application uses several external crates, including wgpu for GPU rendering, winit for window management, clap for argument parsing, and imgui for debug UI. For a full list of dependencies, refer to the Cargo.toml file.
+The application uses several external crates, including wgpu for GPU rendering, winit for window management, clap for argument parsing, and imgui for debug UI. Batch video export also uses `tempfile` to stage generated frame sequences before ffmpeg encoding. For a full list of dependencies, refer to the Cargo.toml file.
 
 ## Note
 
