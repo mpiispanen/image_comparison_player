@@ -3910,6 +3910,17 @@ impl AppState {
         // Choose the zoom level that fully shows the rectangle.
         let new_zoom_level = (1.0_f32 / du).min(1.0 / dv).clamp(1.0, MAX_ZOOM_LEVEL);
 
+        // When the selection covers the full image (or is effectively unzoomed),
+        // reset to the default state instead of using the anchor formula, which
+        // divides by (new_zoom_level - 1.0).
+        if new_zoom_level <= 1.0 + f32::EPSILON {
+            self.zoom_level = 1.0;
+            self.fixed_zoom_center = (0.5, 0.5);
+            self.zoom_center_offset = (0.0, 0.0);
+            self.update_uniform_buffer();
+            return;
+        }
+
         // The desired visible center is the UV midpoint of the drag rectangle.
         // Clamp it so the zoomed viewport stays within [0, 1] on both axes.
         let half_vp = 0.5 / new_zoom_level;
