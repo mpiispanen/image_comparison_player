@@ -5018,6 +5018,9 @@ mod tests {
         let du = u2 - u1;
         let dv = v2 - v1;
         let zoom_level = (1.0_f32 / du).min(1.0 / dv).clamp(1.0, MAX_ZOOM_LEVEL);
+        if zoom_level <= 1.0 {
+            return (1.0, 0.5, 0.5);
+        }
         let half_vp = 0.5 / zoom_level;
         let vc_x = ((u1 + u2) / 2.0).clamp(half_vp, 1.0 - half_vp);
         let vc_y = ((v1 + v2) / 2.0).clamp(half_vp, 1.0 - half_vp);
