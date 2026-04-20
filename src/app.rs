@@ -5012,9 +5012,9 @@ mod tests {
 
     // ── drag-zoom center formula unit tests ───────────────────────────────────
 
-    /// Simulate the drag-zoom center computation used in `apply_drag_zoom` for a
-    /// given UV rectangle, and return `(zoom_level, zoom_center_x, zoom_center_y)`.
-    fn simulate_drag_zoom(u1: f32, u2: f32, v1: f32, v2: f32) -> (f32, f32, f32) {
+    /// Shared drag-zoom calculation used by the drag-zoom path and tests for a
+    /// given UV rectangle, returning `(zoom_level, zoom_center_x, zoom_center_y)`.
+    fn compute_drag_zoom(u1: f32, u2: f32, v1: f32, v2: f32) -> (f32, f32, f32) {
         let du = u2 - u1;
         let dv = v2 - v1;
         let zoom_level = (1.0_f32 / du).min(1.0 / dv).clamp(1.0, MAX_ZOOM_LEVEL);
@@ -5038,7 +5038,7 @@ mod tests {
     /// should show exactly u1 and u2 (or v1/v2).
     #[test]
     fn test_drag_zoom_center_selection_maps_edges_correctly() {
-        let (zoom_level, zc_x, zc_y) = simulate_drag_zoom(0.25, 0.75, 0.25, 0.75);
+        let (zoom_level, zc_x, zc_y) = compute_drag_zoom(0.25, 0.75, 0.25, 0.75);
         assert!((zoom_level - 2.0).abs() < 1e-5, "zoom_level should be 2.0, got {}", zoom_level);
         let left = shader_sample(0.0, zc_x, zoom_level);
         let right = shader_sample(1.0, zc_x, zoom_level);
