@@ -3240,39 +3240,29 @@ impl AppState {
                 return;
             }
             match keycode {
-                VirtualKeyCode::Escape => {
-                    if !self.esc_key_down {
-                        self.esc_key_down = true;
-                        if self.help_overlay.is_open {
-                            self.help_overlay.close();
-                        } else {
-                            // Exit the application when Esc is pressed
-                            process::exit(0);
-                        }
+                VirtualKeyCode::Escape if !self.esc_key_down => {
+                    self.esc_key_down = true;
+                    if self.help_overlay.is_open {
+                        self.help_overlay.close();
+                    } else {
+                        // Exit the application when Esc is pressed
+                        process::exit(0);
                     }
                 }
                 VirtualKeyCode::C => {
                     self.cache_debug_window.toggle();
                 }
-                VirtualKeyCode::F => {
-                    if !self.single_image_mode {
-                        self.cycle_comparison_mode();
-                    }
+                VirtualKeyCode::F if !self.single_image_mode => {
+                    self.cycle_comparison_mode();
                 }
-                VirtualKeyCode::T => {
-                    if !self.single_image_mode {
-                        self.toggle_pump_animation();
-                    }
+                VirtualKeyCode::T if !self.single_image_mode => {
+                    self.toggle_pump_animation();
                 }
-                VirtualKeyCode::Comma => {
-                    if !self.single_image_mode {
-                        self.adjust_diff_multiplier(-1.0);
-                    }
+                VirtualKeyCode::Comma if !self.single_image_mode => {
+                    self.adjust_diff_multiplier(-1.0);
                 }
-                VirtualKeyCode::Period => {
-                    if !self.single_image_mode {
-                        self.adjust_diff_multiplier(1.0);
-                    }
+                VirtualKeyCode::Period if !self.single_image_mode => {
+                    self.adjust_diff_multiplier(1.0);
                 }
                 VirtualKeyCode::Left | VirtualKeyCode::Right => {
                     if self.hovering_file {
@@ -3316,39 +3306,35 @@ impl AppState {
                 VirtualKeyCode::U => {
                     self.save_combined_screenshot();
                 }
-                VirtualKeyCode::Key1 => {
-                    if !self.single_image_mode {
-                        if self.view_mode == ViewMode::Solo && self.solo_view_source == 0 {
-                            // Already viewing source 0 solo — exit solo view.
-                            self.view_mode = ViewMode::Split;
-                            self.status_message = Some(("Solo view: off".to_string(), Instant::now()));
-                        } else {
-                            self.view_mode = ViewMode::Solo;
-                            self.solo_view_source = 0;
-                            self.status_message = Some((
-                                format!("Solo: {}", self.left_label),
-                                Instant::now(),
-                            ));
-                        }
-                        self.update_uniform_buffer();
+                VirtualKeyCode::Key1 if !self.single_image_mode => {
+                    if self.view_mode == ViewMode::Solo && self.solo_view_source == 0 {
+                        // Already viewing source 0 solo — exit solo view.
+                        self.view_mode = ViewMode::Split;
+                        self.status_message = Some(("Solo view: off".to_string(), Instant::now()));
+                    } else {
+                        self.view_mode = ViewMode::Solo;
+                        self.solo_view_source = 0;
+                        self.status_message = Some((
+                            format!("Solo: {}", self.left_label),
+                            Instant::now(),
+                        ));
                     }
+                    self.update_uniform_buffer();
                 }
-                VirtualKeyCode::Key2 => {
-                    if !self.single_image_mode {
-                        if self.view_mode == ViewMode::Solo && self.solo_view_source == 1 {
-                            // Already viewing source 1 solo — exit solo view.
-                            self.view_mode = ViewMode::Split;
-                            self.status_message = Some(("Solo view: off".to_string(), Instant::now()));
-                        } else {
-                            self.view_mode = ViewMode::Solo;
-                            self.solo_view_source = 1;
-                            self.status_message = Some((
-                                format!("Solo: {}", self.right_label),
-                                Instant::now(),
-                            ));
-                        }
-                        self.update_uniform_buffer();
+                VirtualKeyCode::Key2 if !self.single_image_mode => {
+                    if self.view_mode == ViewMode::Solo && self.solo_view_source == 1 {
+                        // Already viewing source 1 solo — exit solo view.
+                        self.view_mode = ViewMode::Split;
+                        self.status_message = Some(("Solo view: off".to_string(), Instant::now()));
+                    } else {
+                        self.view_mode = ViewMode::Solo;
+                        self.solo_view_source = 1;
+                        self.status_message = Some((
+                            format!("Solo: {}", self.right_label),
+                            Instant::now(),
+                        ));
                     }
+                    self.update_uniform_buffer();
                 }
                 VirtualKeyCode::L => {
                     self.toggle_split_line();
@@ -3383,10 +3369,8 @@ impl AppState {
                 VirtualKeyCode::Z => {
                     self.peek_zoom_active = true;
                 }
-                VirtualKeyCode::X => {
-                    if !self.single_image_mode && self.view_mode != ViewMode::Solo {
-                        self.cycle_peek_image_mode();
-                    }
+                VirtualKeyCode::X if !self.single_image_mode && self.view_mode != ViewMode::Solo => {
+                    self.cycle_peek_image_mode();
                 }
                 _ => {}
             }
