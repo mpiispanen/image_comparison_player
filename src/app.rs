@@ -3164,15 +3164,15 @@ impl AppState {
                 // Exact "pixel-under-cursor" pan formula:
                 //   new_center = initial_center - d_uv / (zoom_level - 1)
                 // A minimum denominator of 0.1 prevents erratic behaviour near
-                // zoom == 1.0 while the max_offset clamp still limits movement
-                // to what is actually visible at the current zoom level.
+                // zoom == 1.0. Clamp just inside [0, 1] so drag panning can still
+                // reach the image edge without producing exact 0.0/1.0 coordinates,
+                // which current shaders may treat as transparent at the boundary.
                 let z_minus_1 = (self.zoom_level - 1.0).max(0.1);
-                let max_offset_x = (1.0 - 1.0 / self.zoom_level) / 2.0;
-                let max_offset_y = (1.0 - 1.0 / self.zoom_level) / 2.0;
+                let edge_epsilon = 1.0e-6_f32;
                 let c_new_x = (self.drag_pan_initial_center.0 - d_uv_x / z_minus_1)
-                    .clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
+                    .clamp(edge_epsilon, 1.0 - edge_epsilon);
                 let c_new_y = (self.drag_pan_initial_center.1 - d_uv_y / z_minus_1)
-                    .clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
+                    .clamp(edge_epsilon, 1.0 - edge_epsilon);
                 // fixed_zoom_center was set to drag_pan_initial_center at drag start,
                 // so the offset is the delta from the initial center.
                 self.zoom_center_offset = (
@@ -3763,12 +3763,15 @@ impl AppState {
         let eff_x = self.fixed_zoom_center.0 + self.zoom_center_offset.0 + dx * step;
         let eff_y = self.fixed_zoom_center.1 + self.zoom_center_offset.1 + dy * step;
 
-        // Clamp the *effective* center so it never leaves the valid range,
-        // regardless of where fixed_zoom_center already sits.
-        let max_offset_x = (1.0 - 1.0 / self.zoom_level) / 2.0;
-        let max_offset_y = (1.0 - 1.0 / self.zoom_level) / 2.0;
-        let clamped_x = eff_x.clamp(0.5 - max_offset_x, 0.5 + max_offset_x);
-        let clamped_y = eff_y.clamp(0.5 - max_offset_y, 0.5 + max_offset_y);
+        // Clamp the *effective* center just inside [0, 1] so we can pan to the
+        // image edge without producing exact 0.0/1.0 texture coordinates at the
+        // screen boundary. The shaders currently treat the upper boundary
+        // exclusively, so hitting an exact endpoint can introduce a 1 px transparent
+        // border.
+        let min_zoom_center = f32::EPSILON;
+        let max_zoom_center = 1.0 - f32::EPSILON;
+        let clamped_x = eff_x.clamp(min_zoom_center, max_zoom_center);
+        let clamped_y = eff_y.clamp(min_zoom_center, max_zoom_center);
 
         // Derive the new offset as the difference from the (unchanged) fixed center.
         self.zoom_center_offset = (
