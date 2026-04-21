@@ -166,8 +166,10 @@ fn create_video_from_frames(
     config: &BatchConfig,
 ) -> Result<()> {
     if let Some(parent) = video_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
+        if !parent.as_os_str().is_empty() && parent != Path::new(".") {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
     }
 
     let pattern = frames_dir.join("frame_%06d.png");
