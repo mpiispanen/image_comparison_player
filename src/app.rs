@@ -1286,7 +1286,8 @@ impl AppState {
         let (images1, image_len1) = if let Some(files) = &app_config.images1 {
             image_loader::load_image_paths_from_files(files, app_config.fps)?
         } else if let Some(raw) = app_config.dir1.as_deref() {
-            let dir = std::fs::canonicalize(raw)?;
+            let dir = std::fs::canonicalize(raw)
+                .map_err(|e| format!("Invalid --dir1 path '{}': {}", raw, e))?;
             image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
         } else {
             let dir = placeholder_dir.as_ref().unwrap();
@@ -1295,7 +1296,8 @@ impl AppState {
         let (images2, image_len2) = if let Some(files) = &app_config.images2 {
             image_loader::load_image_paths_from_files(files, app_config.fps)?
         } else if let Some(raw) = app_config.dir2.as_deref() {
-            let dir = std::fs::canonicalize(raw)?;
+            let dir = std::fs::canonicalize(raw)
+                .map_err(|e| format!("Invalid --dir2 path '{}': {}", raw, e))?;
             image_loader::load_image_paths(&dir.to_string_lossy(), app_config.fps)?
         } else {
             (images1.clone(), image_len1)
