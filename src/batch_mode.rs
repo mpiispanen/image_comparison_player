@@ -41,7 +41,21 @@ pub struct BatchConfig {
     pub video_pixel_format: String,
 }
 
+fn validate_batch_config(config: &BatchConfig) -> Result<()> {
+    if config.video_output_path.is_some() {
+        if config.video_crf > 51 {
+            bail!("--video-crf must be in range 0..=51");
+        }
+        if !(config.video_fps.is_finite() && config.video_fps > 0.0) {
+            bail!("--video-fps must be a positive number");
+        }
+    }
+
+    Ok(())
+}
+
 pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
+    validate_batch_config(&config)?;
     if config.left_images.is_empty() {
         bail!("Batch mode requires at least one input image on the left side");
     }
@@ -142,12 +156,6 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
     }
 
     if let Some(video_path) = &config.video_output_path {
-        if config.video_crf > 51 {
-            bail!("--video-crf must be in range 0..=51");
-        }
-        if !(config.video_fps.is_finite() && config.video_fps > 0.0) {
-            bail!("--video-fps must be a positive number");
-        }
         let frames_dir = temp_dir
             .as_ref()
             .ok_or_else(|| {
