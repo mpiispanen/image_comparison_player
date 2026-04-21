@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageBuffer, RgbaImage};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -39,6 +40,7 @@ pub struct BatchConfig {
     pub video_preset: String,
     pub video_codec: String,
     pub video_pixel_format: String,
+    pub use_existing_diffs: bool,
 }
 
 fn validate_batch_config(config: &BatchConfig) -> Result<()> {
@@ -48,6 +50,17 @@ fn validate_batch_config(config: &BatchConfig) -> Result<()> {
         }
         if !(config.video_fps.is_finite() && config.video_fps > 0.0) {
             bail!("--video-fps must be a positive number");
+        }
+    }
+    if config.use_existing_diffs {
+        if config.video_output_path.is_none() {
+            bail!("--use-existing-diffs requires --video-output");
+        }
+        if config.diff_output_dir.is_none() {
+            bail!("--use-existing-diffs requires --batch-diff-output");
+        }
+        if config.video_layout != VideoLayout::SideBySideWithDiff {
+            bail!("--use-existing-diffs requires --video-layout side-by-side-diff");
         }
     }
 
@@ -98,6 +111,26 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
         None
     };
 
+    eprintln!(
+        "[batch] Processing {} frame(s){}{}",
+        frame_count,
+        if diff_dir.is_some() {
+            " with diff output"
+        } else {
+            ""
+        },
+        if config.video_output_path.is_some() {
+            " and video export"
+        } else {
+            ""
+        }
+    );
+
+    let mut diff_progress = 0usize;
+    let mut video_progress = 0usize;
+    let report_diff_progress = (diff_dir.is_some() || config.video_layout == VideoLayout::SideBySideWithDiff)
+        && !config.use_existing_diffs;
+
     for frame in 0..frame_count {
         let left = image::open(&config.left_images[frame])
             .with_context(|| format!("Failed to open left image {}", config.left_images[frame]))?;
@@ -107,22 +140,47 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
         });
         let right = right.transpose()?;
 
+        let diff_path = diff_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("diff_{:06}.png", frame)));
         let diff = if diff_dir.is_some() || config.video_layout == VideoLayout::SideBySideWithDiff {
-            let r = right.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("Internal error: right image is required for diffs")
-            })?;
-            Some(compute_abs_diff_image(&left, r)?)
+            if config.use_existing_diffs {
+                let path = diff_path
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Internal error: diff path is required"))?;
+                Some(
+                    image::open(path)
+                        .with_context(|| {
+                            format!(
+                                "Failed to open precomputed diff {}. Disable --use-existing-diffs to regenerate",
+                                path.display()
+                            )
+                        })?
+                        .to_rgba8(),
+                )
+            } else {
+                let r = right.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Internal error: right image is required for diffs")
+                })?;
+                Some(compute_abs_diff_image(&left, r)?)
+            }
         } else {
             None
         };
 
-        if let Some(dir) = &diff_dir {
-            let diff = diff.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("Internal error: diff image is required for diff export")
-            })?;
-            let path = dir.join(format!("diff_{:06}.png", frame));
-            diff.save(&path)
-                .with_context(|| format!("Failed to save {}", path.display()))?;
+        if let Some(path) = &diff_path {
+            if !config.use_existing_diffs {
+                let diff = diff.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Internal error: diff image is required for diff export")
+                })?;
+                diff.save(path)
+                    .with_context(|| format!("Failed to save {}", path.display()))?;
+            }
+        }
+
+        if report_diff_progress {
+            diff_progress += 1;
+            print_progress("Diff creation", diff_progress, frame_count);
         }
 
         if let Some(dir) = &temp_dir {
@@ -152,6 +210,9 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
             frame_img
                 .save(&path)
                 .with_context(|| format!("Failed to save {}", path.display()))?;
+
+            video_progress += 1;
+            print_progress("Video frame creation", video_progress, frame_count);
         }
     }
 
@@ -162,8 +223,10 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
                 anyhow::anyhow!("Internal error: temporary video frame directory missing")
             })?
             .path();
-        create_video_from_frames(video_path, frames_dir, &config)?;
+        create_video_from_frames(video_path, frames_dir, &config, frame_count)?;
     }
+
+    eprintln!("[batch] Completed.");
 
     Ok(())
 }
@@ -172,6 +235,7 @@ fn create_video_from_frames(
     video_path: &Path,
     frames_dir: &Path,
     config: &BatchConfig,
+    frame_count: usize,
 ) -> Result<()> {
     if let Some(parent) = video_path.parent() {
         if !parent.as_os_str().is_empty() && parent != Path::new(".") {
@@ -180,6 +244,11 @@ fn create_video_from_frames(
         }
     }
 
+    eprintln!(
+        "[batch] Encoding {} frame(s) to video: {}",
+        frame_count,
+        video_path.display()
+    );
     let pattern = frames_dir.join("frame_%06d.png");
     let status = Command::new("ffmpeg")
         .arg("-y")
@@ -202,7 +271,26 @@ fn create_video_from_frames(
     if !status.success() {
         bail!("ffmpeg exited with non-zero status: {}", status);
     }
+    eprintln!("[batch] Video encoding complete: {}", video_path.display());
     Ok(())
+}
+
+fn print_progress(stage: &str, current: usize, total: usize) {
+    if total == 0 {
+        return;
+    }
+
+    let width = 28usize;
+    let filled = ((current * width) / total).min(width);
+    let percent = (current as f32 / total as f32) * 100.0;
+    let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width - filled));
+    eprint!(
+        "\r[batch] {stage}: [{bar}] {current}/{total} ({percent:.1}%)"
+    );
+    let _ = std::io::stderr().flush();
+    if current >= total {
+        eprintln!();
+    }
 }
 
 fn compute_abs_diff_image(left: &DynamicImage, right: &DynamicImage) -> Result<RgbaImage> {
@@ -313,6 +401,7 @@ mod tests {
             video_preset: "medium".to_string(),
             video_codec: "libx264".to_string(),
             video_pixel_format: "yuv420p".to_string(),
+            use_existing_diffs: false,
         };
         assert!(run_batch_mode(cfg).is_err());
     }
@@ -332,6 +421,25 @@ mod tests {
             video_preset: "medium".to_string(),
             video_codec: "libx264".to_string(),
             video_pixel_format: "yuv420p".to_string(),
+            use_existing_diffs: false,
+        };
+        assert!(run_batch_mode(cfg).is_err());
+    }
+
+    #[test]
+    fn use_existing_diffs_requires_diff_dir() {
+        let cfg = BatchConfig {
+            left_images: vec!["a.png".to_string()],
+            right_images: Some(vec!["b.png".to_string()]),
+            diff_output_dir: None,
+            video_output_path: Some(std::path::PathBuf::from("out.mp4")),
+            video_layout: VideoLayout::SideBySideWithDiff,
+            video_fps: 30.0,
+            video_crf: 18,
+            video_preset: "medium".to_string(),
+            video_codec: "libx264".to_string(),
+            video_pixel_format: "yuv420p".to_string(),
+            use_existing_diffs: true,
         };
         assert!(run_batch_mode(cfg).is_err());
     }

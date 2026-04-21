@@ -52,6 +52,7 @@ The application accepts the following command-line arguments:
 --video-preset <PRESET>       ffmpeg encoder preset (default: medium)
 --video-codec <CODEC>         ffmpeg video codec (default: libx264)
 --video-pixel-format <PIX_FMT> ffmpeg pixel format (default: yuv420p)
+--use-existing-diffs          Reuse diff PNGs from --batch-diff-output for side-by-side-diff video export
 ```
 
 Left side requires either `--dir1` (directory) or `--images1` (explicit file list), but not both.
@@ -59,6 +60,7 @@ Right side is optional; when omitted (no `--dir2` and no `--images2`), the app r
 
 Batch mode requires at least one output target (`--batch-diff-output` and/or `--video-output`).
 Diff generation and multi-panel video layouts require both left and right image sources.
+`--use-existing-diffs` requires `--video-output`, `--batch-diff-output`, and `--video-layout side-by-side-diff`.
 
 ## User Interface Controls
 
@@ -171,15 +173,25 @@ The application supports three methods of specifying input images:
      --batch-diff-output /tmp/diffs
 
    # Batch video export (left | right | diff panels)
-   ./target/release/image_comparison_player \
-     --batch-mode \
-     --dir1 /path/to/left \
-     --dir2 /path/to/right \
-     --video-output /tmp/comparison.mp4 \
+    ./target/release/image_comparison_player \
+      --batch-mode \
+      --dir1 /path/to/left \
+      --dir2 /path/to/right \
+      --video-output /tmp/comparison.mp4 \
      --video-layout side-by-side-diff \
-     --video-crf 16 \
-     --video-preset slow
-   ```
+      --video-crf 16 \
+      --video-preset slow
+
+    # Reuse precomputed diffs and only build side-by-side-diff video
+    ./target/release/image_comparison_player \
+      --batch-mode \
+      --dir1 /path/to/left \
+      --dir2 /path/to/right \
+      --batch-diff-output /tmp/diffs \
+      --video-output /tmp/comparison-from-diffs.mp4 \
+      --video-layout side-by-side-diff \
+      --use-existing-diffs
+    ```
 
 ## Dependencies
 

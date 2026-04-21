@@ -224,6 +224,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Video pixel format for ffmpeg (e.g. yuv420p)")
                 .default_value("yuv420p"),
         )
+        .arg(
+            Arg::new("use_existing_diffs")
+                .long("use-existing-diffs")
+                .action(ArgAction::SetTrue)
+                .help("Reuse precomputed diff PNGs from --batch-diff-output instead of generating new diffs"),
+        )
         .get_matches();
 
     let test_mode = matches.get_flag("test_mode");
@@ -325,6 +331,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_one::<String>("video_pixel_format")
         .unwrap()
         .clone();
+    let use_existing_diffs = matches.get_flag("use_existing_diffs");
 
     if batch_mode {
         let left_images = resolve_batch_images(dir1.as_deref(), images1.as_deref(), fps)?;
@@ -348,6 +355,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             video_preset,
             video_codec,
             video_pixel_format,
+            use_existing_diffs,
         };
         batch_mode::run_batch_mode(config)?;
         return Ok(());
