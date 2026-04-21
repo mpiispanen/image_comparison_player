@@ -128,8 +128,9 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
 
     let mut diff_progress = 0usize;
     let mut video_progress = 0usize;
-    let report_diff_progress = (diff_dir.is_some() || config.video_layout == VideoLayout::SideBySideWithDiff)
-        && !config.use_existing_diffs;
+    let needs_diff_image =
+        diff_dir.is_some() || config.video_layout == VideoLayout::SideBySideWithDiff;
+    let report_diff_progress = needs_diff_image && !config.use_existing_diffs;
 
     for frame in 0..frame_count {
         let left = image::open(&config.left_images[frame])
@@ -143,7 +144,7 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
         let diff_path = diff_dir
             .as_ref()
             .map(|dir| dir.join(format!("diff_{:06}.png", frame)));
-        let diff = if diff_dir.is_some() || config.video_layout == VideoLayout::SideBySideWithDiff {
+        let diff = if needs_diff_image {
             if config.use_existing_diffs {
                 let path = diff_path
                     .as_ref()
@@ -287,7 +288,9 @@ fn print_progress(stage: &str, current: usize, total: usize) {
     eprint!(
         "\r[batch] {stage}: [{bar}] {current}/{total} ({percent:.1}%)"
     );
-    let _ = std::io::stderr().flush();
+    if let Err(err) = std::io::stderr().flush() {
+        eprintln!("\n[batch] Warning: failed to flush progress output: {err}");
+    }
     if current >= total {
         eprintln!();
     }
