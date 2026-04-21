@@ -93,11 +93,19 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
         });
         let right = right.transpose()?;
 
-        if let Some(dir) = &diff_dir {
+        let diff = if diff_dir.is_some() || config.video_layout == VideoLayout::SideBySideWithDiff {
             let r = right.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("Internal error: right image is required for diffs")
             })?;
-            let diff = compute_abs_diff_image(&left, r)?;
+            Some(compute_abs_diff_image(&left, r)?)
+        } else {
+            None
+        };
+
+        if let Some(dir) = &diff_dir {
+            let diff = diff.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Internal error: diff image is required for diff export")
+            })?;
             let path = dir.join(format!("diff_{:06}.png", frame));
             diff.save(&path)
                 .with_context(|| format!("Failed to save {}", path.display()))?;
@@ -118,8 +126,12 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
                             "Internal error: right image is required for side-by-side-diff"
                         )
                     })?;
-                    let diff = compute_abs_diff_image(&left, r)?;
-                    stitch_panels(&[left.to_rgba8(), r.to_rgba8(), diff])
+                    let diff = diff.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Internal error: diff image is required for side-by-side-diff"
+                        )
+                    })?;
+                    stitch_panels(&[left.to_rgba8(), r.to_rgba8(), diff.clone()])
                 }
             };
             let path = dir.path().join(format!("frame_{:06}.png", frame));
