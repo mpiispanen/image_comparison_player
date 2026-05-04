@@ -203,18 +203,26 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
         };
 
         if let Some(dir) = &diff_dir {
-            let output_image = match config.diff_output_layout {
-                BatchImageLayout::Diff => diff
-                    .as_ref()
-                    .ok_or_else(|| {
+            let path = dir.join(format!(
+                "{}_{:06}.png",
+                config.diff_output_layout.output_prefix(),
+                frame
+            ));
+            match config.diff_output_layout {
+                BatchImageLayout::Diff => {
+                    let diff = diff.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("Internal error: diff image is required for diff export")
-                    })?
-                    .clone(),
+                    })?;
+                    diff.save(&path)
+                        .with_context(|| format!("Failed to save {}", path.display()))?;
+                }
                 BatchImageLayout::SideBySide => {
                     let r = right.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("Internal error: right image is required for side-by-side")
                     })?;
                     stitch_panels(&[left.to_rgba8(), r.to_rgba8()])
+                        .save(&path)
+                        .with_context(|| format!("Failed to save {}", path.display()))?;
                 }
                 BatchImageLayout::SideBySideWithDiff => {
                     let r = right.as_ref().ok_or_else(|| {
@@ -228,16 +236,10 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
                         )
                     })?;
                     stitch_panels(&[left.to_rgba8(), r.to_rgba8(), diff.clone()])
+                        .save(&path)
+                        .with_context(|| format!("Failed to save {}", path.display()))?;
                 }
-            };
-            let path = dir.join(format!(
-                "{}_{:06}.png",
-                config.diff_output_layout.output_prefix(),
-                frame
-            ));
-            output_image
-                .save(&path)
-                .with_context(|| format!("Failed to save {}", path.display()))?;
+            }
         }
 
         if report_diff_progress {
