@@ -13,7 +13,7 @@ mod player;
 mod test_images;
 
 use crate::app::AppConfig;
-use crate::batch_mode::{BatchConfig, VideoLayout};
+use crate::batch_mode::{BatchConfig, BatchImageLayout, VideoLayout};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -167,7 +167,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("batch-diff-output")
                 .action(ArgAction::Set)
                 .value_name("DIR")
-                .help("Output directory for batch diff images"),
+                .help("Output directory for batch image exports"),
+        )
+        .arg(
+            Arg::new("batch_diff_layout")
+                .long("batch-diff-layout")
+                .action(ArgAction::Set)
+                .value_name("LAYOUT")
+                .help("Batch image layout: diff | side-by-side | side-by-side-diff")
+                .default_value("diff"),
         )
         .arg(
             Arg::new("video_output")
@@ -310,6 +318,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch_mode = matches.get_flag("batch_mode");
     let batch_diff_output = matches.get_one::<String>("batch_diff_output").cloned();
     let video_output = matches.get_one::<String>("video_output").cloned();
+    let batch_diff_layout = matches
+        .get_one::<String>("batch_diff_layout")
+        .unwrap()
+        .parse::<BatchImageLayout>()
+        .map_err(|e| format!("Invalid --batch-diff-layout: {}", e))?;
     let video_layout = matches
         .get_one::<String>("video_layout")
         .unwrap()
@@ -348,6 +361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             left_images,
             right_images,
             diff_output_dir: batch_diff_output.map(std::path::PathBuf::from),
+            diff_output_layout: batch_diff_layout,
             video_output_path: video_output.map(std::path::PathBuf::from),
             video_layout,
             video_fps,

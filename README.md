@@ -44,7 +44,8 @@ The application accepts the following command-line arguments:
 --fps <FPS>                   Frames per second (default: 30)
 --peek-zoom-factor <FACTOR>   Magnification factor for hold-to-peek zoom (default: 4.0)
 --batch-mode                  Run in headless batch mode (diff generation / video export)
---batch-diff-output <DIR>     Output directory for batch diff images
+--batch-diff-output <DIR>     Output directory for batch image exports
+--batch-diff-layout <LAYOUT>  Batch image layout: diff | side-by-side | side-by-side-diff (default: diff)
 --video-output <FILE>         Output file path for generated video
 --video-layout <LAYOUT>       Video layout: single | side-by-side | side-by-side-diff (default: single)
 --video-fps <FPS>             Output video frame rate (default: 30)
@@ -60,7 +61,7 @@ Right side is optional; when omitted (no `--dir2` and no `--images2`), the app r
 
 Batch mode requires at least one output target (`--batch-diff-output` and/or `--video-output`).
 Diff generation and multi-panel video layouts require both left and right image sources.
-`--use-existing-diffs` requires `--video-output`, `--batch-diff-output`, and `--video-layout side-by-side-diff`.
+`--use-existing-diffs` requires `--batch-diff-output` and at least one side-by-side-diff output (`--batch-diff-layout side-by-side-diff` and/or `--video-layout side-by-side-diff`).
 
 ## User Interface Controls
 
@@ -165,12 +166,20 @@ The application supports three methods of specifying input images:
      --images1 /path/to/img1.png /path/to/img2.png \
      --images2 /path/to/ref1.png /path/to/ref2.png
 
-   # Batch diff generation for a full sequence
-   ./target/release/image_comparison_player \
-     --batch-mode \
-     --dir1 /path/to/left \
-     --dir2 /path/to/right \
-     --batch-diff-output /tmp/diffs
+    # Batch diff generation for a full sequence
+    ./target/release/image_comparison_player \
+      --batch-mode \
+      --dir1 /path/to/left \
+      --dir2 /path/to/right \
+      --batch-diff-output /tmp/diffs
+
+    # Batch side-by-side(+diff) image sequence export
+    ./target/release/image_comparison_player \
+      --batch-mode \
+      --dir1 /path/to/left \
+      --dir2 /path/to/right \
+      --batch-diff-output /tmp/panels \
+      --batch-diff-layout side-by-side-diff
 
    # Batch video export (left | right | diff panels)
     ./target/release/image_comparison_player \
@@ -190,6 +199,15 @@ The application supports three methods of specifying input images:
       --batch-diff-output /tmp/diffs \
       --video-output /tmp/comparison-from-diffs.mp4 \
       --video-layout side-by-side-diff \
+      --use-existing-diffs
+
+    # Reuse precomputed diffs to build side-by-side-diff image sequence (no video)
+    ./target/release/image_comparison_player \
+      --batch-mode \
+      --dir1 /path/to/left \
+      --dir2 /path/to/right \
+      --batch-diff-output /tmp/diffs \
+      --batch-diff-layout side-by-side-diff \
       --use-existing-diffs
     ```
 
