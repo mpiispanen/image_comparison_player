@@ -43,10 +43,25 @@ The application accepts the following command-line arguments:
 --diff-preload-behind <COUNT> Number of diff images to preload behind (default: 0)
 --fps <FPS>                   Frames per second (default: 30)
 --peek-zoom-factor <FACTOR>   Magnification factor for hold-to-peek zoom (default: 4.0)
+--batch-mode                  Run in headless batch mode (diff generation / video export)
+--batch-diff-output <DIR>     Output directory for batch image exports
+--batch-diff-layout <LAYOUT>  Batch image layout: diff | side-by-side | side-by-side-diff (default: diff)
+--video-output <FILE>         Output file path for generated video
+--video-layout <LAYOUT>       Video layout: single | side-by-side | side-by-side-diff (default: single)
+--video-fps <FPS>             Output video frame rate (default: 30)
+--video-crf <CRF>             Video quality CRF 0..51 (default: 18)
+--video-preset <PRESET>       ffmpeg encoder preset (default: medium)
+--video-codec <CODEC>         ffmpeg video codec (default: libx264)
+--video-pixel-format <PIX_FMT> ffmpeg pixel format (default: yuv420p)
+--use-existing-diffs          Reuse diff PNGs from --batch-diff-output for side-by-side-diff video export
 ```
 
 Left side requires either `--dir1` (directory) or `--images1` (explicit file list), but not both.
 Right side is optional; when omitted (no `--dir2` and no `--images2`), the app runs in single image mode.
+
+Batch mode requires at least one output target (`--batch-diff-output` and/or `--video-output`).
+Diff generation and multi-panel video layouts require both left and right image sources.
+`--use-existing-diffs` requires `--batch-diff-output` and at least one side-by-side-diff output (`--batch-diff-layout side-by-side-diff` and/or `--video-layout side-by-side-diff`).
 
 ## User Interface Controls
 
@@ -150,11 +165,55 @@ The application supports three methods of specifying input images:
    ./target/release/image_comparison_player \
      --images1 /path/to/img1.png /path/to/img2.png \
      --images2 /path/to/ref1.png /path/to/ref2.png
-   ```
+
+    # Batch diff generation for a full sequence
+    ./target/release/image_comparison_player \
+      --batch-mode \
+      --dir1 /path/to/left \
+      --dir2 /path/to/right \
+      --batch-diff-output /tmp/diffs
+
+    # Batch side-by-side(+diff) image sequence export
+    ./target/release/image_comparison_player \
+      --batch-mode \
+      --dir1 /path/to/left \
+      --dir2 /path/to/right \
+      --batch-diff-output /tmp/panels \
+      --batch-diff-layout side-by-side-diff
+
+   # Batch video export (left | right | diff panels)
+    ./target/release/image_comparison_player \
+      --batch-mode \
+      --dir1 /path/to/left \
+      --dir2 /path/to/right \
+      --video-output /tmp/comparison.mp4 \
+     --video-layout side-by-side-diff \
+      --video-crf 16 \
+      --video-preset slow
+
+    # Reuse precomputed diffs and only build side-by-side-diff video
+    ./target/release/image_comparison_player \
+      --batch-mode \
+      --dir1 /path/to/left \
+      --dir2 /path/to/right \
+      --batch-diff-output /tmp/diffs \
+      --video-output /tmp/comparison-from-diffs.mp4 \
+      --video-layout side-by-side-diff \
+      --use-existing-diffs
+
+    # Reuse precomputed diffs to build side-by-side-diff image sequence (no video)
+    ./target/release/image_comparison_player \
+      --batch-mode \
+      --dir1 /path/to/left \
+      --dir2 /path/to/right \
+      --batch-diff-output /tmp/diffs \
+      --batch-diff-layout side-by-side-diff \
+      --use-existing-diffs
+    ```
 
 ## Dependencies
 
-The application uses several external crates, including wgpu for GPU rendering, winit for window management, clap for argument parsing, and imgui for debug UI. For a full list of dependencies, refer to the Cargo.toml file.
+The application uses several external crates, including wgpu for GPU rendering, winit for window management, clap for argument parsing, and imgui for debug UI. Batch video export also uses `tempfile` to stage generated frame sequences before ffmpeg encoding. For a full list of dependencies, refer to the Cargo.toml file.
 
 ## Note
 
