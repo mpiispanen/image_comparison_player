@@ -583,14 +583,22 @@ impl Player {
                         image_data,
                         size,
                     );
-                    texture_process_sender
+                    if texture_process_sender
                         .send((
                             process_request.index,
                             process_request.is_left,
                             process_request.image_data,
                             process_request.size,
                         ))
-                        .unwrap();
+                        .is_err()
+                    {
+                        warn!(
+                            "Dropping processed texture for frame {} ({}) because receiver is gone",
+                            process_request.index,
+                            if process_request.is_left { "left" } else { "right" }
+                        );
+                        return;
+                    }
 
                     let mut texture_timings = texture_timings.write();
                     texture_timings
@@ -637,9 +645,17 @@ impl Player {
             self.texture_process_pool.execute(move || {
                 let process_start = Instant::now();
 
-                let texture = if let Some(reused_texture) = texture_reuse_pool.lock().pop() {
-                    reused_texture
-                } else {
+                let texture = {
+                    let mut pool = texture_reuse_pool.lock();
+                    let maybe_reused_index = pool.iter().position(|texture| {
+                        let texture_size = texture.size();
+                        texture_size.width == size.width
+                            && texture_size.height == size.height
+                            && texture_size.depth_or_array_layers == size.depth_or_array_layers
+                    });
+                    maybe_reused_index.map(|index| pool.swap_remove(index))
+                }
+                .unwrap_or_else(|| {
                     Arc::new(device.create_texture(&wgpu::TextureDescriptor {
                         label: Some(&format!(
                             "Image Texture - {} (Frame {})",
@@ -656,7 +672,7 @@ impl Player {
                             | wgpu::TextureUsages::COPY_SRC,
                         view_formats: &[],
                     }))
-                };
+                });
 
                 queue.write_texture(
                     wgpu::ImageCopyTexture {
@@ -1172,9 +1188,16 @@ impl Player {
                     .write()
                     .remove(&(left_index, right_index));
 
-                flip_diff_sender
+                if flip_diff_sender
                     .send((left_index, right_index, diff_data, diff_size))
-                    .unwrap();
+                    .is_err()
+                {
+                    warn!(
+                        "Dropping generated FLIP diff for frames ({}, {}) because receiver is gone",
+                        left_index, right_index
+                    );
+                    return;
+                }
 
                 let process_end = Instant::now();
                 let process_time = process_end - process_start;
