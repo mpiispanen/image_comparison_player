@@ -5,7 +5,6 @@ use nv_flip::{flip, magma_lut, FlipImageRgb8, FlipPool};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
-use std::io::BufReader;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -289,8 +288,6 @@ pub struct Player {
     pub texture_available_times: Arc<RwLock<HashMap<(usize, bool), Instant>>>,
     playback_speed: f32,
     pub flip_stats: Arc<RwLock<HashMap<(usize, usize), FlipStats>>>,
-    expected_image_dimensions_left: Arc<Mutex<Option<(u32, u32)>>>,
-    expected_image_dimensions_right: Arc<Mutex<Option<(u32, u32)>>>,
     pub flip_diff_raw_data: FlipDiffRawData,
     pub single_image_mode: bool,
     /// Pre-computed sorted unique time points for O(log N) frame navigation
@@ -322,24 +319,7 @@ impl Player {
         let (flip_diff_sender, flip_diff_receiver) = channel();
         let flip_diff_receiver = Arc::new(Mutex::new(flip_diff_receiver));
 
-        let expected_dimensions_left = config
-            .image_data1
-            .first()
-            .and_then(|(path, _, _)| Self::determine_expected_dimensions(path).ok())
-            .unwrap_or((0, 0));
-        let expected_image_dimensions_left = Arc::new(Mutex::new(Some(expected_dimensions_left)));
-
         let single_image_mode = config.single_image_mode;
-        let expected_dimensions_right = if single_image_mode {
-            expected_dimensions_left
-        } else {
-            config
-                .image_data2
-                .first()
-                .and_then(|(path, _, _)| Self::determine_expected_dimensions(path).ok())
-                .unwrap_or((0, 0))
-        };
-        let expected_image_dimensions_right = Arc::new(Mutex::new(Some(expected_dimensions_right)));
         let sorted_time_points = Self::compute_sorted_time_points(&config.image_data1, &config.image_data2);
 
         Self {
@@ -385,25 +365,12 @@ impl Player {
             texture_available_times: Arc::new(RwLock::new(HashMap::new())),
             playback_speed: 1.0,
             flip_stats: Arc::new(RwLock::new(HashMap::new())),
-            expected_image_dimensions_left,
-            expected_image_dimensions_right,
             flip_diff_raw_data: Arc::new(RwLock::new(HashMap::new())),
             single_image_mode,
             sorted_time_points,
             flip_diff_cache_metrics: Arc::new(CacheMetrics::default()),
             flip_diff_cache_capacity,
         }
-    }
-
-    fn determine_expected_dimensions(
-        first_image_path: &str,
-    ) -> Result<(u32, u32), Box<dyn std::error::Error>> {
-        let file = File::open(first_image_path)?;
-        let reader = BufReader::new(file);
-        let dimensions = image::io::Reader::new(reader)
-            .with_guessed_format()?
-            .into_dimensions()?;
-        Ok(dimensions)
     }
 
     /// Pre-compute a sorted, deduplicated list of all time points from both sequences.
@@ -600,20 +567,13 @@ impl Player {
             let texture_process_sender = self.texture_process_sender.clone();
             let processing_textures = Arc::clone(&self.processing_textures);
             let texture_timings = Arc::clone(&self.texture_timings);
-            let side_expected_dimensions = if request.is_left {
-                *self.expected_image_dimensions_left.lock()
-            } else {
-                *self.expected_image_dimensions_right.lock()
-            };
             self.texture_load_pool.execute(move || {
                 let request = TextureLoadRequest::new(
                     request.path.to_string(),
                     request.index,
                     request.is_left,
                 );
-                if let Ok((image_data, size)) =
-                    Self::load_image_data_from_path(&request.path, side_expected_dimensions)
-                {
+                if let Ok((image_data, size)) = Self::load_image_data_from_path(&request.path) {
                     let load_end = Instant::now();
                     let load_time = load_end - request.load_start;
 
@@ -991,10 +951,7 @@ impl Player {
         Ok(texture)
     }
 
-    fn load_image_data_from_path(
-        path: &str,
-        _expected_dimensions: Option<(u32, u32)>,
-    ) -> Result<(Vec<u8>, wgpu::Extent3d), Box<dyn std::error::Error>> {
+    fn load_image_data_from_path(path: &str) -> Result<(Vec<u8>, wgpu::Extent3d), Box<dyn std::error::Error>> {
         let file = File::open(path)?;
         let file_size = file.metadata()?.len();
 
@@ -1598,7 +1555,7 @@ mod tests {
         let path = dir.join("pixel.ppm");
         fs::write(&path, b"P3\n1 1\n255\n255 0 0\n").unwrap();
 
-        let (rgba, size) = Player::load_image_data_from_path(path.to_str().unwrap(), None).unwrap();
+        let (rgba, size) = Player::load_image_data_from_path(path.to_str().unwrap()).unwrap();
         assert_eq!(size.width, 1);
         assert_eq!(size.height, 1);
         assert_eq!(rgba, vec![255, 0, 0, 255]);
@@ -1612,7 +1569,7 @@ mod tests {
         let path = dir.join("pixel.pgm");
         fs::write(&path, b"P2\n1 1\n255\n127\n").unwrap();
 
-        let (rgba, size) = Player::load_image_data_from_path(path.to_str().unwrap(), None).unwrap();
+        let (rgba, size) = Player::load_image_data_from_path(path.to_str().unwrap()).unwrap();
         assert_eq!(size.width, 1);
         assert_eq!(size.height, 1);
         assert_eq!(rgba, vec![127, 127, 127, 255]);
@@ -1749,34 +1706,24 @@ mod tests {
         fs::write(&path_right, b"P3\n1 1\n255\n0 0 255\n").unwrap();
 
         // The left-side expected dimensions come from the first left image (2×2).
-        let (_, left_size) = Player::load_image_data_from_path(
-            path_left.to_str().unwrap(),
-            Some((2, 2)),
-        )
-        .expect("left image should load with matching expected dimensions");
+        let (_, left_size) = Player::load_image_data_from_path(path_left.to_str().unwrap())
+        .expect("left image should load");
         assert_eq!(left_size.width, 2);
         assert_eq!(left_size.height, 2);
 
         // The right-side expected dimensions come from the first right image (1×1).
         // Before the fix this call used the LEFT expected dimensions (2×2), causing
         // a mismatch error and silently dropping the right texture.
-        let (_, right_size) = Player::load_image_data_from_path(
-            path_right.to_str().unwrap(),
-            Some((1, 1)),
-        )
-        .expect("right image should load with its own matching expected dimensions");
+        let (_, right_size) = Player::load_image_data_from_path(path_right.to_str().unwrap())
+        .expect("right image should load");
         assert_eq!(right_size.width, 1);
         assert_eq!(right_size.height, 1);
 
-        // Also allow mismatched "expected" dimensions. This keeps image loading robust
-        // for sources where frames do not all share one fixed resolution.
-        let (_, wrong_expected_size) = Player::load_image_data_from_path(
-            path_right.to_str().unwrap(),
-            Some((2, 2)),
-        )
-        .expect("image loading should not fail due to expected-dimension mismatch");
-        assert_eq!(wrong_expected_size.width, 1);
-        assert_eq!(wrong_expected_size.height, 1);
+        // Loading the same image again should still report its real dimensions.
+        let (_, right_size_reloaded) = Player::load_image_data_from_path(path_right.to_str().unwrap())
+        .expect("reloading image should not fail");
+        assert_eq!(right_size_reloaded.width, 1);
+        assert_eq!(right_size_reloaded.height, 1);
     }
 
     #[test]
@@ -1792,13 +1739,11 @@ mod tests {
         let second = dir.join("second.ppm");
         fs::write(&second, b"P3\n1 1\n255\n0 0 255\n").unwrap();
 
-        let (_, first_size) =
-            Player::load_image_data_from_path(first.to_str().unwrap(), Some((2, 2))).unwrap();
+        let (_, first_size) = Player::load_image_data_from_path(first.to_str().unwrap()).unwrap();
         assert_eq!(first_size.width, 2);
         assert_eq!(first_size.height, 2);
 
-        let (_, second_size) =
-            Player::load_image_data_from_path(second.to_str().unwrap(), Some((2, 2))).unwrap();
+        let (_, second_size) = Player::load_image_data_from_path(second.to_str().unwrap()).unwrap();
         assert_eq!(second_size.width, 1);
         assert_eq!(second_size.height, 1);
     }
