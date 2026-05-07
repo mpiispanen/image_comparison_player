@@ -993,7 +993,7 @@ impl Player {
 
     fn load_image_data_from_path(
         path: &str,
-        expected_dimensions: Option<(u32, u32)>,
+        _expected_dimensions: Option<(u32, u32)>,
     ) -> Result<(Vec<u8>, wgpu::Extent3d), Box<dyn std::error::Error>> {
         let file = File::open(path)?;
         let file_size = file.metadata()?.len();
@@ -1008,16 +1008,6 @@ impl Player {
             let dimensions = img.dimensions();
             (img, dimensions)
         };
-
-        if let Some(expected) = expected_dimensions {
-            if dimensions != expected {
-                return Err(format!(
-                    "Image dimensions mismatch: expected {:?}, got {:?} for file {}",
-                    expected, dimensions, path
-                )
-                .into());
-            }
-        }
 
         let rgba = img.to_rgba8();
         let size = wgpu::Extent3d {
@@ -1742,11 +1732,8 @@ mod tests {
 
     #[test]
     fn test_load_image_data_different_dimensions_per_side() {
-        // Verify that load_image_data_from_path accepts different expected_dimensions
-        // for left vs. right images.  This is the key scenario that was broken:
-        // after a second drag-and-drop, image_data1 and image_data2 can have images
-        // of different sizes; each side must be validated against its OWN first frame,
-        // not the other side's.
+        // Verify mixed-resolution sources are accepted. Each image should load based on
+        // its own dimensions even when provided "expected" dimensions differ.
         let dir = std::env::temp_dir()
             .join("icp_tests")
             .join("player_diff_dims");
@@ -1781,15 +1768,38 @@ mod tests {
         assert_eq!(right_size.width, 1);
         assert_eq!(right_size.height, 1);
 
-        // Confirm that using the WRONG (left-side) expected dimensions for the right
-        // image is what caused the original failure.
-        let result = Player::load_image_data_from_path(
+        // Also allow mismatched "expected" dimensions. This keeps image loading robust
+        // for sources where frames do not all share one fixed resolution.
+        let (_, wrong_expected_size) = Player::load_image_data_from_path(
             path_right.to_str().unwrap(),
             Some((2, 2)),
-        );
-        assert!(
-            result.is_err(),
-            "loading right image with left-side dimensions should fail (regression guard)"
-        );
+        )
+        .expect("image loading should not fail due to expected-dimension mismatch");
+        assert_eq!(wrong_expected_size.width, 1);
+        assert_eq!(wrong_expected_size.height, 1);
+    }
+
+    #[test]
+    fn test_load_image_data_allows_different_dimensions_within_source() {
+        let dir = std::env::temp_dir()
+            .join("icp_tests")
+            .join("player_diff_dims_within_source");
+        let _ = fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+
+        let first = dir.join("first.ppm");
+        fs::write(&first, b"P3\n2 2\n255\n255 0 0\n0 255 0\n0 0 255\n255 255 0\n").unwrap();
+        let second = dir.join("second.ppm");
+        fs::write(&second, b"P3\n1 1\n255\n0 0 255\n").unwrap();
+
+        let (_, first_size) =
+            Player::load_image_data_from_path(first.to_str().unwrap(), Some((2, 2))).unwrap();
+        assert_eq!(first_size.width, 2);
+        assert_eq!(first_size.height, 2);
+
+        let (_, second_size) =
+            Player::load_image_data_from_path(second.to_str().unwrap(), Some((2, 2))).unwrap();
+        assert_eq!(second_size.width, 1);
+        assert_eq!(second_size.height, 1);
     }
 }
