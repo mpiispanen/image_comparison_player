@@ -1837,6 +1837,8 @@ impl AppState {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let (image_width, image_height) = (left_texture.width() as f32, left_texture.height() as f32);
+        let (image2_width, image2_height) =
+            (right_texture.width() as f32, right_texture.height() as f32);
         let window_size = window.inner_size();
         let window_aspect_ratio = window_size.width as f32 / window_size.height as f32;
         let image_aspect_ratio = image_width / image_height;
@@ -1857,7 +1859,7 @@ impl AppState {
             cursor_x: if self.single_image_mode { 1.0 } else { self.cursor_x / render_width },
             cursor_y: self.cursor_y / render_height,
             image1_size: [image_width, image_height],
-            image2_size: [image_width, image_height],
+            image2_size: [image2_width, image2_height],
             flip_diff_size: [image_width, image_height],
             comparison_mode: self.comparison_mode.as_f32(),
             zoom_level: self.zoom_level,
