@@ -1683,11 +1683,12 @@ mod tests {
     }
 
     #[test]
-    fn test_rgb_to_rgba_preallocates_expected_capacity() {
-        let rgb = vec![255u8, 128, 64, 10, 20, 30];
-        let rgba = rgb_to_rgba(&rgb);
-        assert_eq!(rgba.capacity(), rgba.len());
-    }
+fn test_rgb_to_rgba_preallocates_expected_capacity() {
+    let pixel_count = 100usize;
+    let rgb: Vec<u8> = (0..pixel_count * 3).map(|i| (i % 256) as u8).collect();
+    let rgba = rgb_to_rgba(&rgb);
+    assert_eq!(rgba.capacity(), pixel_count * 4);
+}
 
     // ── get_current_index ──────────────────────────────────────────────────
 
