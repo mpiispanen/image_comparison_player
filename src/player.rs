@@ -1130,7 +1130,8 @@ impl Player {
                 // Store the flip stats
                 flip_stats.write().insert((left_index, right_index), stats);
 
-                let diff_data = rgb_to_rgba(visualized.to_vec());
+                let visualized_data = visualized.to_vec();
+                let diff_data = rgb_to_rgba(&visualized_data);
                 let diff_size = wgpu::Extent3d {
                     width: visualized.width(),
                     height: visualized.height(),
@@ -1538,7 +1539,7 @@ fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
 
 /// Convert an RGB byte vec to an RGBA byte vec, inserting 255 for the alpha channel.
 /// Pre-allocates the output buffer to avoid repeated reallocations.
-fn rgb_to_rgba(rgb: Vec<u8>) -> Vec<u8> {
+fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     debug_assert_eq!(rgb.len() % 3, 0, "RGB buffer length must be a multiple of 3");
     let pixel_count = rgb.len() / 3;
     let mut rgba = Vec::with_capacity(pixel_count * 4);
@@ -1667,7 +1668,7 @@ mod tests {
     #[test]
     fn test_rgb_to_rgba_inserts_alpha() {
         let rgb = vec![255u8, 128, 64, 10, 20, 30];
-        let rgba = rgb_to_rgba(rgb);
+        let rgba = rgb_to_rgba(&rgb);
         assert_eq!(rgba, vec![255, 128, 64, 255, 10, 20, 30, 255]);
     }
 
@@ -1677,8 +1678,15 @@ mod tests {
         let rgba_in: Vec<u8> = (0..pixel_count * 4).map(|i| (i % 256) as u8).collect();
         let rgb = rgba_to_rgb(&rgba_in);
         assert_eq!(rgb.len(), pixel_count * 3);
-        let rgba_out = rgb_to_rgba(rgb);
+        let rgba_out = rgb_to_rgba(&rgb);
         assert_eq!(rgba_out.len(), pixel_count * 4);
+    }
+
+    #[test]
+    fn test_rgb_to_rgba_preallocates_expected_capacity() {
+        let rgb = vec![255u8, 128, 64, 10, 20, 30];
+        let rgba = rgb_to_rgba(&rgb);
+        assert_eq!(rgba.capacity(), rgba.len());
     }
 
     // ── get_current_index ──────────────────────────────────────────────────
