@@ -1537,7 +1537,7 @@ fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     rgb
 }
 
-/// Convert an RGB byte vec to an RGBA byte vec, inserting 255 for the alpha channel.
+/// Convert an RGB byte slice to an RGBA byte vec, inserting 255 for the alpha channel.
 /// Pre-allocates the output buffer to avoid repeated reallocations.
 fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     debug_assert_eq!(rgb.len() % 3, 0, "RGB buffer length must be a multiple of 3");
