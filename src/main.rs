@@ -174,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("batch-diff-layout")
                 .action(ArgAction::Set)
                 .value_name("LAYOUT")
-                .help("Batch image layout: diff | side-by-side | side-by-side-diff")
+                .help("Batch image layout: diff | flip | side-by-side | side-by-side-diff | side-by-side-flip")
                 .default_value("diff"),
         )
         .arg(

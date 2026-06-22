@@ -45,7 +45,7 @@ The application accepts the following command-line arguments:
 --peek-zoom-factor <FACTOR>   Magnification factor for hold-to-peek zoom (default: 4.0)
 --batch-mode                  Run in headless batch mode (diff generation / video export)
 --batch-diff-output <DIR>     Output directory for batch image exports
---batch-diff-layout <LAYOUT>  Batch image layout: diff | side-by-side | side-by-side-diff (default: diff)
+--batch-diff-layout <LAYOUT>  Batch image layout: diff | flip | side-by-side | side-by-side-diff | side-by-side-flip (default: diff)
 --video-output <FILE>         Output file path for generated video
 --video-layout <LAYOUT>       Video layout: single | side-by-side | side-by-side-diff (default: single)
 --video-fps <FPS>             Output video frame rate (default: 30)
