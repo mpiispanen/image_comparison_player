@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageBuffer, RgbaImage};
+use nv_flip::{flip, magma_lut, FlipImageRgb8};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,13 +32,19 @@ impl std::str::FromStr for VideoLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchImageLayout {
     Diff,
+    Flip,
     SideBySide,
     SideBySideWithDiff,
+    SideBySideWithFlip,
 }
 
 impl BatchImageLayout {
-    fn uses_diff(self) -> bool {
+    fn uses_abs_diff(self) -> bool {
         matches!(self, Self::Diff | Self::SideBySideWithDiff)
+    }
+
+    fn uses_flip(self) -> bool {
+        matches!(self, Self::Flip | Self::SideBySideWithFlip)
     }
 }
 
@@ -47,10 +54,12 @@ impl std::str::FromStr for BatchImageLayout {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "diff" => Ok(Self::Diff),
+            "flip" => Ok(Self::Flip),
             "side-by-side" => Ok(Self::SideBySide),
             "side-by-side-diff" => Ok(Self::SideBySideWithDiff),
+            "side-by-side-flip" => Ok(Self::SideBySideWithFlip),
             _ => Err(format!(
-                "Invalid batch diff layout '{}'. Use one of: diff, side-by-side, side-by-side-diff",
+                "Invalid batch diff layout '{}'. Use one of: diff, flip, side-by-side, side-by-side-diff, side-by-side-flip",
                 s
             )),
         }
@@ -161,9 +170,11 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
 
     let mut diff_progress = 0usize;
     let mut video_progress = 0usize;
-    let needs_diff_image = (diff_dir.is_some() && config.diff_output_layout.uses_diff())
+    let needs_abs_diff_image = (diff_dir.is_some() && config.diff_output_layout.uses_abs_diff())
         || config.video_layout == VideoLayout::SideBySideWithDiff;
-    let report_diff_progress = needs_diff_image && !config.use_existing_diffs;
+    let needs_flip_image = diff_dir.is_some() && config.diff_output_layout.uses_flip();
+    let report_diff_progress =
+        (needs_abs_diff_image && !config.use_existing_diffs) || needs_flip_image;
 
     for frame in 0..frame_count {
         let left = image::open(&config.left_images[frame])
@@ -177,7 +188,7 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
         let diff_path = diff_dir
             .as_ref()
             .map(|dir| dir.join(format!("diff_{:06}.png", frame)));
-        let diff = if needs_diff_image {
+        let abs_diff = if needs_abs_diff_image {
             if config.use_existing_diffs {
                 let path = diff_path
                     .as_ref()
@@ -201,6 +212,14 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
         } else {
             None
         };
+        let flip_diff = if needs_flip_image {
+            let r = right
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Internal error: right image is required for FLIP"))?;
+            Some(compute_flip_diff_image(&left, r)?)
+        } else {
+            None
+        };
 
         if let Some(dir) = &diff_dir {
             let path = dir.join(format!(
@@ -210,10 +229,17 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
             ));
             match config.diff_output_layout {
                 BatchImageLayout::Diff => {
-                    let diff = diff.as_ref().ok_or_else(|| {
+                    let diff = abs_diff.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("Internal error: diff image is required for diff export")
                     })?;
                     diff.save(&path)
+                        .with_context(|| format!("Failed to save {}", path.display()))?;
+                }
+                BatchImageLayout::Flip => {
+                    let flip = flip_diff.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("Internal error: FLIP image is required for flip export")
+                    })?;
+                    flip.save(&path)
                         .with_context(|| format!("Failed to save {}", path.display()))?;
                 }
                 BatchImageLayout::SideBySide => {
@@ -230,12 +256,27 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
                             "Internal error: right image is required for side-by-side-diff"
                         )
                     })?;
-                    let diff = diff.as_ref().ok_or_else(|| {
+                    let diff = abs_diff.as_ref().ok_or_else(|| {
                         anyhow::anyhow!(
                             "Internal error: diff image is required for side-by-side-diff"
                         )
                     })?;
                     stitch_panels(&[left.to_rgba8(), r.to_rgba8(), diff.clone()])
+                        .save(&path)
+                        .with_context(|| format!("Failed to save {}", path.display()))?;
+                }
+                BatchImageLayout::SideBySideWithFlip => {
+                    let r = right.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Internal error: right image is required for side-by-side-flip"
+                        )
+                    })?;
+                    let flip = flip_diff.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Internal error: FLIP image is required for side-by-side-flip"
+                        )
+                    })?;
+                    stitch_panels(&[left.to_rgba8(), r.to_rgba8(), flip.clone()])
                         .save(&path)
                         .with_context(|| format!("Failed to save {}", path.display()))?;
                 }
@@ -262,7 +303,7 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
                             "Internal error: right image is required for side-by-side-diff"
                         )
                     })?;
-                    let diff = diff.as_ref().ok_or_else(|| {
+                    let diff = abs_diff.as_ref().ok_or_else(|| {
                         anyhow::anyhow!(
                             "Internal error: diff image is required for side-by-side-diff"
                         )
@@ -361,8 +402,10 @@ impl BatchImageLayout {
     fn output_prefix(self) -> &'static str {
         match self {
             Self::Diff => "diff",
+            Self::Flip => "flip",
             Self::SideBySide => "side_by_side",
             Self::SideBySideWithDiff => "side_by_side_diff",
+            Self::SideBySideWithFlip => "side_by_side_flip",
         }
     }
 }
@@ -400,6 +443,61 @@ fn compute_abs_diff_image(left: &DynamicImage, right: &DynamicImage) -> Result<R
         ]);
     }
     Ok(diff)
+}
+
+fn compute_flip_diff_image(left: &DynamicImage, right: &DynamicImage) -> Result<RgbaImage> {
+    let (lw, lh) = left.dimensions();
+    let (rw, rh) = right.dimensions();
+    if lw == 0 || lh == 0 || rw == 0 || rh == 0 {
+        bail!("Cannot generate FLIP diff for zero-sized images");
+    }
+
+    let target_w = lw.min(rw);
+    let target_h = lh.min(rh);
+
+    let left = if lw == target_w && lh == target_h {
+        left.to_rgba8()
+    } else {
+        image::imageops::resize(&left.to_rgba8(), target_w, target_h, FilterType::Triangle)
+    };
+    let right = if rw == target_w && rh == target_h {
+        right.to_rgba8()
+    } else {
+        image::imageops::resize(&right.to_rgba8(), target_w, target_h, FilterType::Triangle)
+    };
+
+    let left_rgb = rgba_to_rgb(left.as_raw());
+    let right_rgb = rgba_to_rgb(right.as_raw());
+    let left_image = FlipImageRgb8::with_data(target_w, target_h, &left_rgb);
+    let right_image = FlipImageRgb8::with_data(target_w, target_h, &right_rgb);
+    let error_map = flip(left_image, right_image, nv_flip::DEFAULT_PIXELS_PER_DEGREE);
+    let visualized = error_map.apply_color_lut(&magma_lut());
+    let rgba = rgb_to_rgba(&visualized.to_vec());
+    ImageBuffer::from_vec(target_w, target_h, rgba)
+        .ok_or_else(|| anyhow::anyhow!("Failed to create FLIP output image buffer"))
+}
+
+fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(rgba.len() % 4, 0, "RGBA buffer length must be a multiple of 4");
+    let mut rgb = Vec::with_capacity((rgba.len() / 4) * 3);
+    for chunk in rgba.chunks_exact(4) {
+        rgb.push(chunk[0]);
+        rgb.push(chunk[1]);
+        rgb.push(chunk[2]);
+    }
+    rgb
+}
+
+fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(rgb.len() % 3, 0, "RGB buffer length must be a multiple of 3");
+    let mut rgba = Vec::with_capacity((rgb.len() / 3) * 4);
+    for chunk in rgb.chunks_exact(3) {
+        rgba.push(chunk[0]);
+        rgba.push(chunk[1]);
+        rgba.push(chunk[2]);
+        rgba.push(255);
+    }
+    rgba
 }
 
 fn stitch_panels(panels: &[RgbaImage]) -> RgbaImage {
@@ -447,12 +545,20 @@ mod tests {
             BatchImageLayout::Diff
         );
         assert_eq!(
+            "flip".parse::<BatchImageLayout>().unwrap(),
+            BatchImageLayout::Flip
+        );
+        assert_eq!(
             "side-by-side".parse::<BatchImageLayout>().unwrap(),
             BatchImageLayout::SideBySide
         );
         assert_eq!(
             "side-by-side-diff".parse::<BatchImageLayout>().unwrap(),
             BatchImageLayout::SideBySideWithDiff
+        );
+        assert_eq!(
+            "side-by-side-flip".parse::<BatchImageLayout>().unwrap(),
+            BatchImageLayout::SideBySideWithFlip
         );
         assert!("other".parse::<BatchImageLayout>().is_err());
     }
@@ -467,6 +573,19 @@ mod tests {
         }));
         let diff = compute_abs_diff_image(&left, &right).unwrap();
         assert_eq!(diff.get_pixel(0, 0).0, [20, 60, 10, 255]);
+    }
+
+    #[test]
+    fn flip_image_is_generated_with_alpha() {
+        let left = DynamicImage::ImageRgba8(ImageBuffer::from_fn(1, 1, |_x, _y| {
+            image::Rgba([10, 100, 250, 255])
+        }));
+        let right = DynamicImage::ImageRgba8(ImageBuffer::from_fn(1, 1, |_x, _y| {
+            image::Rgba([30, 40, 240, 255])
+        }));
+        let flip = compute_flip_diff_image(&left, &right).unwrap();
+        assert_eq!(flip.dimensions(), (1, 1));
+        assert_eq!(flip.get_pixel(0, 0).0[3], 255);
     }
 
     #[test]
