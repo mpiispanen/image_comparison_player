@@ -808,7 +808,7 @@ mod tests {
             right_images: None,
             diff_output_dir: None,
             diff_output_layout: BatchImageLayout::SideBySide,
-            video_output_path: Some(std::path::PathBuf::from("/tmp/test_will_not_be_created.mp4")),
+            video_output_path: Some(std::env::temp_dir().join("test_will_not_be_created.mp4")),
             video_layout: VideoLayout::SideBySideWithFlip,
             video_fps: 30.0,
             video_crf: 18,
