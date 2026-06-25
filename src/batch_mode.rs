@@ -11,6 +11,7 @@ pub enum VideoLayout {
     Single,
     SideBySide,
     SideBySideWithDiff,
+    SideBySideWithFlip,
 }
 
 impl std::str::FromStr for VideoLayout {
@@ -21,8 +22,9 @@ impl std::str::FromStr for VideoLayout {
             "single" => Ok(Self::Single),
             "side-by-side" => Ok(Self::SideBySide),
             "side-by-side-diff" => Ok(Self::SideBySideWithDiff),
+            "side-by-side-flip" => Ok(Self::SideBySideWithFlip),
             _ => Err(format!(
-                "Invalid video layout '{}'. Use one of: single, side-by-side, side-by-side-diff",
+                "Invalid video layout '{}'. Use one of: single, side-by-side, side-by-side-diff, side-by-side-flip",
                 s
             )),
         }
@@ -171,8 +173,9 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
     let mut diff_progress = 0usize;
     let mut video_progress = 0usize;
     let needs_abs_diff_image = (diff_dir.is_some() && config.diff_output_layout.uses_abs_diff())
-        || config.video_layout == VideoLayout::SideBySideWithDiff;
-    let needs_flip_image = diff_dir.is_some() && config.diff_output_layout.uses_flip();
+        || (config.video_output_path.is_some() && config.video_layout == VideoLayout::SideBySideWithDiff);
+    let needs_flip_image = (diff_dir.is_some() && config.diff_output_layout.uses_flip())
+        || (config.video_output_path.is_some() && config.video_layout == VideoLayout::SideBySideWithFlip);
     let report_diff_progress =
         (needs_abs_diff_image && !config.use_existing_diffs) || needs_flip_image;
 
@@ -309,6 +312,19 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
                         )
                     })?;
                     stitch_panels(&[left.to_rgba8(), r.to_rgba8(), diff.clone()])
+                }
+                VideoLayout::SideBySideWithFlip => {
+                    let r = right.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Internal error: right image is required for side-by-side-flip"
+                        )
+                    })?;
+                    let flip = flip_diff.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Internal error: FLIP image is required for side-by-side-flip"
+                        )
+                    })?;
+                    stitch_panels(&[left.to_rgba8(), r.to_rgba8(), flip.clone()])
                 }
             };
             let path = dir.path().join(format!("frame_{:06}.png", frame));
@@ -535,6 +551,10 @@ mod tests {
             "side-by-side-diff".parse::<VideoLayout>().unwrap(),
             VideoLayout::SideBySideWithDiff
         );
+        assert_eq!(
+            "side-by-side-flip".parse::<VideoLayout>().unwrap(),
+            VideoLayout::SideBySideWithFlip
+        );
         assert!("other".parse::<VideoLayout>().is_err());
     }
 
@@ -693,5 +713,172 @@ mod tests {
             use_existing_diffs: true,
         };
         assert!(validate_batch_config(&cfg).is_ok());
+    }
+
+    fn make_test_image(color: image::Rgba<u8>, w: u32, h: u32) -> DynamicImage {
+        DynamicImage::ImageRgba8(ImageBuffer::from_pixel(w, h, color))
+    }
+
+    fn save_test_image(img: &DynamicImage, path: &std::path::Path) {
+        img.save(path).expect("failed to save test image");
+    }
+
+    #[test]
+    fn batch_mode_flip_layout_produces_flip_output_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left_path = tmp.path().join("left_000000.png");
+        let right_path = tmp.path().join("right_000000.png");
+        let diff_dir = tmp.path().join("diffs");
+
+        let left_img = make_test_image(image::Rgba([100, 150, 200, 255]), 4, 4);
+        let right_img = make_test_image(image::Rgba([110, 140, 190, 255]), 4, 4);
+        save_test_image(&left_img, &left_path);
+        save_test_image(&right_img, &right_path);
+
+        let cfg = BatchConfig {
+            left_images: vec![left_path.to_string_lossy().into_owned()],
+            right_images: Some(vec![right_path.to_string_lossy().into_owned()]),
+            diff_output_dir: Some(diff_dir.clone()),
+            diff_output_layout: BatchImageLayout::Flip,
+            video_output_path: None,
+            video_layout: VideoLayout::Single,
+            video_fps: 30.0,
+            video_crf: 18,
+            video_preset: "medium".to_string(),
+            video_codec: "libx264".to_string(),
+            video_pixel_format: "yuv420p".to_string(),
+            use_existing_diffs: false,
+        };
+        run_batch_mode(cfg).unwrap();
+
+        let out_path = diff_dir.join("flip_000000.png");
+        assert!(out_path.exists(), "flip output file should exist");
+        let out = image::open(&out_path).unwrap();
+        assert_eq!(out.dimensions(), (4, 4));
+        // The FLIP diff image should have full alpha (opaque).
+        let rgba = out.to_rgba8();
+        for pixel in rgba.pixels() {
+            assert_eq!(pixel[3], 255, "all pixels should be fully opaque");
+        }
+    }
+
+    #[test]
+    fn batch_mode_side_by_side_flip_layout_produces_triple_width_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left_path = tmp.path().join("left_000000.png");
+        let right_path = tmp.path().join("right_000000.png");
+        let diff_dir = tmp.path().join("diffs");
+
+        let left_img = make_test_image(image::Rgba([200, 100, 50, 255]), 4, 4);
+        let right_img = make_test_image(image::Rgba([180, 120, 60, 255]), 4, 4);
+        save_test_image(&left_img, &left_path);
+        save_test_image(&right_img, &right_path);
+
+        let cfg = BatchConfig {
+            left_images: vec![left_path.to_string_lossy().into_owned()],
+            right_images: Some(vec![right_path.to_string_lossy().into_owned()]),
+            diff_output_dir: Some(diff_dir.clone()),
+            diff_output_layout: BatchImageLayout::SideBySideWithFlip,
+            video_output_path: None,
+            video_layout: VideoLayout::Single,
+            video_fps: 30.0,
+            video_crf: 18,
+            video_preset: "medium".to_string(),
+            video_codec: "libx264".to_string(),
+            video_pixel_format: "yuv420p".to_string(),
+            use_existing_diffs: false,
+        };
+        run_batch_mode(cfg).unwrap();
+
+        let out_path = diff_dir.join("side_by_side_flip_000000.png");
+        assert!(out_path.exists(), "side-by-side-flip output file should exist");
+        let out = image::open(&out_path).unwrap();
+        // Width should be 3x the individual frame width (left + right + flip).
+        assert_eq!(
+            out.dimensions(),
+            (12, 4),
+            "side-by-side-flip image should be 3x as wide as a single frame"
+        );
+    }
+
+    #[test]
+    fn batch_mode_video_side_by_side_flip_requires_right_images() {
+        let cfg = BatchConfig {
+            left_images: vec!["a.png".to_string()],
+            right_images: None,
+            diff_output_dir: None,
+            diff_output_layout: BatchImageLayout::SideBySide,
+            video_output_path: Some(std::path::PathBuf::from("/tmp/test_will_not_be_created.mp4")),
+            video_layout: VideoLayout::SideBySideWithFlip,
+            video_fps: 30.0,
+            video_crf: 18,
+            video_preset: "medium".to_string(),
+            video_codec: "libx264".to_string(),
+            video_pixel_format: "yuv420p".to_string(),
+            use_existing_diffs: false,
+        };
+        let err = run_batch_mode(cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("second input source"),
+            "expected right-side error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn batch_mode_video_side_by_side_flip_layout_generates_frames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let left_path = tmp.path().join("left_000000.png");
+        let right_path = tmp.path().join("right_000000.png");
+        let diff_dir = tmp.path().join("diffs");
+        // Use image output as a proxy to verify the video-layout flip computation
+        // path is exercised (flip is needed for both image and video output here).
+        let left_img = make_test_image(image::Rgba([80, 160, 40, 255]), 4, 4);
+        let right_img = make_test_image(image::Rgba([90, 150, 50, 255]), 4, 4);
+        save_test_image(&left_img, &left_path);
+        save_test_image(&right_img, &right_path);
+
+        // Configure image output as side-by-side-flip AND video layout as
+        // side-by-side-flip.  The flip diff will be required for both outputs,
+        // so compute_flip_diff_image is exercised via the shared needs_flip_image
+        // flag regardless of whether ffmpeg is available.
+        let video_path = tmp.path().join("out.mp4");
+        let cfg = BatchConfig {
+            left_images: vec![left_path.to_string_lossy().into_owned()],
+            right_images: Some(vec![right_path.to_string_lossy().into_owned()]),
+            diff_output_dir: Some(diff_dir.clone()),
+            diff_output_layout: BatchImageLayout::SideBySideWithFlip,
+            video_output_path: Some(video_path.clone()),
+            video_layout: VideoLayout::SideBySideWithFlip,
+            video_fps: 30.0,
+            video_crf: 18,
+            video_preset: "medium".to_string(),
+            video_codec: "libx264".to_string(),
+            video_pixel_format: "yuv420p".to_string(),
+            use_existing_diffs: false,
+        };
+        // Frame generation (including FLIP computation) always runs before ffmpeg.
+        // The run may succeed (ffmpeg available) or fail at the encoding step only.
+        let result = run_batch_mode(cfg);
+        match result {
+            Ok(()) => {
+                // ffmpeg was available – full success.
+                assert!(video_path.exists(), "video file should exist when ffmpeg succeeds");
+            }
+            Err(e) => {
+                // ffmpeg was not available – that is acceptable in this environment.
+                // The important check is that the error is about ffmpeg, not about
+                // the FLIP computation or frame stitching.
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("ffmpeg"),
+                    "expected ffmpeg error, got: {msg}"
+                );
+            }
+        }
+        // Image output (which doesn't need ffmpeg) must always be present.
+        let out_path = diff_dir.join("side_by_side_flip_000000.png");
+        assert!(out_path.exists(), "image output should always be created");
+        let out = image::open(&out_path).unwrap();
+        assert_eq!(out.dimensions(), (12, 4));
     }
 }
