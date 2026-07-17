@@ -6,6 +6,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const EVEN_DIMENSIONS_PAD_FILTER: &str = "pad=ceil(iw/2)*2:ceil(ih/2)*2";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoLayout {
     Single,
@@ -371,21 +373,7 @@ fn create_video_from_frames(
         video_path.display()
     );
     let pattern = frames_dir.join("frame_%06d.png");
-    let status = Command::new("ffmpeg")
-        .arg("-y")
-        .arg("-framerate")
-        .arg(config.video_fps.to_string())
-        .arg("-i")
-        .arg(pattern)
-        .arg("-c:v")
-        .arg(&config.video_codec)
-        .arg("-preset")
-        .arg(&config.video_preset)
-        .arg("-crf")
-        .arg(config.video_crf.to_string())
-        .arg("-pix_fmt")
-        .arg(&config.video_pixel_format)
-        .arg(video_path)
+    let status = build_ffmpeg_video_command(&pattern, video_path, config)
         .status()
         .context("Failed to launch ffmpeg. Ensure ffmpeg is installed and available in PATH")?;
 
@@ -394,6 +382,28 @@ fn create_video_from_frames(
     }
     eprintln!("[batch] Video encoding complete: {}", video_path.display());
     Ok(())
+}
+
+fn build_ffmpeg_video_command(pattern: &Path, video_path: &Path, config: &BatchConfig) -> Command {
+    let mut command = Command::new("ffmpeg");
+    command
+        .arg("-y")
+        .arg("-framerate")
+        .arg(config.video_fps.to_string())
+        .arg("-i")
+        .arg(pattern)
+        .arg("-vf")
+        .arg(EVEN_DIMENSIONS_PAD_FILTER)
+        .arg("-c:v")
+        .arg(&config.video_codec)
+        .arg("-preset")
+        .arg(&config.video_preset)
+        .arg("-crf")
+        .arg(config.video_crf.to_string())
+        .arg("-pix_fmt")
+        .arg(&config.video_pixel_format)
+        .arg(video_path);
+    command
 }
 
 fn print_progress(stage: &str, current: usize, total: usize) {
@@ -880,5 +890,38 @@ mod tests {
         assert!(out_path.exists(), "image output should always be created");
         let out = image::open(&out_path).unwrap();
         assert_eq!(out.dimensions(), (12, 4));
+    }
+
+    #[test]
+    fn ffmpeg_video_command_pads_odd_frame_dimensions() {
+        let config = BatchConfig {
+            left_images: vec!["left.png".to_string()],
+            right_images: None,
+            diff_output_dir: None,
+            diff_output_layout: BatchImageLayout::SideBySide,
+            video_output_path: Some(PathBuf::from("out.mp4")),
+            video_layout: VideoLayout::Single,
+            video_fps: 30.0,
+            video_crf: 18,
+            video_preset: "medium".to_string(),
+            video_codec: "libx264".to_string(),
+            video_pixel_format: "yuv420p".to_string(),
+            use_existing_diffs: false,
+        };
+        let command = build_ffmpeg_video_command(
+            Path::new("/tmp/frames/frame_%06d.png"),
+            Path::new("/tmp/out.mp4"),
+            &config,
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            args.windows(2)
+                .any(|window| window == ["-vf", EVEN_DIMENSIONS_PAD_FILTER]),
+            "expected ffmpeg args to include even-dimension padding filter, got: {args:?}"
+        );
     }
 }
