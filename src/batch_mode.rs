@@ -384,6 +384,8 @@ fn create_video_from_frames(
     Ok(())
 }
 
+/// Builds the ffmpeg encoder command, padding odd-sized frames up to even
+/// dimensions so the default H.264/yuv420p export path can encode them.
 fn build_ffmpeg_video_command(pattern: &Path, video_path: &Path, config: &BatchConfig) -> Command {
     let mut command = Command::new("ffmpeg");
     command
