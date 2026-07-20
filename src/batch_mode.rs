@@ -913,6 +913,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_video_command_includes_even_dimension_padding_filter() {
+        let config = BatchConfig {
             left_images: vec!["left.png".to_string()],
             right_images: None,
             diff_output_dir: None,
