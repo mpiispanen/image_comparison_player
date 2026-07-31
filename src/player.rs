@@ -1561,6 +1561,50 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn write_test_dds(path: &std::path::Path) {
+        fs::write(
+            path,
+            [
+                0x44, 0x44, 0x53, 0x20, // magic: "DDS "
+                0x7C, 0x00, 0x00, 0x00, // header size
+                0x07, 0x10, 0x08, 0x00, // flags
+                0x04, 0x00, 0x00, 0x00, // height
+                0x04, 0x00, 0x00, 0x00, // width
+                0x08, 0x00, 0x00, 0x00, // linear size for one DXT1 block
+                0x00, 0x00, 0x00, 0x00, // depth
+                0x00, 0x00, 0x00, 0x00, // mipmap count
+                0x00, 0x00, 0x00, 0x00, // reserved1[0]
+                0x00, 0x00, 0x00, 0x00, // reserved1[1]
+                0x00, 0x00, 0x00, 0x00, // reserved1[2]
+                0x00, 0x00, 0x00, 0x00, // reserved1[3]
+                0x00, 0x00, 0x00, 0x00, // reserved1[4]
+                0x00, 0x00, 0x00, 0x00, // reserved1[5]
+                0x00, 0x00, 0x00, 0x00, // reserved1[6]
+                0x00, 0x00, 0x00, 0x00, // reserved1[7]
+                0x00, 0x00, 0x00, 0x00, // reserved1[8]
+                0x00, 0x00, 0x00, 0x00, // reserved1[9]
+                0x00, 0x00, 0x00, 0x00, // reserved1[10]
+                0x20, 0x00, 0x00, 0x00, // pixel format size
+                0x04, 0x00, 0x00, 0x00, // pixel format flags: FOURCC
+                0x44, 0x58, 0x54, 0x31, // fourcc: "DXT1"
+                0x00, 0x00, 0x00, 0x00, // rgb bit count
+                0x00, 0x00, 0x00, 0x00, // r mask
+                0x00, 0x00, 0x00, 0x00, // g mask
+                0x00, 0x00, 0x00, 0x00, // b mask
+                0x00, 0x00, 0x00, 0x00, // a mask
+                0x00, 0x10, 0x00, 0x00, // caps: texture
+                0x00, 0x00, 0x00, 0x00, // caps2
+                0x00, 0x00, 0x00, 0x00, // caps3
+                0x00, 0x00, 0x00, 0x00, // caps4
+                0x00, 0x00, 0x00, 0x00, // reserved2
+                0x00, 0xF8, // color0: red in RGB565
+                0x00, 0x00, // color1: black
+                0x00, 0x00, 0x00, 0x00, // all pixels use color0
+            ],
+        )
+        .unwrap();
+    }
+
     fn make_image_data(frame_durations_us: &[u64]) -> Vec<(String, u64, u64)> {
         let mut data = Vec::new();
         let mut t = 0u64;
@@ -1597,6 +1641,24 @@ mod tests {
         assert_eq!(size.width, 1);
         assert_eq!(size.height, 1);
         assert_eq!(rgba, vec![127, 127, 127, 255]);
+    }
+
+    #[test]
+    fn test_load_image_data_from_path_dds() {
+        let dir = std::env::temp_dir().join("icp_tests").join("player_load_dds");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pixel.dds");
+        write_test_dds(&path);
+
+        let (rgba, size) = Player::load_image_data_from_path(path.to_str().unwrap()).unwrap();
+        assert_eq!(size.width, 4);
+        assert_eq!(size.height, 4);
+        assert_eq!(rgba.len(), (size.width * size.height * 4) as usize);
+        assert_eq!(rgba[0], 255);
+        assert_eq!(rgba[1], 0);
+        assert_eq!(rgba[2], 0);
+        assert_eq!(rgba[3], 255);
     }
 
     // ── compute_sorted_time_points ──────────────────────────────────────────
