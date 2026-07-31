@@ -9,11 +9,11 @@ use log::{debug, info, warn};
 use nv_flip::magma_lut;
 use parking_lot::lock_api::RwLock;
 use parking_lot::Mutex;
+use std::process;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use std::process;
 use wgpu::util::DeviceExt;
 use winit::event::TouchPhase;
 use winit::event::VirtualKeyCode;
@@ -46,12 +46,12 @@ struct UniformData {
     show_image1: f32,
     show_image2: f32,
     show_split_line: f32,
-    peek_active: f32,  // 1.0 when peek zoom is held (Z key)
-    peek_factor: f32,  // peek magnification factor
-    peek_radius: f32,  // peek window radius in screen pixels
-    diff_multiplier: f32,  // multiplier applied to abs-diff values (default 1.0)
-    pump_active: f32,  // 1.0 when pumping animation is enabled
-    time: f32,         // elapsed seconds (for animation)
+    peek_active: f32,     // 1.0 when peek zoom is held (Z key)
+    peek_factor: f32,     // peek magnification factor
+    peek_radius: f32,     // peek window radius in screen pixels
+    diff_multiplier: f32, // multiplier applied to abs-diff values (default 1.0)
+    pump_active: f32,     // 1.0 when pumping animation is enabled
+    time: f32,            // elapsed seconds (for animation)
     peek_show_image: f32, // 0=split, 1=image1 only, 2=image2 only, 3=current view, 4=diff only (in peek zoom)
 }
 
@@ -238,7 +238,11 @@ impl MarkerOverlay {
                     self.visible = vis;
                 }
                 ui.same_line();
-                let create_label = if self.create_mode { "Cancel" } else { "Add Marker" };
+                let create_label = if self.create_mode {
+                    "Cancel"
+                } else {
+                    "Add Marker"
+                };
                 if ui.button(create_label) {
                     self.create_mode = !self.create_mode;
                 }
@@ -252,9 +256,7 @@ impl MarkerOverlay {
                 ui.separator();
 
                 if self.markers.is_empty() {
-                    ui.text_disabled(
-                        "No markers yet. Click \"Add Marker\" and drag on the image.",
-                    );
+                    ui.text_disabled("No markers yet. Click \"Add Marker\" and drag on the image.");
                     return;
                 }
 
@@ -455,9 +457,9 @@ impl CacheDebugWindow {
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
-        let scale_factor =
-            ((params.available_width - ui.calc_text_size(label)[0] - spacing) / total_width)
-                .min(1.0);
+        let scale_factor = ((params.available_width - ui.calc_text_size(label)[0] - spacing)
+            / total_width)
+            .min(1.0);
         let scaled_button_size = button_size * scale_factor;
         let scaled_spacing = spacing * scale_factor;
 
@@ -600,9 +602,9 @@ impl CacheDebugWindow {
         let button_size = 15.0;
         let spacing = 1.0;
         let total_width = visible_frames as f32 * (button_size + spacing) - spacing;
-        let scale_factor =
-            ((params.available_width - ui.calc_text_size("D:")[0] - spacing) / total_width)
-                .min(1.0);
+        let scale_factor = ((params.available_width - ui.calc_text_size("D:")[0] - spacing)
+            / total_width)
+            .min(1.0);
         let scaled_button_size = button_size * scale_factor;
         let scaled_spacing = spacing * scale_factor;
 
@@ -872,7 +874,10 @@ impl PixelInfoWindow {
                     }
                 }
 
-                ui.text(format!("Hovered pixel: ({}, {})", hovered_pixel.0, hovered_pixel.1));
+                ui.text(format!(
+                    "Hovered pixel: ({}, {})",
+                    hovered_pixel.0, hovered_pixel.1
+                ));
                 ui.separator();
 
                 // FLIP error metrics
@@ -1056,18 +1061,19 @@ fn read_two_texture_pixels(
     // Single poll(Wait) covers both mappings.
     device.poll(wgpu::Maintain::Wait);
 
-    let read = |rx: std::sync::mpsc::Receiver<_>, buf: &wgpu::Buffer, slice: wgpu::BufferSlice<'_>| {
-        match rx.recv() {
-            Ok(Ok(_)) => {
-                let data = slice.get_mapped_range();
-                let result = [data[0], data[1], data[2], data[3]];
-                drop(data);
-                buf.unmap();
-                result
+    let read =
+        |rx: std::sync::mpsc::Receiver<_>, buf: &wgpu::Buffer, slice: wgpu::BufferSlice<'_>| {
+            match rx.recv() {
+                Ok(Ok(_)) => {
+                    let data = slice.get_mapped_range();
+                    let result = [data[0], data[1], data[2], data[3]];
+                    drop(data);
+                    buf.unmap();
+                    result
+                }
+                _ => [0, 0, 0, 255],
             }
-            _ => [0, 0, 0, 255],
-        }
-    };
+        };
     [read(rx1, &buf1, slice1), read(rx2, &buf2, slice2)]
 }
 
@@ -1253,7 +1259,11 @@ fn sample_flip_error_at_pixel(
     if offset + 2 >= diff_data.len() {
         return None;
     }
-    decode_flip_error_from_magma_rgb([diff_data[offset], diff_data[offset + 1], diff_data[offset + 2]])
+    decode_flip_error_from_magma_rgb([
+        diff_data[offset],
+        diff_data[offset + 1],
+        diff_data[offset + 2],
+    ])
 }
 
 impl AppState {
@@ -1648,12 +1658,14 @@ impl AppState {
             1.0
         };
         imgui_context.fonts().clear();
-        imgui_context.fonts().add_font(&[imgui::FontSource::DefaultFontData {
-            config: Some(imgui::FontConfig {
-                size_pixels: 18.0 * hidpi_factor.max(1.0),
-                ..imgui::FontConfig::default()
-            }),
-        }]);
+        imgui_context
+            .fonts()
+            .add_font(&[imgui::FontSource::DefaultFontData {
+                config: Some(imgui::FontConfig {
+                    size_pixels: 18.0 * hidpi_factor.max(1.0),
+                    ..imgui::FontConfig::default()
+                }),
+            }]);
         let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
         imgui_platform.attach_window(
             imgui_context.io_mut(),
@@ -1836,7 +1848,8 @@ impl AppState {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let (image_width, image_height) = (left_texture.width() as f32, left_texture.height() as f32);
+        let (image_width, image_height) =
+            (left_texture.width() as f32, left_texture.height() as f32);
         let (image2_width, image2_height) =
             (right_texture.width() as f32, right_texture.height() as f32);
         let window_size = window.inner_size();
@@ -1856,7 +1869,11 @@ impl AppState {
         let (show_image1, show_image2) = self.effective_show_images();
 
         let uniforms = UniformData {
-            cursor_x: if self.single_image_mode { 1.0 } else { self.cursor_x / render_width },
+            cursor_x: if self.single_image_mode {
+                1.0
+            } else {
+                self.cursor_x / render_width
+            },
             cursor_y: self.cursor_y / render_height,
             image1_size: [image_width, image_height],
             image2_size: [image2_width, image2_height],
@@ -1865,7 +1882,7 @@ impl AppState {
             zoom_level: self.zoom_level,
             zoom_center: [
                 self.fixed_zoom_center.0 + self.zoom_center_offset.0,
-                self.fixed_zoom_center.1 + self.zoom_center_offset.1
+                self.fixed_zoom_center.1 + self.zoom_center_offset.1,
             ],
             window_size: [window_size.width as f32, window_size.height as f32],
             show_image1,
@@ -1977,7 +1994,10 @@ impl AppState {
             || (self.marker_overlay.visible && !self.marker_overlay.markers.is_empty())
             || (self.comparison_mode != ComparisonMode::None && !self.single_image_mode)
         {
-            match self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), window) {
+            match self
+                .imgui_platform
+                .prepare_frame(self.imgui_context.io_mut(), window)
+            {
                 Ok(()) => {
                     let ui = self.imgui_context.frame();
 
@@ -1985,8 +2005,13 @@ impl AppState {
                         let player = self.player.read();
                         let mouse_pos = ui.io().mouse_pos;
                         let window_width = window.inner_size().width as f32;
-                        self.cache_debug_window
-                            .draw(ui, &player, mouse_pos[0], mouse_pos[1], window_width);
+                        self.cache_debug_window.draw(
+                            ui,
+                            &player,
+                            mouse_pos[0],
+                            mouse_pos[1],
+                            window_width,
+                        );
                     }
 
                     if self.pixel_info_window.is_open {
@@ -2116,7 +2141,8 @@ impl AppState {
                             let render_w_ui = render_width * to_ui;
                             let render_h_ui = render_height * to_ui;
                             let split_x_ui = x_off_ui + self.cursor_x * to_ui;
-                            let original_bottom_ui = if self.comparison_mode == ComparisonMode::None {
+                            let original_bottom_ui = if self.comparison_mode == ComparisonMode::None
+                            {
                                 y_off_ui + render_h_ui
                             } else {
                                 y_off_ui + self.cursor_y * to_ui
@@ -2147,12 +2173,19 @@ impl AppState {
                                     draw_list
                                         .add_rect(
                                             [sx - vpad, sy - vpad],
-                                            [sx + solo_text_size[0] + vpad, sy + solo_text_size[1] + vpad],
+                                            [
+                                                sx + solo_text_size[0] + vpad,
+                                                sy + solo_text_size[1] + vpad,
+                                            ],
                                             [0.0, 0.0, 0.0, 0.65],
                                         )
                                         .filled(true)
                                         .build();
-                                    draw_list.add_text([sx, sy], [1.0, 1.0, 1.0, 1.0], solo_label.as_str());
+                                    draw_list.add_text(
+                                        [sx, sy],
+                                        [1.0, 1.0, 1.0, 1.0],
+                                        solo_label.as_str(),
+                                    );
                                 }
                             } else {
                                 let label_h = left_text_size[1].max(right_text_size[1]);
@@ -2164,7 +2197,8 @@ impl AppState {
                                     let left_center = (left_region_start + left_region_end) * 0.5;
                                     let left_bound_min = left_region_start + lpad;
                                     let left_bound_max = left_region_end - lpad;
-                                    let lx = if left_bound_max - left_bound_min >= left_text_size[0] {
+                                    let lx = if left_bound_max - left_bound_min >= left_text_size[0]
+                                    {
                                         (left_center - left_text_size[0] * 0.5).clamp(
                                             left_bound_min,
                                             left_bound_max - left_text_size[0],
@@ -2177,21 +2211,31 @@ impl AppState {
                                         draw_list
                                             .add_rect(
                                                 [lx - vpad, ly - vpad],
-                                                [lx + left_text_size[0] + vpad, ly + left_text_size[1] + vpad],
+                                                [
+                                                    lx + left_text_size[0] + vpad,
+                                                    ly + left_text_size[1] + vpad,
+                                                ],
                                                 [0.0, 0.0, 0.0, 0.65],
                                             )
                                             .filled(true)
                                             .build();
-                                        draw_list.add_text([lx, ly], [1.0, 1.0, 1.0, 1.0], &left_frame_label);
+                                        draw_list.add_text(
+                                            [lx, ly],
+                                            [1.0, 1.0, 1.0, 1.0],
+                                            &left_frame_label,
+                                        );
                                     }
 
                                     // Right label centered in the right source region.
                                     let right_region_start = split_x_ui;
                                     let right_region_end = x_off_ui + render_w_ui;
-                                    let right_center = (right_region_start + right_region_end) * 0.5;
+                                    let right_center =
+                                        (right_region_start + right_region_end) * 0.5;
                                     let right_bound_min = right_region_start + lpad;
                                     let right_bound_max = right_region_end - lpad;
-                                    let rx = if right_bound_max - right_bound_min >= right_text_size[0] {
+                                    let rx = if right_bound_max - right_bound_min
+                                        >= right_text_size[0]
+                                    {
                                         (right_center - right_text_size[0] * 0.5).clamp(
                                             right_bound_min,
                                             right_bound_max - right_text_size[0],
@@ -2204,12 +2248,19 @@ impl AppState {
                                         draw_list
                                             .add_rect(
                                                 [rx - vpad, ry - vpad],
-                                                [rx + right_text_size[0] + vpad, ry + right_text_size[1] + vpad],
+                                                [
+                                                    rx + right_text_size[0] + vpad,
+                                                    ry + right_text_size[1] + vpad,
+                                                ],
                                                 [0.0, 0.0, 0.0, 0.65],
                                             )
                                             .filled(true)
                                             .build();
-                                        draw_list.add_text([rx, ry], [1.0, 1.0, 1.0, 1.0], &right_frame_label);
+                                        draw_list.add_text(
+                                            [rx, ry],
+                                            [1.0, 1.0, 1.0, 1.0],
+                                            &right_frame_label,
+                                        );
                                     }
                                 }
 
@@ -2221,14 +2272,17 @@ impl AppState {
                                         ComparisonMode::None => "",
                                     };
                                     let diff_text_size = ui.calc_text_size(diff_label);
-                                    let diff_y = y_off_ui + render_h_ui - diff_text_size[1] - vpad * 2.0;
+                                    let diff_y =
+                                        y_off_ui + render_h_ui - diff_text_size[1] - vpad * 2.0;
                                     let split_y_ui = y_off_ui + self.cursor_y * to_ui;
                                     let diff_top = diff_y - vpad;
                                     if split_y_ui <= diff_top {
-                                        let diff_x = (x_off_ui + (render_w_ui - diff_text_size[0]) * 0.5).clamp(
-                                            x_off_ui + lpad,
-                                            x_off_ui + render_w_ui - diff_text_size[0] - lpad,
-                                        );
+                                        let diff_x = (x_off_ui
+                                            + (render_w_ui - diff_text_size[0]) * 0.5)
+                                            .clamp(
+                                                x_off_ui + lpad,
+                                                x_off_ui + render_w_ui - diff_text_size[0] - lpad,
+                                            );
                                         draw_list
                                             .add_rect(
                                                 [diff_x - vpad, diff_y - vpad],
@@ -2240,7 +2294,11 @@ impl AppState {
                                             )
                                             .filled(true)
                                             .build();
-                                        draw_list.add_text([diff_x, diff_y], [1.0, 1.0, 1.0, 1.0], diff_label);
+                                        draw_list.add_text(
+                                            [diff_x, diff_y],
+                                            [1.0, 1.0, 1.0, 1.0],
+                                            diff_label,
+                                        );
                                     }
                                 }
                             }
@@ -2276,7 +2334,10 @@ impl AppState {
                             };
                             ui.text_colored(color, self.comparison_mode.label());
                             if self.comparison_mode == ComparisonMode::AbsDiff {
-                                ui.text_colored([1.0, 0.9, 0.5, 1.0], format!("Diff x{:.0}", self.diff_enhance_factor));
+                                ui.text_colored(
+                                    [1.0, 0.9, 0.5, 1.0],
+                                    format!("Diff x{:.0}", self.diff_enhance_factor),
+                                );
                                 if self.pump_animation_active {
                                     ui.text_colored([0.5, 1.0, 0.5, 1.0], "Highlight ON");
                                 }
@@ -2287,7 +2348,11 @@ impl AppState {
                     // Draw status-message toast in the bottom-left corner
                     if let Some((msg, set_at)) = &self.status_message {
                         let elapsed = set_at.elapsed().as_secs_f32();
-                        let alpha = if elapsed < 2.5 { 1.0_f32 } else { 1.0 - (elapsed - 2.5) / 0.5 };
+                        let alpha = if elapsed < 2.5 {
+                            1.0_f32
+                        } else {
+                            1.0 - (elapsed - 2.5) / 0.5
+                        };
                         let draw_list = ui.get_foreground_draw_list();
                         let padding = 10.0_f32;
                         let inner_pad_x = 8.0_f32;
@@ -2402,7 +2467,8 @@ impl AppState {
                     if self.waiting_for_drop && !self.hovering_file {
                         let cx = ui_width / 2.0;
                         let cy = ui_height / 2.0;
-                        let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([20.0, 16.0]));
+                        let _padding =
+                            ui.push_style_var(imgui::StyleVar::WindowPadding([20.0, 16.0]));
                         if let Some(_win) = ui
                             .window("##drop_hint")
                             .position([cx, cy], imgui::Condition::Always)
@@ -2419,12 +2485,17 @@ impl AppState {
                             ui.text("Drop image files or folders here");
                             ui.spacing();
                             ui.text_colored([0.7, 0.7, 0.7, 1.0], "1 path \u{2192} single view");
-                            ui.text_colored([0.7, 0.7, 0.7, 1.0], "2 paths \u{2192} comparison view");
+                            ui.text_colored(
+                                [0.7, 0.7, 0.7, 1.0],
+                                "2 paths \u{2192} comparison view",
+                            );
                         }
                     }
 
                     // Show left/right drop-zone panels during file hover (or hover + waiting).
-                    if self.hovering_file || (self.waiting_for_drop && !self.pending_drop_paths.is_empty()) {
+                    if self.hovering_file
+                        || (self.waiting_for_drop && !self.pending_drop_paths.is_empty())
+                    {
                         let w = ui_width;
                         let h = ui_height;
                         let half = w / 2.0;
@@ -2435,7 +2506,8 @@ impl AppState {
                         // Left/Right arrow to choose the target side.
                         let over_left = self.drop_target_left;
 
-                        let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([12.0, 10.0]));
+                        let _padding =
+                            ui.push_style_var(imgui::StyleVar::WindowPadding([12.0, 10.0]));
 
                         // Left panel
                         let left_alpha: f32 = if over_left { 0.55 } else { 0.25 };
@@ -2452,12 +2524,20 @@ impl AppState {
                             .begin()
                         {
                             // Centre the label inside the panel
-                            let label = if self.waiting_for_drop { "Drop here" } else { "Left" };
+                            let label = if self.waiting_for_drop {
+                                "Drop here"
+                            } else {
+                                "Left"
+                            };
                             let label_size = ui.calc_text_size(label);
                             let pad_x = (half - label_size[0]).max(0.0) / 2.0;
                             let pad_y = (h - label_size[1]).max(0.0) / 2.0;
                             ui.set_cursor_pos([pad_x, pad_y]);
-                            let text_col = if over_left { [1.0, 1.0, 1.0, 1.0] } else { [0.8, 0.8, 0.8, 0.7] };
+                            let text_col = if over_left {
+                                [1.0, 1.0, 1.0, 1.0]
+                            } else {
+                                [0.8, 0.8, 0.8, 0.7]
+                            };
                             ui.text_colored(text_col, label);
                         }
 
@@ -2475,12 +2555,20 @@ impl AppState {
                             .focus_on_appearing(false)
                             .begin()
                         {
-                            let label = if self.waiting_for_drop { "Drop here" } else { "Right" };
+                            let label = if self.waiting_for_drop {
+                                "Drop here"
+                            } else {
+                                "Right"
+                            };
                             let label_size = ui.calc_text_size(label);
                             let pad_x = (half - label_size[0]).max(0.0) / 2.0;
                             let pad_y = (h - label_size[1]).max(0.0) / 2.0;
                             ui.set_cursor_pos([pad_x, pad_y]);
-                            let text_col = if over_left { [0.8, 0.8, 0.8, 0.7] } else { [1.0, 1.0, 1.0, 1.0] };
+                            let text_col = if over_left {
+                                [0.8, 0.8, 0.8, 0.7]
+                            } else {
+                                [1.0, 1.0, 1.0, 1.0]
+                            };
                             ui.text_colored(text_col, label);
                         }
                     }
@@ -2586,7 +2674,7 @@ impl AppState {
                     zoom_level: self.zoom_level,
                     zoom_center: [
                         self.fixed_zoom_center.0 + self.zoom_center_offset.0,
-                        self.fixed_zoom_center.1 + self.zoom_center_offset.1
+                        self.fixed_zoom_center.1 + self.zoom_center_offset.1,
                     ],
                     window_size: [window_size.width as f32, window_size.height as f32],
                     show_image1,
@@ -2628,10 +2716,12 @@ impl AppState {
 
             let draw_data = self.imgui_context.render();
             if draw_data.draw_lists_count() > 0 {
-                if let Err(e) = self
-                    .imgui_renderer
-                    .render(draw_data, &self.queue, &self.device, &mut render_pass)
-                {
+                if let Err(e) = self.imgui_renderer.render(
+                    draw_data,
+                    &self.queue,
+                    &self.device,
+                    &mut render_pass,
+                ) {
                     warn!("Failed to render ImGui: {}", e);
                 }
             } else {
@@ -2649,10 +2739,10 @@ impl AppState {
             let cursor_v = self.cursor_y / render_height;
             let zoom_center_x = self.fixed_zoom_center.0 + self.zoom_center_offset.0;
             let zoom_center_y = self.fixed_zoom_center.1 + self.zoom_center_offset.1;
-            let zoomed_u = (zoom_center_x + (cursor_u - zoom_center_x) / self.zoom_level)
-                .clamp(0.0, 1.0);
-            let zoomed_v = (zoom_center_y + (cursor_v - zoom_center_y) / self.zoom_level)
-                .clamp(0.0, 1.0);
+            let zoomed_u =
+                (zoom_center_x + (cursor_u - zoom_center_x) / self.zoom_level).clamp(0.0, 1.0);
+            let zoomed_v =
+                (zoom_center_y + (cursor_v - zoom_center_y) / self.zoom_level).clamp(0.0, 1.0);
             let px = ((zoomed_u * left_texture.width() as f32) as u32)
                 .min(left_texture.width().saturating_sub(1));
             let py = ((zoomed_v * left_texture.height() as f32) as u32)
@@ -2692,9 +2782,11 @@ impl AppState {
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
-            let mut screenshot_encoder = self.device.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor { label: Some("Screenshot Encoder") },
-            );
+            let mut screenshot_encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Screenshot Encoder"),
+                    });
             screenshot_encoder.copy_texture_to_buffer(
                 output.texture.as_image_copy(),
                 wgpu::ImageCopyBuffer {
@@ -2705,12 +2797,19 @@ impl AppState {
                         rows_per_image: Some(height),
                     },
                 },
-                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
             );
-            self.queue.submit(std::iter::once(screenshot_encoder.finish()));
+            self.queue
+                .submit(std::iter::once(screenshot_encoder.finish()));
             let buffer_slice = buffer.slice(..);
             let (tx, rx) = mpsc::channel();
-            buffer_slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+            buffer_slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
             // Poll until the GPU has finished writing into the buffer.
             self.device.poll(wgpu::Maintain::Wait);
             match rx.recv() {
@@ -2739,13 +2838,21 @@ impl AppState {
                             let row_data = &raw[row_start..row_start + (width * 4) as usize];
                             if is_bgra {
                                 for chunk in row_data.chunks(4) {
-                                    pixels.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
+                                    pixels.extend_from_slice(&[
+                                        chunk[2], chunk[1], chunk[0], chunk[3],
+                                    ]);
                                 }
                             } else {
                                 pixels.extend_from_slice(row_data);
                             }
                         }
-                        let msg = match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8) {
+                        let msg = match image::save_buffer(
+                            &path,
+                            &pixels,
+                            width,
+                            height,
+                            image::ColorType::Rgba8,
+                        ) {
                             Ok(_) => {
                                 info!("Screenshot saved to {}", path);
                                 format!("Screenshot saved: {}", path)
@@ -2764,7 +2871,8 @@ impl AppState {
                 }
                 Err(e) => {
                     warn!("Screenshot channel receive failed: {}", e);
-                    self.status_message = Some((format!("Screenshot failed: {}", e), Instant::now()));
+                    self.status_message =
+                        Some((format!("Screenshot failed: {}", e), Instant::now()));
                 }
             }
         }
@@ -2897,14 +3005,20 @@ impl AppState {
     }
 
     pub fn next_frame(&mut self) {
-        let frame_changed = self.player.write().next_frame(self.comparison_mode == ComparisonMode::Flip);
+        let frame_changed = self
+            .player
+            .write()
+            .next_frame(self.comparison_mode == ComparisonMode::Flip);
         if frame_changed {
             self.load_and_update_textures();
         }
     }
 
     pub fn previous_frame(&mut self) {
-        let frame_changed = self.player.write().previous_frame(self.comparison_mode == ComparisonMode::Flip);
+        let frame_changed = self
+            .player
+            .write()
+            .previous_frame(self.comparison_mode == ComparisonMode::Flip);
         if frame_changed {
             self.load_and_update_textures();
         }
@@ -2983,8 +3097,7 @@ impl AppState {
                     return;
                 }
                 Err(e) => {
-                    self.status_message =
-                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    self.status_message = Some((format!("Invalid drop: {}", e), Instant::now()));
                     return;
                 }
             };
@@ -2998,16 +3111,19 @@ impl AppState {
                     return;
                 }
                 Err(e) => {
-                    self.status_message =
-                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    self.status_message = Some((format!("Invalid drop: {}", e), Instant::now()));
                     return;
                 }
             };
             let msg = format!(
                 "Loaded left: {} | right: {}",
-                paths[0].file_name().map(|n| n.to_string_lossy().into_owned())
+                paths[0]
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| paths[0].to_string_lossy().into_owned()),
-                paths[1].file_name().map(|n| n.to_string_lossy().into_owned())
+                paths[1]
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| paths[1].to_string_lossy().into_owned()),
             );
             (imgs1, imgs2, false, msg)
@@ -3023,13 +3139,14 @@ impl AppState {
                     return;
                 }
                 Err(e) => {
-                    self.status_message =
-                        Some((format!("Invalid drop: {}", e), Instant::now()));
+                    self.status_message = Some((format!("Invalid drop: {}", e), Instant::now()));
                     return;
                 }
             };
 
-            let name = paths[0].file_name().map(|n| n.to_string_lossy().into_owned())
+            let name = paths[0]
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| paths[0].to_string_lossy().into_owned());
 
             if self.waiting_for_drop {
@@ -3128,7 +3245,11 @@ impl AppState {
         }
 
         if let winit::event::Event::WindowEvent {
-            event: winit::event::WindowEvent::ScaleFactorChanged { scale_factor, new_inner_size },
+            event:
+                winit::event::WindowEvent::ScaleFactorChanged {
+                    scale_factor,
+                    new_inner_size,
+                },
             ..
         } = event
         {
@@ -3152,8 +3273,7 @@ impl AppState {
             // and we only write the buffer once at the end of this branch.
             self.update_cursor_state(pos.0, pos.1);
             if let Some(start) = self.drag_zoom_start {
-                self.drag_zoom_current =
-                    self.constrain_drag_to_window_aspect(start, pos);
+                self.drag_zoom_current = self.constrain_drag_to_window_aspect(start, pos);
             }
             if self.marker_drag_start.is_some() {
                 self.marker_drag_current = pos;
@@ -3283,10 +3403,18 @@ impl AppState {
                 VirtualKeyCode::Space => {
                     self.toggle_play_pause();
                 }
-                VirtualKeyCode::Up => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0)),
-                VirtualKeyCode::Down => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0)),
-                VirtualKeyCode::Q => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0)),
-                VirtualKeyCode::E => self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0)),
+                VirtualKeyCode::Up => {
+                    self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0))
+                }
+                VirtualKeyCode::Down => {
+                    self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0))
+                }
+                VirtualKeyCode::Q => {
+                    self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0))
+                }
+                VirtualKeyCode::E => {
+                    self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0))
+                }
                 VirtualKeyCode::LBracket => {
                     self.player.write().decrease_playback_speed();
                 }
@@ -3316,10 +3444,8 @@ impl AppState {
                     } else {
                         self.view_mode = ViewMode::Solo;
                         self.solo_view_source = 0;
-                        self.status_message = Some((
-                            format!("Solo: {}", self.left_label),
-                            Instant::now(),
-                        ));
+                        self.status_message =
+                            Some((format!("Solo: {}", self.left_label), Instant::now()));
                     }
                     self.update_uniform_buffer();
                 }
@@ -3331,10 +3457,8 @@ impl AppState {
                     } else {
                         self.view_mode = ViewMode::Solo;
                         self.solo_view_source = 1;
-                        self.status_message = Some((
-                            format!("Solo: {}", self.right_label),
-                            Instant::now(),
-                        ));
+                        self.status_message =
+                            Some((format!("Solo: {}", self.right_label), Instant::now()));
                     }
                     self.update_uniform_buffer();
                 }
@@ -3371,23 +3495,30 @@ impl AppState {
                 VirtualKeyCode::Z => {
                     self.peek_zoom_active = true;
                 }
-                VirtualKeyCode::X if !self.single_image_mode && self.view_mode != ViewMode::Solo => {
+                VirtualKeyCode::X
+                    if !self.single_image_mode && self.view_mode != ViewMode::Solo =>
+                {
                     self.cycle_peek_image_mode();
                 }
                 _ => {}
             }
         }
 
-        if let winit::event::Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } = event {
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::MouseWheel { delta, .. },
+            ..
+        } = event
+        {
             self.handle_zoom(delta);
         }
 
         if let winit::event::Event::WindowEvent {
-            event: WindowEvent::MouseInput {
-                button: winit::event::MouseButton::Left,
-                state,
-                ..
-            },
+            event:
+                WindowEvent::MouseInput {
+                    button: winit::event::MouseButton::Left,
+                    state,
+                    ..
+                },
             ..
         } = event
         {
@@ -3400,10 +3531,8 @@ impl AppState {
                             self.marker_drag_current = start;
                         } else {
                             // Start a pan drag: record the effective zoom center at drag start.
-                            let effective_cx =
-                                self.fixed_zoom_center.0 + self.zoom_center_offset.0;
-                            let effective_cy =
-                                self.fixed_zoom_center.1 + self.zoom_center_offset.1;
+                            let effective_cx = self.fixed_zoom_center.0 + self.zoom_center_offset.0;
+                            let effective_cy = self.fixed_zoom_center.1 + self.zoom_center_offset.1;
                             // Merge offset into fixed center so zoom_center_offset tracks only this drag.
                             self.fixed_zoom_center = (effective_cx, effective_cy);
                             self.zoom_center_offset = (0.0, 0.0);
@@ -3421,10 +3550,8 @@ impl AppState {
                         if dx > MIN_DRAG_DISTANCE_PX || dy > MIN_DRAG_DISTANCE_PX {
                             // Convert screen px → image UV using current zoom/pan state.
                             let (x_off, y_off, rw, rh) = self.compute_render_rect();
-                            let zoom_cx =
-                                self.fixed_zoom_center.0 + self.zoom_center_offset.0;
-                            let zoom_cy =
-                                self.fixed_zoom_center.1 + self.zoom_center_offset.1;
+                            let zoom_cx = self.fixed_zoom_center.0 + self.zoom_center_offset.0;
+                            let zoom_cy = self.fixed_zoom_center.1 + self.zoom_center_offset.1;
                             let zoom = self.zoom_level;
                             let to_uv = |sx: f32, sy: f32| -> (f32, f32) {
                                 let suv_x = (sx - x_off) / rw.max(1.0);
@@ -3451,11 +3578,12 @@ impl AppState {
 
         // Right-click drag: zoom to a selected region.
         if let winit::event::Event::WindowEvent {
-            event: WindowEvent::MouseInput {
-                button: winit::event::MouseButton::Right,
-                state,
-                ..
-            },
+            event:
+                WindowEvent::MouseInput {
+                    button: winit::event::MouseButton::Right,
+                    state,
+                    ..
+                },
             ..
         } = event
         {
@@ -3481,7 +3609,11 @@ impl AppState {
             }
         }
 
-        if let winit::event::Event::WindowEvent { event: WindowEvent::Touch(touch), .. } = event {
+        if let winit::event::Event::WindowEvent {
+            event: WindowEvent::Touch(touch),
+            ..
+        } = event
+        {
             self.handle_touch(touch);
         }
 
@@ -3586,12 +3718,10 @@ impl AppState {
 
     fn handle_zoom(&mut self, delta: &winit::event::MouseScrollDelta) {
         let zoom_factor = match delta {
-            winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                1.0 + y.signum() * 0.1
-            }
-            winit::event::MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition { y, .. }) => {
-                1.0 + (y / 100.0) as f32
-            }
+            winit::event::MouseScrollDelta::LineDelta(_, y) => 1.0 + y.signum() * 0.1,
+            winit::event::MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition {
+                y, ..
+            }) => 1.0 + (y / 100.0) as f32,
         };
 
         let new_zoom_level = (self.zoom_level * zoom_factor).clamp(1.0, MAX_ZOOM_LEVEL);
@@ -3663,12 +3793,19 @@ impl AppState {
     fn update_uniform_buffer(&self) {
         let player = self.player.read();
         let (left_texture, right_texture) = (player.get_left_texture(), player.get_right_texture());
-        
-        let (image1_size, image2_size) = if let (Some(left), Some(right)) = (left_texture, right_texture) {
-            ([left.width() as f32, left.height() as f32], [right.width() as f32, right.height() as f32])
-        } else {
-            ([self.size.width as f32, self.size.height as f32], [self.size.width as f32, self.size.height as f32])
-        };
+
+        let (image1_size, image2_size) =
+            if let (Some(left), Some(right)) = (left_texture, right_texture) {
+                (
+                    [left.width() as f32, left.height() as f32],
+                    [right.width() as f32, right.height() as f32],
+                )
+            } else {
+                (
+                    [self.size.width as f32, self.size.height as f32],
+                    [self.size.width as f32, self.size.height as f32],
+                )
+            };
 
         let (show_image1, show_image2) = self.effective_show_images();
 
@@ -3682,7 +3819,7 @@ impl AppState {
             zoom_level: self.zoom_level,
             zoom_center: [
                 self.fixed_zoom_center.0 + self.zoom_center_offset.0,
-                self.fixed_zoom_center.1 + self.zoom_center_offset.1
+                self.fixed_zoom_center.1 + self.zoom_center_offset.1,
             ],
             window_size: [self.size.width as f32, self.size.height as f32],
             show_image1,
@@ -3697,7 +3834,8 @@ impl AppState {
             peek_show_image: self.effective_peek_image_mode().as_f32(),
         };
 
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }
 
     fn handle_touch(&mut self, touch: &winit::event::Touch) {
@@ -3721,9 +3859,13 @@ impl AppState {
                         } else {
                             // Vertical swipe
                             if dy > 0.0 {
-                                self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, 1.0));
+                                self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(
+                                    0.0, 1.0,
+                                ));
                             } else {
-                                self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(0.0, -1.0));
+                                self.handle_zoom(&winit::event::MouseScrollDelta::LineDelta(
+                                    0.0, -1.0,
+                                ));
                             }
                         }
                         self.swipe_start = None;
@@ -3768,8 +3910,8 @@ impl AppState {
     }
 
     fn adjust_peek_zoom_factor(&mut self, delta: f32) {
-        self.peek_zoom_factor = (self.peek_zoom_factor + delta)
-            .clamp(MIN_PEEK_ZOOM_FACTOR, MAX_PEEK_ZOOM_FACTOR);
+        self.peek_zoom_factor =
+            (self.peek_zoom_factor + delta).clamp(MIN_PEEK_ZOOM_FACTOR, MAX_PEEK_ZOOM_FACTOR);
         self.status_message = Some((
             format!("Peek zoom: {:.2}x", self.peek_zoom_factor),
             Instant::now(),
@@ -3807,19 +3949,14 @@ impl AppState {
         for _ in 0..5 {
             self.peek_image_mode = self.peek_image_mode.cycle();
             if self.is_peek_mode_available(self.peek_image_mode) {
-                self.status_message = Some((
-                    self.peek_image_mode.label().to_string(),
-                    Instant::now(),
-                ));
+                self.status_message =
+                    Some((self.peek_image_mode.label().to_string(), Instant::now()));
                 self.update_uniform_buffer();
                 return;
             }
         }
         self.peek_image_mode = current_mode;
-        self.status_message = Some((
-            self.peek_image_mode.label().to_string(),
-            Instant::now(),
-        ));
+        self.status_message = Some((self.peek_image_mode.label().to_string(), Instant::now()));
         self.update_uniform_buffer();
     }
 
@@ -3951,11 +4088,13 @@ impl AppState {
                 match image::save_buffer(&path, &data, width, height, image::ColorType::Rgba8) {
                     Ok(_) => {
                         info!("FLIP diff image saved to {}", path);
-                        self.status_message = Some((format!("FLIP diff saved: {}", path), Instant::now()));
+                        self.status_message =
+                            Some((format!("FLIP diff saved: {}", path), Instant::now()));
                     }
                     Err(e) => {
                         warn!("Failed to save FLIP diff image: {}", e);
-                        self.status_message = Some((format!("Failed to save FLIP diff: {}", e), Instant::now()));
+                        self.status_message =
+                            Some((format!("Failed to save FLIP diff: {}", e), Instant::now()));
                     }
                 }
             }
@@ -3964,7 +4103,10 @@ impl AppState {
                     "No FLIP diff image available for frames ({}, {}). Enable FLIP mode first.",
                     left_index, right_index
                 );
-                self.status_message = Some(("No FLIP diff available. Press F to enable FLIP mode first.".to_string(), Instant::now()));
+                self.status_message = Some((
+                    "No FLIP diff available. Press F to enable FLIP mode first.".to_string(),
+                    Instant::now(),
+                ));
             }
         }
     }
@@ -4010,18 +4152,20 @@ impl AppState {
             player.get_current_frame_image_data(right_index, false)
         };
         let flip_diff = if self.comparison_mode == ComparisonMode::Flip && !self.single_image_mode {
-            player.get_flip_diff_raw_data(left_index, right_index).map(|(mut pixels, w, h)| {
-                // Apply diff_multiplier: amplify the FLIP colormap brightness.
-                let factor = self.diff_enhance_factor;
-                if (factor - 1.0).abs() > f32::EPSILON {
-                    for chunk in pixels.chunks_mut(4) {
-                        chunk[0] = ((chunk[0] as f32 * factor).min(255.0)) as u8;
-                        chunk[1] = ((chunk[1] as f32 * factor).min(255.0)) as u8;
-                        chunk[2] = ((chunk[2] as f32 * factor).min(255.0)) as u8;
+            player
+                .get_flip_diff_raw_data(left_index, right_index)
+                .map(|(mut pixels, w, h)| {
+                    // Apply diff_multiplier: amplify the FLIP colormap brightness.
+                    let factor = self.diff_enhance_factor;
+                    if (factor - 1.0).abs() > f32::EPSILON {
+                        for chunk in pixels.chunks_mut(4) {
+                            chunk[0] = ((chunk[0] as f32 * factor).min(255.0)) as u8;
+                            chunk[1] = ((chunk[1] as f32 * factor).min(255.0)) as u8;
+                            chunk[2] = ((chunk[2] as f32 * factor).min(255.0)) as u8;
+                        }
                     }
-                }
-                (pixels, w, h)
-            })
+                    (pixels, w, h)
+                })
         } else if self.comparison_mode == ComparisonMode::AbsDiff && !self.single_image_mode {
             // Compute per-pixel abs diff from the two source images.
             let left_data = player.get_current_frame_image_data(left_index, true);
@@ -4029,12 +4173,19 @@ impl AppState {
             match (left_data, right_data) {
                 (Some((lp, lw, lh)), Some((rp, rw, rh))) if lw == rw && lh == rh => {
                     let factor = self.diff_enhance_factor;
-                    let pixels: Vec<u8> = lp.chunks(4).zip(rp.chunks(4)).flat_map(|(l, r)| {
-                        let dr = ((l[0] as i16 - r[0] as i16).abs() as f32 * factor).min(255.0) as u8;
-                        let dg = ((l[1] as i16 - r[1] as i16).abs() as f32 * factor).min(255.0) as u8;
-                        let db = ((l[2] as i16 - r[2] as i16).abs() as f32 * factor).min(255.0) as u8;
-                        [dr, dg, db, 255u8]
-                    }).collect();
+                    let pixels: Vec<u8> = lp
+                        .chunks(4)
+                        .zip(rp.chunks(4))
+                        .flat_map(|(l, r)| {
+                            let dr = ((l[0] as i16 - r[0] as i16).abs() as f32 * factor).min(255.0)
+                                as u8;
+                            let dg = ((l[1] as i16 - r[1] as i16).abs() as f32 * factor).min(255.0)
+                                as u8;
+                            let db = ((l[2] as i16 - r[2] as i16).abs() as f32 * factor).min(255.0)
+                                as u8;
+                            [dr, dg, db, 255u8]
+                        })
+                        .collect();
                     Some((pixels, lw, lh))
                 }
                 _ => None,
@@ -4085,8 +4236,11 @@ impl AppState {
         if self.marker_overlay.visible && !self.marker_overlay.markers.is_empty() {
             let zoom_level = self.zoom_level;
             let (cx, cy) = zoom_center;
-            let transformed: Vec<Marker> = self.marker_overlay.markers.iter().map(|m| {
-                Marker {
+            let transformed: Vec<Marker> = self
+                .marker_overlay
+                .markers
+                .iter()
+                .map(|m| Marker {
                     id: m.id,
                     x1: cx + (m.x1 - cx) * zoom_level,
                     y1: cy + (m.y1 - cy) * zoom_level,
@@ -4094,8 +4248,8 @@ impl AppState {
                     y2: cy + (m.y2 - cy) * zoom_level,
                     label: m.label.clone(),
                     color: m.color,
-                }
-            }).collect();
+                })
+                .collect();
             for (pixels, width, height) in &mut panels {
                 draw_markers_on_image(pixels, *width, *height, &transformed);
             }
@@ -4109,11 +4263,7 @@ impl AppState {
                 // None and Overlay have no separate diff panel.
                 ComparisonMode::None | ComparisonMode::Overlay => "",
             };
-            let panel_labels: [&str; 3] = [
-                &left_frame_label,
-                &right_frame_label,
-                diff_label,
-            ];
+            let panel_labels: [&str; 3] = [&left_frame_label, &right_frame_label, diff_label];
             for (i, (pixels, width, height)) in panels.iter_mut().enumerate() {
                 if let Some(label) = panel_labels.get(i) {
                     draw_label_bottom_left_on_image(pixels, *width, *height, label);
@@ -4122,20 +4272,36 @@ impl AppState {
         }
 
         if panels.is_empty() {
-            self.status_message = Some(("No images available for combined screenshot.".to_string(), Instant::now()));
+            self.status_message = Some((
+                "No images available for combined screenshot.".to_string(),
+                Instant::now(),
+            ));
             return;
         }
 
-        let (combined_pixels, combined_width, combined_height) = stitch_images_side_by_side(&panels);
+        let (combined_pixels, combined_width, combined_height) =
+            stitch_images_side_by_side(&panels);
         let path = generate_output_filename("combined_screenshot", "png");
-        match image::save_buffer(&path, &combined_pixels, combined_width, combined_height, image::ColorType::Rgba8) {
+        match image::save_buffer(
+            &path,
+            &combined_pixels,
+            combined_width,
+            combined_height,
+            image::ColorType::Rgba8,
+        ) {
             Ok(_) => {
                 info!("Combined screenshot saved to {}", path);
-                self.status_message = Some((format!("Combined screenshot saved: {}", path), Instant::now()));
+                self.status_message = Some((
+                    format!("Combined screenshot saved: {}", path),
+                    Instant::now(),
+                ));
             }
             Err(e) => {
                 warn!("Failed to save combined screenshot: {}", e);
-                self.status_message = Some((format!("Failed to save combined screenshot: {}", e), Instant::now()));
+                self.status_message = Some((
+                    format!("Failed to save combined screenshot: {}", e),
+                    Instant::now(),
+                ));
             }
         }
     }
@@ -4206,8 +4372,12 @@ fn crop_image_to_zoom(
         bottom_px = (top_px + 1).min(height);
     }
 
-    let crop_w = right_px.saturating_sub(left_px).min(width.saturating_sub(left_px));
-    let crop_h = bottom_px.saturating_sub(top_px).min(height.saturating_sub(top_px));
+    let crop_w = right_px
+        .saturating_sub(left_px)
+        .min(width.saturating_sub(left_px));
+    let crop_h = bottom_px
+        .saturating_sub(top_px)
+        .min(height.saturating_sub(top_px));
 
     // Return unchanged if degenerate (no visible area) or nothing to crop.
     if crop_w == 0 || crop_h == 0 {
@@ -4229,9 +4399,8 @@ fn crop_image_to_zoom(
     // Scale the cropped region back up to the original image dimensions using
     // nearest-neighbor filtering, matching the nearest-filter texture sampler
     // used by the rendering shader.
-    let cropped_img =
-        image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(crop_w, crop_h, cropped)
-            .expect("cropped buffer dimensions are consistent");
+    let cropped_img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(crop_w, crop_h, cropped)
+        .expect("cropped buffer dimensions are consistent");
     let scaled = image::imageops::resize(
         &cropped_img,
         width,
@@ -4327,8 +4496,8 @@ fn draw_markers_on_image(pixels: &mut [u8], width: u32, height: u32, markers: &[
     const MARKER_THICKNESS: i32 = 2;
     const CHAR_W: i32 = 8;
     const LABEL_GAP: i32 = 11; // pixels above the marker top edge for the label
-    const PAD_X: i32 = 2;      // horizontal padding around label text
-    const PAD_Y: i32 = 1;      // vertical padding around label text
+    const PAD_X: i32 = 2; // horizontal padding around label text
+    const PAD_Y: i32 = 1; // vertical padding around label text
 
     for marker in markers {
         let color = [
@@ -4442,17 +4611,29 @@ fn generate_output_filename(prefix: &str, extension: &str) -> String {
     let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    format!("{}_{}.{:03}.{}", prefix, d.as_secs(), d.subsec_millis(), extension)
+    format!(
+        "{}_{}.{:03}.{}",
+        prefix,
+        d.as_secs(),
+        d.subsec_millis(),
+        extension
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{draw_markers_on_image, generate_output_filename, stitch_images_side_by_side, MarkerOverlay};
+    use super::{
+        draw_markers_on_image, generate_output_filename, stitch_images_side_by_side, MarkerOverlay,
+    };
 
     #[test]
     fn test_generate_output_filename_format() {
         let name = generate_output_filename("screenshot", "png");
-        assert!(name.starts_with("screenshot_"), "should start with prefix: {}", name);
+        assert!(
+            name.starts_with("screenshot_"),
+            "should start with prefix: {}",
+            name
+        );
         assert!(name.ends_with(".png"), "should end with .png: {}", name);
         // Format is screenshot_{secs}.{millis}.png — strip prefix and extension
         let inner = name
@@ -4473,13 +4654,22 @@ mod tests {
             "millis should be numeric digits: {}",
             parts[1]
         );
-        assert_eq!(parts[1].len(), 3, "millis should be zero-padded to 3 digits: {}", parts[1]);
+        assert_eq!(
+            parts[1].len(),
+            3,
+            "millis should be zero-padded to 3 digits: {}",
+            parts[1]
+        );
     }
 
     #[test]
     fn test_generate_output_filename_flip_diff() {
         let name = generate_output_filename("flip_diff", "png");
-        assert!(name.starts_with("flip_diff_"), "should start with flip_diff_: {}", name);
+        assert!(
+            name.starts_with("flip_diff_"),
+            "should start with flip_diff_: {}",
+            name
+        );
         assert!(name.ends_with(".png"), "should end with .png: {}", name);
         // Format is flip_diff_{secs}.{millis}.png
         let inner = name
@@ -4534,7 +4724,10 @@ mod tests {
             pixels.extend_from_slice(&raw[row_start..row_start + (width * 4) as usize]);
         }
 
-        assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(
+            pixels,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
     }
 
     /// Verifies that `stitch_images_side_by_side` places two 1×1 panels next to each other.
@@ -4557,18 +4750,34 @@ mod tests {
     fn test_stitch_images_height_padding() {
         // Panel 1: 1×2 (green column)
         let green_top: Vec<u8> = vec![0, 255, 0, 255, 0, 255, 0, 255]; // 2 rows
-        // Panel 2: 1×1 (red pixel — shorter than panel 1)
+                                                                       // Panel 2: 1×1 (red pixel — shorter than panel 1)
         let red: Vec<u8> = vec![255, 0, 0, 255];
         let panels = vec![(green_top, 1u32, 2u32), (red, 1u32, 1u32)];
         let (combined, width, height) = stitch_images_side_by_side(&panels);
         assert_eq!(width, 2);
         assert_eq!(height, 2);
         // Row 0: green | red
-        assert_eq!(&combined[0..4], &[0, 255, 0, 255], "row0 col0 should be green");
-        assert_eq!(&combined[4..8], &[255, 0, 0, 255], "row0 col1 should be red");
+        assert_eq!(
+            &combined[0..4],
+            &[0, 255, 0, 255],
+            "row0 col0 should be green"
+        );
+        assert_eq!(
+            &combined[4..8],
+            &[255, 0, 0, 255],
+            "row0 col1 should be red"
+        );
         // Row 1: green | transparent (zero-initialised)
-        assert_eq!(&combined[8..12], &[0, 255, 0, 255], "row1 col0 should be green");
-        assert_eq!(&combined[12..16], &[0, 0, 0, 0], "row1 col1 should be transparent padding");
+        assert_eq!(
+            &combined[8..12],
+            &[0, 255, 0, 255],
+            "row1 col0 should be green"
+        );
+        assert_eq!(
+            &combined[12..16],
+            &[0, 0, 0, 0],
+            "row1 col1 should be transparent padding"
+        );
     }
 
     #[test]
@@ -4982,7 +5191,10 @@ mod tests {
         assert_eq!(oh, h);
 
         // Extreme zoom must not be a no-op: the sampled region should change the data.
-        assert_ne!(scaled, pixels, "crop + extreme zoom should modify the image data");
+        assert_ne!(
+            scaled, pixels,
+            "crop + extreme zoom should modify the image data"
+        );
 
         // With center (0.5, 0.5) and zoom Z, the visible UV starts at:
         // u_min = center_u - 0.5 / Z, v_min = center_v - 0.5 / Z.
