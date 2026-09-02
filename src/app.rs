@@ -550,13 +550,13 @@ impl CacheDebugWindow {
                             .read()
                             .get(&(frame, is_left))
                             .cloned();
-                        
+
                         let available_time = player
                             .texture_available_times
                             .read()
                             .get(&(frame, is_left))
                             .cloned();
-                        
+
                         let playback_delay = match (switch_time, available_time) {
                             (Some(switch), Some(available)) => available.duration_since(switch),
                             _ => Duration::default(),
@@ -1128,6 +1128,7 @@ pub struct AppConfig {
     pub diff_preload_behind: usize,
     pub fps: f32,
     pub peek_zoom_factor: f32,
+    pub wait_for_flip_diff: bool,
 }
 
 pub struct AppState {
@@ -1627,6 +1628,7 @@ impl AppState {
                 diff_preload_ahead: app_config.diff_preload_ahead,
                 diff_preload_behind: app_config.diff_preload_behind,
                 single_image_mode,
+                wait_for_flip_diff: app_config.wait_for_flip_diff,
             },
             Arc::clone(&queue),
             Arc::clone(&device),
@@ -3184,6 +3186,7 @@ impl AppState {
                 diff_preload_ahead: self.app_config.diff_preload_ahead,
                 diff_preload_behind: self.app_config.diff_preload_behind,
                 single_image_mode,
+                wait_for_flip_diff: self.app_config.wait_for_flip_diff,
             },
             Arc::clone(&self.queue),
             Arc::clone(&self.device),

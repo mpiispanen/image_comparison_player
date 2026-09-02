@@ -41,6 +41,7 @@ The application accepts the following command-line arguments:
 --num-flip-diff-threads <COUNT> Number of threads for generating flip diffs (default: 4)
 --diff-preload-ahead <COUNT>  Number of diff images to preload ahead (default: 4)
 --diff-preload-behind <COUNT> Number of diff images to preload behind (default: 0)
+--wait-for-flip-diff          In FLIP mode, wait for each diff to be ready before advancing frames
 --fps <FPS>                   Frames per second (default: 30)
 --peek-zoom-factor <FACTOR>   Magnification factor for hold-to-peek zoom (default: 4.0)
 --batch-mode                  Run in headless batch mode (diff generation / video export)
