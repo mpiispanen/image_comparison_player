@@ -49,18 +49,33 @@ fn circular_distance(index: usize, current_frame: usize, frame_count: usize) -> 
     std::cmp::min(fwd, bwd)
 }
 
-fn is_flip_diff_priority(
+fn forward_distance(index: usize, current_frame: usize, frame_count: usize) -> usize {
+    (index + frame_count - current_frame) % frame_count
+}
+
+fn backward_distance(index: usize, current_frame: usize, frame_count: usize) -> usize {
+    (current_frame + frame_count - index) % frame_count
+}
+
+fn is_in_active_flip_diff_window(
     left_index: usize,
     right_index: usize,
     current_left: usize,
     current_right: usize,
     frame_count_left: usize,
     frame_count_right: usize,
-    protected_distance: usize,
+    preload_ahead: usize,
+    preload_behind: usize,
 ) -> bool {
-    let left_dist = circular_distance(left_index, current_left, frame_count_left);
-    let right_dist = circular_distance(right_index, current_right, frame_count_right);
-    left_dist <= protected_distance && right_dist <= protected_distance
+    let fwd_left = forward_distance(left_index, current_left, frame_count_left);
+    let fwd_right = forward_distance(right_index, current_right, frame_count_right);
+    if fwd_left == fwd_right && fwd_left <= preload_ahead {
+        return true;
+    }
+
+    let back_left = backward_distance(left_index, current_left, frame_count_left);
+    let back_right = backward_distance(right_index, current_right, frame_count_right);
+    back_left == back_right && back_left <= preload_behind
 }
 
 fn latest_current_frames_from_switch_times(
@@ -94,13 +109,21 @@ fn select_flip_diff_eviction_candidate(
     current_right: usize,
     frame_count_left: usize,
     frame_count_right: usize,
-    protected_distance: usize,
+    preload_ahead: usize,
+    preload_behind: usize,
 ) -> Option<(usize, usize)> {
     let (outside, inside): (Vec<(usize, usize)>, Vec<(usize, usize)>) =
         keys.iter().cloned().partition(|&(l, r)| {
-            let left_dist = circular_distance(l, current_left, frame_count_left);
-            let right_dist = circular_distance(r, current_right, frame_count_right);
-            left_dist > protected_distance || right_dist > protected_distance
+            !is_in_active_flip_diff_window(
+                l,
+                r,
+                current_left,
+                current_right,
+                frame_count_left,
+                frame_count_right,
+                preload_ahead,
+                preload_behind,
+            )
         });
 
     let candidates = if outside.is_empty() { inside } else { outside };
@@ -339,19 +362,21 @@ impl PriorityFlipDiffQueue {
         &self,
         current_left: usize,
         current_right: usize,
-        protected_distance: usize,
+        preload_ahead: usize,
+        preload_behind: usize,
     ) {
         let mut queue = self.queue.lock();
         let mut unique_requests = self.unique_requests.lock();
         queue.retain(|&(left_index, right_index)| {
-            let keep = is_flip_diff_priority(
+            let keep = is_in_active_flip_diff_window(
                 left_index,
                 right_index,
                 current_left,
                 current_right,
                 self.frame_count_left,
                 self.frame_count_right,
-                protected_distance,
+                preload_ahead,
+                preload_behind,
             );
             if !keep {
                 unique_requests.remove(&(left_index, right_index));
@@ -993,14 +1018,12 @@ impl Player {
             return;
         }
 
-        let protected_distance = std::cmp::max(
-            self.config.diff_preload_ahead,
-            self.config.diff_preload_behind,
-        );
+        let preload_ahead = self.config.diff_preload_ahead;
+        let preload_behind = self.config.diff_preload_behind;
         let current_left = self.current_frame1.load(Ordering::Relaxed);
         let current_right = self.current_frame2.load(Ordering::Relaxed);
         let queue = self.flip_diff_request_queue.lock();
-        queue.discard_non_priority(current_left, current_right, protected_distance);
+        queue.discard_non_priority(current_left, current_right, preload_ahead, preload_behind);
         queue.reprioritize(current_left, current_right);
 
         if let Some((left_index, right_index)) = queue.pop() {
@@ -1280,10 +1303,8 @@ impl Player {
             let frame_switch_times = Arc::clone(&self.frame_switch_times);
             let frame_count1 = self.frame_count1;
             let frame_count2 = self.frame_count2;
-            let protected_distance = std::cmp::max(
-                self.config.diff_preload_ahead,
-                self.config.diff_preload_behind,
-            );
+            let preload_ahead = self.config.diff_preload_ahead;
+            let preload_behind = self.config.diff_preload_behind;
 
             self.flip_diff_in_progress
                 .write()
@@ -1296,14 +1317,15 @@ impl Player {
                         current_frame_left_at_enqueue,
                         current_frame_right_at_enqueue,
                     );
-                if !is_flip_diff_priority(
+                if !is_in_active_flip_diff_window(
                     left_index,
                     right_index,
                     current_frame_left,
                     current_frame_right,
                     frame_count1,
                     frame_count2,
-                    protected_distance,
+                    preload_ahead,
+                    preload_behind,
                 ) {
                     flip_diff_in_progress
                         .write()
@@ -1413,7 +1435,8 @@ impl Player {
                             current_frame_right,
                             frame_count1,
                             frame_count2,
-                            protected_distance,
+                            preload_ahead,
+                            preload_behind,
                         ) {
                             Some(evict_key) => {
                                 cache_write.remove(&evict_key);
@@ -1724,11 +1747,18 @@ mod performance_tests {
         queue.push(8, 8);
         queue.push(4, 6);
 
-        queue.discard_non_priority(5, 5, 1);
+        queue.discard_non_priority(5, 5, 1, 1);
 
         assert_eq!(queue.pop(), Some((5, 5)));
-        assert_eq!(queue.pop(), Some((4, 6)));
         assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn test_is_in_active_flip_diff_window_requires_matching_offsets() {
+        assert!(is_in_active_flip_diff_window(6, 6, 5, 5, 10, 10, 2, 1));
+        assert!(!is_in_active_flip_diff_window(6, 5, 5, 5, 10, 10, 2, 1));
+        assert!(is_in_active_flip_diff_window(4, 4, 5, 5, 10, 10, 2, 1));
+        assert!(!is_in_active_flip_diff_window(3, 3, 5, 5, 10, 10, 2, 1));
     }
 
     // --- select_eviction_candidate tests ---
@@ -1775,15 +1805,22 @@ mod performance_tests {
     #[test]
     fn test_select_flip_diff_eviction_candidate_prefers_outside_window() {
         let keys = vec![(5, 5), (6, 6), (9, 9)];
-        let result = select_flip_diff_eviction_candidate(&keys, 5, 5, 10, 10, 1);
+        let result = select_flip_diff_eviction_candidate(&keys, 5, 5, 10, 10, 1, 1);
         assert_eq!(result, Some((9, 9)));
     }
 
     #[test]
-    fn test_select_flip_diff_eviction_candidate_uses_farthest_when_all_protected() {
+    fn test_select_flip_diff_eviction_candidate_prefers_offset_mismatch_outside_window() {
         let keys = vec![(5, 5), (5, 6), (6, 6)];
-        let result = select_flip_diff_eviction_candidate(&keys, 5, 5, 10, 10, 1);
-        assert_eq!(result, Some((6, 6)));
+        let result = select_flip_diff_eviction_candidate(&keys, 5, 5, 10, 10, 1, 1);
+        assert_eq!(result, Some((5, 6)));
+    }
+
+    #[test]
+    fn test_select_flip_diff_eviction_candidate_uses_farthest_when_all_in_active_window() {
+        let keys = vec![(5, 5), (6, 6), (7, 7)];
+        let result = select_flip_diff_eviction_candidate(&keys, 5, 5, 10, 10, 2, 0);
+        assert_eq!(result, Some((7, 7)));
     }
 
     #[test]
