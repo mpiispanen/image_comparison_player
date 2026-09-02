@@ -43,6 +43,35 @@ fn select_eviction_candidate(
     })
 }
 
+fn circular_distance(index: usize, current_frame: usize, frame_count: usize) -> usize {
+    let fwd = (index + frame_count - current_frame) % frame_count;
+    let bwd = (current_frame + frame_count - index) % frame_count;
+    std::cmp::min(fwd, bwd)
+}
+
+fn select_flip_diff_eviction_candidate(
+    keys: &[(usize, usize)],
+    current_left: usize,
+    current_right: usize,
+    frame_count_left: usize,
+    frame_count_right: usize,
+    protected_distance: usize,
+) -> Option<(usize, usize)> {
+    let (outside, inside): (Vec<(usize, usize)>, Vec<(usize, usize)>) =
+        keys.iter().cloned().partition(|&(l, r)| {
+            let left_dist = circular_distance(l, current_left, frame_count_left);
+            let right_dist = circular_distance(r, current_right, frame_count_right);
+            left_dist > protected_distance || right_dist > protected_distance
+        });
+
+    let candidates = if outside.is_empty() { inside } else { outside };
+    candidates.into_iter().max_by_key(|&(l, r)| {
+        let left_dist = circular_distance(l, current_left, frame_count_left);
+        let right_dist = circular_distance(r, current_right, frame_count_right);
+        left_dist + right_dist
+    })
+}
+
 /// A fixed-capacity ring-buffer-style texture cache that evicts the frame farthest from
 /// the current playback position when capacity is exceeded.
 pub struct RingBufferTextureCache {
@@ -213,6 +242,61 @@ impl PriorityTextureLoadQueue {
     }
 }
 
+pub struct PriorityFlipDiffQueue {
+    queue: Arc<Mutex<VecDeque<(usize, usize)>>>,
+    unique_requests: Arc<Mutex<HashSet<(usize, usize)>>>,
+    frame_count_left: usize,
+    frame_count_right: usize,
+}
+
+impl PriorityFlipDiffQueue {
+    fn new(frame_count_left: usize, frame_count_right: usize) -> Self {
+        Self {
+            queue: Arc::new(Mutex::new(VecDeque::new())),
+            unique_requests: Arc::new(Mutex::new(HashSet::new())),
+            frame_count_left,
+            frame_count_right,
+        }
+    }
+
+    fn push(&self, left_index: usize, right_index: usize) {
+        let key = (left_index, right_index);
+        let mut unique_requests = self.unique_requests.lock();
+        if !unique_requests.contains(&key) {
+            self.queue.lock().push_back(key);
+            unique_requests.insert(key);
+        }
+    }
+
+    fn pop(&self) -> Option<(usize, usize)> {
+        let mut queue = self.queue.lock();
+        let mut unique_requests = self.unique_requests.lock();
+        if let Some(request) = queue.pop_front() {
+            unique_requests.remove(&request);
+            Some(request)
+        } else {
+            None
+        }
+    }
+
+    fn reprioritize(&self, current_frame_left: usize, current_frame_right: usize) {
+        let mut queue = self.queue.lock();
+        queue
+            .make_contiguous()
+            .sort_by_key(|&(left_index, right_index)| {
+                let left_dist =
+                    circular_distance(left_index, current_frame_left, self.frame_count_left);
+                let right_dist =
+                    circular_distance(right_index, current_frame_right, self.frame_count_right);
+                left_dist + right_dist
+            });
+    }
+
+    fn contains(&self, key: &(usize, usize)) -> bool {
+        self.unique_requests.lock().contains(key)
+    }
+}
+
 type TextureProcessSender = Sender<(usize, bool, Vec<u8>, wgpu::Extent3d)>;
 type TextureProcessReceiver = Arc<Mutex<Receiver<(usize, bool, Vec<u8>, wgpu::Extent3d)>>>;
 type TextureHolder = Arc<Mutex<Option<Arc<wgpu::Texture>>>>;
@@ -321,6 +405,7 @@ pub struct Player {
     pub texture_timings: Arc<RwLock<HashMap<(usize, bool), TextureTimingInfo>>>,
     pub current_frame_set_time: Arc<Mutex<Instant>>,
     pub flip_diff_cache: FlipDiffCache,
+    pub flip_diff_request_queue: Arc<Mutex<PriorityFlipDiffQueue>>,
     flip_diff_pool: ThreadPool,
     flip_diff_sender: FlipDiffSender,
     #[allow(dead_code)]
@@ -363,7 +448,8 @@ impl Player {
         let flip_diff_receiver = Arc::new(Mutex::new(flip_diff_receiver));
 
         let single_image_mode = config.single_image_mode;
-        let sorted_time_points = Self::compute_sorted_time_points(&config.image_data1, &config.image_data2);
+        let sorted_time_points =
+            Self::compute_sorted_time_points(&config.image_data1, &config.image_data2);
 
         Self {
             config,
@@ -399,6 +485,10 @@ impl Player {
             texture_timings: Arc::new(RwLock::new(HashMap::new())),
             current_frame_set_time: Arc::new(Mutex::new(Instant::now())),
             flip_diff_cache: Arc::new(RwLock::new(HashMap::new())),
+            flip_diff_request_queue: Arc::new(Mutex::new(PriorityFlipDiffQueue::new(
+                frame_count1,
+                frame_count2,
+            ))),
             flip_diff_pool,
             flip_diff_sender,
             flip_diff_receiver,
@@ -467,7 +557,7 @@ impl Player {
         let frame_changed = self.jump_to_next_time_point(1);
         if frame_changed && show_flip_diff {
             let (current_left, current_right) = self.current_images();
-            self.generate_flip_diff(current_left, current_right);
+            self.ensure_flip_diff_generated(current_left, current_right);
         }
         frame_changed
     }
@@ -476,7 +566,7 @@ impl Player {
         let frame_changed = self.jump_to_next_time_point(-1);
         if frame_changed && show_flip_diff {
             let (current_left, current_right) = self.current_images();
-            self.generate_flip_diff(current_left, current_right);
+            self.ensure_flip_diff_generated(current_left, current_right);
         }
         frame_changed
     }
@@ -627,7 +717,11 @@ impl Player {
                         warn!(
                             "Dropping processed texture for frame {} ({}) because receiver is gone",
                             process_request.index,
-                            if process_request.is_left { "left" } else { "right" }
+                            if process_request.is_left {
+                                "left"
+                            } else {
+                                "right"
+                            }
                         );
                         return;
                     }
@@ -779,6 +873,7 @@ impl Player {
         if !self.single_image_mode && show_flip_diff {
             self.ensure_flip_diff_generated(index1, index2);
             self.preload_flip_diffs(index1, index2);
+            self.process_flip_diff_queue();
         }
     }
 
@@ -818,6 +913,29 @@ impl Player {
                 .fetch_add(1, Ordering::Relaxed);
             drop(flip_diff_cache);
             drop(flip_diff_in_progress);
+            if self.get_texture(left_index, true).is_some()
+                && self.get_texture(right_index, false).is_some()
+            {
+                let queue = self.flip_diff_request_queue.lock();
+                if !queue.contains(&(left_index, right_index)) {
+                    queue.push(left_index, right_index);
+                }
+            }
+        }
+    }
+
+    fn process_flip_diff_queue(&self) {
+        if self.config.num_flip_diff_threads == 0 {
+            return;
+        }
+
+        let queue = self.flip_diff_request_queue.lock();
+        queue.reprioritize(
+            self.current_frame1.load(Ordering::Relaxed),
+            self.current_frame2.load(Ordering::Relaxed),
+        );
+
+        if let Some((left_index, right_index)) = queue.pop() {
             self.generate_flip_diff(left_index, right_index);
         }
     }
@@ -858,7 +976,7 @@ impl Player {
 
                 if frame_changed && show_flip_diff {
                     let (new_left, new_right) = self.current_images();
-                    self.generate_flip_diff(new_left, new_right);
+                    self.ensure_flip_diff_generated(new_left, new_right);
                 }
 
                 frame_changed
@@ -999,7 +1117,9 @@ impl Player {
         Ok(texture)
     }
 
-    fn load_image_data_from_path(path: &str) -> Result<(Vec<u8>, wgpu::Extent3d), Box<dyn std::error::Error>> {
+    fn load_image_data_from_path(
+        path: &str,
+    ) -> Result<(Vec<u8>, wgpu::Extent3d), Box<dyn std::error::Error>> {
         let file = File::open(path)?;
         let file_size = file.metadata()?.len();
 
@@ -1071,10 +1191,8 @@ impl Player {
                 out
             };
 
-            let left_padded =
-                self.read_buffer(&left_buffer, (left_stride * height) as u64);
-            let right_padded =
-                self.read_buffer(&right_buffer, (right_stride * height) as u64);
+            let left_padded = self.read_buffer(&left_buffer, (left_stride * height) as u64);
+            let right_padded = self.read_buffer(&right_buffer, (right_stride * height) as u64);
 
             let left_data = strip_padding(left_padded, left_stride, width, height);
             let right_data = strip_padding(right_padded, right_stride, width, height);
@@ -1090,7 +1208,13 @@ impl Player {
             let flip_diff_cache_metrics = Arc::clone(&self.flip_diff_cache_metrics);
             let flip_diff_cache_capacity = self.flip_diff_cache_capacity;
             let current_frame_left = self.current_frame1.load(Ordering::Relaxed);
+            let current_frame_right = self.current_frame2.load(Ordering::Relaxed);
             let frame_count1 = self.frame_count1;
+            let frame_count2 = self.frame_count2;
+            let protected_distance = std::cmp::max(
+                self.config.diff_preload_ahead,
+                self.config.diff_preload_behind,
+            );
 
             self.flip_diff_in_progress
                 .write()
@@ -1098,16 +1222,9 @@ impl Player {
 
             self.flip_diff_pool.execute(move || {
                 let process_start = Instant::now();
-                let left_image = FlipImageRgb8::with_data(
-                    width,
-                    height,
-                    &rgba_to_rgb(&left_data),
-                );
-                let right_image = FlipImageRgb8::with_data(
-                    width,
-                    height,
-                    &rgba_to_rgb(&right_data),
-                );
+                let left_image = FlipImageRgb8::with_data(width, height, &rgba_to_rgb(&left_data));
+                let right_image =
+                    FlipImageRgb8::with_data(width, height, &rgba_to_rgb(&right_data));
 
                 let error_map = flip(left_image, right_image, nv_flip::DEFAULT_PIXELS_PER_DEGREE);
                 let visualized = error_map.apply_color_lut(&magma_lut());
@@ -1186,32 +1303,27 @@ impl Player {
                         Arc::new(Mutex::new(Some(texture_arc.clone()))),
                     );
 
-                    // Evict the entry with the left frame farthest from the current frame
-                    // when the cache exceeds its capacity.
+                    // Evict entries farthest from current frame pair, preferring entries
+                    // outside the active preload window.
                     while cache_write.len() > flip_diff_cache_capacity {
-                        let candidate_left_keys: Vec<usize> = cache_write
+                        let candidate_keys: Vec<(usize, usize)> = cache_write
                             .keys()
                             .filter(|&&(l, r)| !(l == left_index && r == right_index))
-                            .map(|&(l, _r)| l)
+                            .cloned()
                             .collect();
-                        match select_eviction_candidate(
-                            &candidate_left_keys,
+                        match select_flip_diff_eviction_candidate(
+                            &candidate_keys,
                             current_frame_left,
+                            current_frame_right,
                             frame_count1,
+                            frame_count2,
+                            protected_distance,
                         ) {
-                            Some(evict_left) => {
-                                let evict_key = cache_write
-                                    .keys()
-                                    .find(|&&(l, _r)| l == evict_left)
-                                    .cloned();
-                                if let Some(key) = evict_key {
-                                    cache_write.remove(&key);
-                                    flip_diff_cache_metrics
-                                        .evictions
-                                        .fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    break;
-                                }
+                            Some(evict_key) => {
+                                cache_write.remove(&evict_key);
+                                flip_diff_cache_metrics
+                                    .evictions
+                                    .fetch_add(1, Ordering::Relaxed);
                             }
                             None => break,
                         }
@@ -1295,14 +1407,25 @@ impl Player {
 
     /// Returns the raw RGBA pixel data, width, and height of the FLIP diff image
     /// for the given left/right frame pair, if it has been computed.
-    pub fn get_flip_diff_raw_data(&self, left_index: usize, right_index: usize) -> Option<(Vec<u8>, u32, u32)> {
-        self.flip_diff_raw_data.read().get(&(left_index, right_index)).cloned()
+    pub fn get_flip_diff_raw_data(
+        &self,
+        left_index: usize,
+        right_index: usize,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        self.flip_diff_raw_data
+            .read()
+            .get(&(left_index, right_index))
+            .cloned()
     }
 
     /// Load and return the raw RGBA pixel data for a specific frame from disk.
     /// Returns `(pixels, width, height)` on success, or `None` if the path is
     /// out-of-range or the image cannot be decoded.
-    pub fn get_current_frame_image_data(&self, index: usize, is_left: bool) -> Option<(Vec<u8>, u32, u32)> {
+    pub fn get_current_frame_image_data(
+        &self,
+        index: usize,
+        is_left: bool,
+    ) -> Option<(Vec<u8>, u32, u32)> {
         let image_data = if is_left {
             &self.config.image_data1
         } else {
@@ -1316,7 +1439,10 @@ impl Player {
                 Some((rgba.into_raw(), width, height))
             }
             Err(e) => {
-                warn!("Failed to load image '{}' for combined screenshot: {}", path, e);
+                warn!(
+                    "Failed to load image '{}' for combined screenshot: {}",
+                    path, e
+                );
                 None
             }
         }
@@ -1375,7 +1501,11 @@ mod performance_tests {
     #[test]
     fn test_priority_queue_push_and_pop() {
         let queue = PriorityTextureLoadQueue::new(10, 10);
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        queue.push(TextureLoadRequest::new(
+            "frame_001.png".to_string(),
+            0,
+            true,
+        ));
 
         let popped = queue.pop();
         assert!(popped.is_some());
@@ -1393,8 +1523,16 @@ mod performance_tests {
     #[test]
     fn test_priority_queue_deduplication() {
         let queue = PriorityTextureLoadQueue::new(10, 10);
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        queue.push(TextureLoadRequest::new(
+            "frame_001.png".to_string(),
+            0,
+            true,
+        ));
+        queue.push(TextureLoadRequest::new(
+            "frame_001.png".to_string(),
+            0,
+            true,
+        ));
 
         assert!(queue.pop().is_some());
         assert!(queue.pop().is_none());
@@ -1403,8 +1541,16 @@ mod performance_tests {
     #[test]
     fn test_priority_queue_left_and_right_are_distinct_keys() {
         let queue = PriorityTextureLoadQueue::new(10, 10);
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, false));
+        queue.push(TextureLoadRequest::new(
+            "frame_001.png".to_string(),
+            0,
+            true,
+        ));
+        queue.push(TextureLoadRequest::new(
+            "frame_001.png".to_string(),
+            0,
+            false,
+        ));
 
         assert!(queue.pop().is_some());
         assert!(queue.pop().is_some());
@@ -1416,7 +1562,11 @@ mod performance_tests {
         let queue = PriorityTextureLoadQueue::new(10, 10);
         assert!(!queue.contains(&(0, true)));
 
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
+        queue.push(TextureLoadRequest::new(
+            "frame_001.png".to_string(),
+            0,
+            true,
+        ));
         assert!(queue.contains(&(0, true)));
 
         queue.pop();
@@ -1426,13 +1576,49 @@ mod performance_tests {
     #[test]
     fn test_priority_queue_maintains_fifo_order() {
         let queue = PriorityTextureLoadQueue::new(10, 10);
-        queue.push(TextureLoadRequest::new("frame_001.png".to_string(), 0, true));
-        queue.push(TextureLoadRequest::new("frame_002.png".to_string(), 1, true));
-        queue.push(TextureLoadRequest::new("frame_003.png".to_string(), 2, true));
+        queue.push(TextureLoadRequest::new(
+            "frame_001.png".to_string(),
+            0,
+            true,
+        ));
+        queue.push(TextureLoadRequest::new(
+            "frame_002.png".to_string(),
+            1,
+            true,
+        ));
+        queue.push(TextureLoadRequest::new(
+            "frame_003.png".to_string(),
+            2,
+            true,
+        ));
 
         assert_eq!(queue.pop().unwrap().index, 0);
         assert_eq!(queue.pop().unwrap().index, 1);
         assert_eq!(queue.pop().unwrap().index, 2);
+    }
+
+    #[test]
+    fn test_flip_diff_priority_queue_reprioritizes_to_current_frame() {
+        let queue = PriorityFlipDiffQueue::new(10, 10);
+        queue.push(7, 7);
+        queue.push(1, 1);
+        queue.push(5, 5);
+
+        queue.reprioritize(5, 5);
+
+        assert_eq!(queue.pop(), Some((5, 5)));
+        assert_eq!(queue.pop(), Some((7, 7)));
+        assert_eq!(queue.pop(), Some((1, 1)));
+    }
+
+    #[test]
+    fn test_flip_diff_priority_queue_deduplicates_requests() {
+        let queue = PriorityFlipDiffQueue::new(10, 10);
+        queue.push(2, 2);
+        queue.push(2, 2);
+
+        assert_eq!(queue.pop(), Some((2, 2)));
+        assert_eq!(queue.pop(), None);
     }
 
     // --- select_eviction_candidate tests ---
@@ -1474,6 +1660,20 @@ mod performance_tests {
         // frame 4: fwd=(4+10-5)%10=9, bwd=(5+10-4)%10=1, min_dist=1 (nearest)
         let result = select_eviction_candidate(&[0, 1, 4], 5, 10);
         assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn test_select_flip_diff_eviction_candidate_prefers_outside_window() {
+        let keys = vec![(5, 5), (6, 6), (9, 9)];
+        let result = select_flip_diff_eviction_candidate(&keys, 5, 5, 10, 10, 1);
+        assert_eq!(result, Some((9, 9)));
+    }
+
+    #[test]
+    fn test_select_flip_diff_eviction_candidate_uses_farthest_when_all_protected() {
+        let keys = vec![(5, 5), (5, 6), (6, 6)];
+        let result = select_flip_diff_eviction_candidate(&keys, 5, 5, 10, 10, 1);
+        assert_eq!(result, Some((6, 6)));
     }
 
     /// Verifies the aligned bytes_per_row calculation used in create_buffer_and_copy_texture.
@@ -1521,14 +1721,21 @@ mod performance_tests {
             out.extend_from_slice(&padded[s..s + row_bytes]);
         }
 
-        assert_eq!(out, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(
+            out,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
     }
 }
 
 /// Convert an RGBA byte slice to an RGB byte vec, dropping the alpha channel.
 /// Pre-allocates the output buffer to avoid repeated reallocations.
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
-    debug_assert_eq!(rgba.len() % 4, 0, "RGBA buffer length must be a multiple of 4");
+    debug_assert_eq!(
+        rgba.len() % 4,
+        0,
+        "RGBA buffer length must be a multiple of 4"
+    );
     let pixel_count = rgba.len() / 4;
     let mut rgb = Vec::with_capacity(pixel_count * 3);
     for chunk in rgba.chunks_exact(4) {
@@ -1542,7 +1749,11 @@ fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
 /// Convert an RGB byte slice to an RGBA byte vec, inserting 255 for the alpha channel.
 /// Pre-allocates the output buffer to avoid repeated reallocations.
 fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
-    debug_assert_eq!(rgb.len() % 3, 0, "RGB buffer length must be a multiple of 3");
+    debug_assert_eq!(
+        rgb.len() % 3,
+        0,
+        "RGB buffer length must be a multiple of 3"
+    );
     let pixel_count = rgb.len() / 3;
     let mut rgba = Vec::with_capacity(pixel_count * 4);
     for chunk in rgb.chunks_exact(3) {
@@ -1605,7 +1816,9 @@ mod tests {
 
     #[test]
     fn test_load_image_data_from_path_ppm() {
-        let dir = std::env::temp_dir().join("icp_tests").join("player_load_ppm");
+        let dir = std::env::temp_dir()
+            .join("icp_tests")
+            .join("player_load_ppm");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pixel.ppm");
@@ -1619,7 +1832,9 @@ mod tests {
 
     #[test]
     fn test_load_image_data_from_path_pgm() {
-        let dir = std::env::temp_dir().join("icp_tests").join("player_load_pgm");
+        let dir = std::env::temp_dir()
+            .join("icp_tests")
+            .join("player_load_pgm");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pixel.pgm");
@@ -1685,12 +1900,12 @@ mod tests {
     }
 
     #[test]
-fn test_rgb_to_rgba_preallocates_expected_capacity() {
-    let pixel_count = 100usize;
-    let rgb: Vec<u8> = (0..pixel_count * 3).map(|i| (i % 256) as u8).collect();
-    let rgba = rgb_to_rgba(&rgb);
-    assert_eq!(rgba.capacity(), pixel_count * 4);
-}
+    fn test_rgb_to_rgba_preallocates_expected_capacity() {
+        let pixel_count = 100usize;
+        let rgb: Vec<u8> = (0..pixel_count * 3).map(|i| (i % 256) as u8).collect();
+        let rgba = rgb_to_rgba(&rgb);
+        assert_eq!(rgba.capacity(), pixel_count * 4);
+    }
 
     #[test]
     fn test_update_displayed_texture_pair_waits_for_both_sides() {
@@ -1839,7 +2054,11 @@ fn test_rgb_to_rgba_preallocates_expected_capacity() {
 
         // Write a 2×2 PPM (left side).
         let path_left = dir.join("left.ppm");
-        fs::write(&path_left, b"P3\n2 2\n255\n255 0 0\n0 255 0\n0 0 255\n255 255 0\n").unwrap();
+        fs::write(
+            &path_left,
+            b"P3\n2 2\n255\n255 0 0\n0 255 0\n0 0 255\n255 255 0\n",
+        )
+        .unwrap();
 
         // Write a 1×1 PPM (right side – deliberately different dimensions).
         let path_right = dir.join("right.ppm");
@@ -1847,7 +2066,7 @@ fn test_rgb_to_rgba_preallocates_expected_capacity() {
 
         // The left-side expected dimensions come from the first left image (2×2).
         let (_, left_size) = Player::load_image_data_from_path(path_left.to_str().unwrap())
-        .expect("left image should load");
+            .expect("left image should load");
         assert_eq!(left_size.width, 2);
         assert_eq!(left_size.height, 2);
 
@@ -1855,13 +2074,14 @@ fn test_rgb_to_rgba_preallocates_expected_capacity() {
         // Before the fix this call used the LEFT expected dimensions (2×2), causing
         // a mismatch error and silently dropping the right texture.
         let (_, right_size) = Player::load_image_data_from_path(path_right.to_str().unwrap())
-        .expect("right image should load");
+            .expect("right image should load");
         assert_eq!(right_size.width, 1);
         assert_eq!(right_size.height, 1);
 
         // Loading the same image again should still report its real dimensions.
-        let (_, right_size_reloaded) = Player::load_image_data_from_path(path_right.to_str().unwrap())
-        .expect("reloading image should not fail");
+        let (_, right_size_reloaded) =
+            Player::load_image_data_from_path(path_right.to_str().unwrap())
+                .expect("reloading image should not fail");
         assert_eq!(right_size_reloaded.width, 1);
         assert_eq!(right_size_reloaded.height, 1);
     }
@@ -1875,7 +2095,11 @@ fn test_rgb_to_rgba_preallocates_expected_capacity() {
         fs::create_dir_all(&dir).unwrap();
 
         let first = dir.join("first.ppm");
-        fs::write(&first, b"P3\n2 2\n255\n255 0 0\n0 255 0\n0 0 255\n255 255 0\n").unwrap();
+        fs::write(
+            &first,
+            b"P3\n2 2\n255\n255 0 0\n0 255 0\n0 0 255\n255 255 0\n",
+        )
+        .unwrap();
         let second = dir.join("second.ppm");
         fs::write(&second, b"P3\n1 1\n255\n0 0 255\n").unwrap();
 
