@@ -60,13 +60,13 @@ fn backward_distance(index: usize, current_frame: usize, frame_count: usize) -> 
 fn is_in_active_flip_diff_window(
     left_index: usize,
     right_index: usize,
-    current_left: usize,
-    current_right: usize,
+    current_frames: (usize, usize),
     frame_count_left: usize,
     frame_count_right: usize,
     preload_ahead: usize,
     preload_behind: usize,
 ) -> bool {
+    let (current_left, current_right) = current_frames;
     let fwd_left = forward_distance(left_index, current_left, frame_count_left);
     let fwd_right = forward_distance(right_index, current_right, frame_count_right);
     if fwd_left == fwd_right && fwd_left <= preload_ahead {
@@ -112,19 +112,23 @@ fn select_flip_diff_eviction_candidate(
     preload_ahead: usize,
     preload_behind: usize,
 ) -> Option<(usize, usize)> {
-    let (outside, inside): (Vec<(usize, usize)>, Vec<(usize, usize)>) =
-        keys.iter().cloned().partition(|&(l, r)| {
-            !is_in_active_flip_diff_window(
-                l,
-                r,
-                current_left,
-                current_right,
-                frame_count_left,
-                frame_count_right,
-                preload_ahead,
-                preload_behind,
-            )
-        });
+    let mut outside = Vec::new();
+    let mut inside = Vec::new();
+    for &(l, r) in keys {
+        if is_in_active_flip_diff_window(
+            l,
+            r,
+            (current_left, current_right),
+            frame_count_left,
+            frame_count_right,
+            preload_ahead,
+            preload_behind,
+        ) {
+            inside.push((l, r));
+        } else {
+            outside.push((l, r));
+        }
+    }
 
     let candidates = if outside.is_empty() { inside } else { outside };
     candidates.into_iter().max_by_key(|&(l, r)| {
@@ -354,10 +358,6 @@ impl PriorityFlipDiffQueue {
             });
     }
 
-    fn contains(&self, key: &(usize, usize)) -> bool {
-        self.unique_requests.lock().contains(key)
-    }
-
     fn discard_non_priority(
         &self,
         current_left: usize,
@@ -371,8 +371,7 @@ impl PriorityFlipDiffQueue {
             let keep = is_in_active_flip_diff_window(
                 left_index,
                 right_index,
-                current_left,
-                current_right,
+                (current_left, current_right),
                 self.frame_count_left,
                 self.frame_count_right,
                 preload_ahead,
@@ -1020,11 +1019,14 @@ impl Player {
         let preload_behind = self.config.diff_preload_behind;
         let current_left = self.current_frame1.load(Ordering::Relaxed);
         let current_right = self.current_frame2.load(Ordering::Relaxed);
-        let queue = self.flip_diff_request_queue.lock();
-        queue.discard_non_priority(current_left, current_right, preload_ahead, preload_behind);
-        queue.reprioritize(current_left, current_right);
+        let next_request = {
+            let queue = self.flip_diff_request_queue.lock();
+            queue.discard_non_priority(current_left, current_right, preload_ahead, preload_behind);
+            queue.reprioritize(current_left, current_right);
+            queue.pop()
+        };
 
-        if let Some((left_index, right_index)) = queue.pop() {
+        if let Some((left_index, right_index)) = next_request {
             self.generate_flip_diff(left_index, right_index);
         }
     }
@@ -1318,8 +1320,7 @@ impl Player {
                 if !is_in_active_flip_diff_window(
                     left_index,
                     right_index,
-                    current_frame_left,
-                    current_frame_right,
+                    (current_frame_left, current_frame_right),
                     frame_count1,
                     frame_count2,
                     preload_ahead,
@@ -1753,10 +1754,10 @@ mod performance_tests {
 
     #[test]
     fn test_is_in_active_flip_diff_window_requires_matching_offsets() {
-        assert!(is_in_active_flip_diff_window(6, 6, 5, 5, 10, 10, 2, 1));
-        assert!(!is_in_active_flip_diff_window(6, 5, 5, 5, 10, 10, 2, 1));
-        assert!(is_in_active_flip_diff_window(4, 4, 5, 5, 10, 10, 2, 1));
-        assert!(!is_in_active_flip_diff_window(3, 3, 5, 5, 10, 10, 2, 1));
+        assert!(is_in_active_flip_diff_window(6, 6, (5, 5), 10, 10, 2, 1));
+        assert!(!is_in_active_flip_diff_window(6, 5, (5, 5), 10, 10, 2, 1));
+        assert!(is_in_active_flip_diff_window(4, 4, (5, 5), 10, 10, 2, 1));
+        assert!(!is_in_active_flip_diff_window(3, 3, (5, 5), 10, 10, 2, 1));
     }
 
     // --- select_eviction_candidate tests ---
