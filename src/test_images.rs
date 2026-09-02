@@ -47,12 +47,7 @@ pub fn generate_test_images() -> Result<(PathBuf, PathBuf)> {
 }
 
 /// Left frame: warm gradient background with a red horizontal band.
-fn generate_left_frame(
-    frame: usize,
-    total: usize,
-    width: u32,
-    height: u32,
-) -> image::RgbaImage {
+fn generate_left_frame(frame: usize, total: usize, width: u32, height: u32) -> image::RgbaImage {
     let mut img = image::RgbaImage::new(width, height);
     let band_top = (frame * height as usize / total) as u32;
     let band_height = BAND_HEIGHT;
@@ -73,15 +68,10 @@ fn generate_left_frame(
 
 /// Right frame: cool gradient background with a blue horizontal band, shifted 10 px
 /// relative to the left frame so that the diff is always visible.
-fn generate_right_frame(
-    frame: usize,
-    total: usize,
-    width: u32,
-    height: u32,
-) -> image::RgbaImage {
+fn generate_right_frame(frame: usize, total: usize, width: u32, height: u32) -> image::RgbaImage {
     let mut img = image::RgbaImage::new(width, height);
-    let band_top =
-        ((frame * height as usize / total) + BAND_OFFSET).min(height as usize - BAND_HEIGHT as usize) as u32;
+    let band_top = ((frame * height as usize / total) + BAND_OFFSET)
+        .min(height as usize - BAND_HEIGHT as usize) as u32;
     let band_height = BAND_HEIGHT;
 
     for y in 0..height {

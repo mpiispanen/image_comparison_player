@@ -185,9 +185,11 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
     let mut diff_progress = 0usize;
     let mut video_progress = 0usize;
     let needs_abs_diff_image = (diff_dir.is_some() && config.diff_output_layout.uses_abs_diff())
-        || (config.video_output_path.is_some() && config.video_layout == VideoLayout::SideBySideWithDiff);
+        || (config.video_output_path.is_some()
+            && config.video_layout == VideoLayout::SideBySideWithDiff);
     let needs_flip_image = (diff_dir.is_some() && config.diff_output_layout.uses_flip())
-        || (config.video_output_path.is_some() && config.video_layout == VideoLayout::SideBySideWithFlip);
+        || (config.video_output_path.is_some()
+            && config.video_layout == VideoLayout::SideBySideWithFlip);
     let report_diff_progress =
         (needs_abs_diff_image && !config.use_existing_diffs) || needs_flip_image;
 
@@ -228,9 +230,9 @@ pub fn run_batch_mode(config: BatchConfig) -> Result<()> {
             None
         };
         let flip_diff = if needs_flip_image {
-            let r = right
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Internal error: right image is required for FLIP"))?;
+            let r = right.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Internal error: right image is required for FLIP")
+            })?;
             Some(compute_flip_diff_image(&left, r)?)
         } else {
             None
@@ -523,7 +525,11 @@ fn compute_flip_diff_image(left: &DynamicImage, right: &DynamicImage) -> Result<
 }
 
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
-    debug_assert_eq!(rgba.len() % 4, 0, "RGBA buffer length must be a multiple of 4");
+    debug_assert_eq!(
+        rgba.len() % 4,
+        0,
+        "RGBA buffer length must be a multiple of 4"
+    );
     let mut rgb = Vec::with_capacity((rgba.len() / 4) * 3);
     for chunk in rgba.chunks_exact(4) {
         rgb.push(chunk[0]);
@@ -534,7 +540,11 @@ fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
 }
 
 fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
-    debug_assert_eq!(rgb.len() % 3, 0, "RGB buffer length must be a multiple of 3");
+    debug_assert_eq!(
+        rgb.len() % 3,
+        0,
+        "RGB buffer length must be a multiple of 3"
+    );
     let mut rgba = Vec::with_capacity((rgb.len() / 3) * 4);
     for chunk in rgb.chunks_exact(3) {
         rgba.push(chunk[0]);
@@ -820,7 +830,10 @@ mod tests {
         run_batch_mode(cfg).unwrap();
 
         let out_path = diff_dir.join("side_by_side_flip_000000.png");
-        assert!(out_path.exists(), "side-by-side-flip output file should exist");
+        assert!(
+            out_path.exists(),
+            "side-by-side-flip output file should exist"
+        );
         let out = image::open(&out_path).unwrap();
         // Width should be 3x the individual frame width (left + right + flip).
         assert_eq!(
@@ -891,17 +904,17 @@ mod tests {
         match result {
             Ok(()) => {
                 // ffmpeg was available – full success.
-                assert!(video_path.exists(), "video file should exist when ffmpeg succeeds");
+                assert!(
+                    video_path.exists(),
+                    "video file should exist when ffmpeg succeeds"
+                );
             }
             Err(e) => {
                 // ffmpeg was not available – that is acceptable in this environment.
                 // The important check is that the error is about ffmpeg, not about
                 // the FLIP computation or frame stitching.
                 let msg = e.to_string();
-                assert!(
-                    msg.contains("ffmpeg"),
-                    "expected ffmpeg error, got: {msg}"
-                );
+                assert!(msg.contains("ffmpeg"), "expected ffmpeg error, got: {msg}");
             }
         }
         // Image output (which doesn't need ffmpeg) must always be present.
@@ -971,7 +984,8 @@ mod tests {
             .collect();
 
         assert!(
-            !args.windows(2)
+            !args
+                .windows(2)
                 .any(|window| window == ["-vf", EVEN_DIMENSIONS_PAD_FILTER]),
             "expected ffmpeg args to omit even-dimension padding filter for yuv444p, got: {args:?}"
         );

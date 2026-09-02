@@ -287,8 +287,7 @@ duration 33333us\n";
 
     #[test]
     fn test_load_image_paths_from_files_non_existent() {
-        let result =
-            load_image_paths_from_files(&["/nonexistent/path/img.png".to_string()], 30.0);
+        let result = load_image_paths_from_files(&["/nonexistent/path/img.png".to_string()], 30.0);
         assert!(result.is_err());
     }
 

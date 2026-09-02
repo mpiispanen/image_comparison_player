@@ -239,6 +239,49 @@ type FlipDiffSender = Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>;
 #[allow(dead_code)]
 type FlipDiffReceiver = Arc<Mutex<Receiver<(usize, usize, Vec<u8>, wgpu::Extent3d)>>>;
 
+fn update_displayed_texture_pair<T>(
+    left_slot: &mut Option<Arc<T>>,
+    right_slot: &mut Option<Arc<T>>,
+    new_left: Option<Arc<T>>,
+    new_right: Option<Arc<T>>,
+    single_image_mode: bool,
+) -> bool {
+    let Some(new_left) = new_left else {
+        return false;
+    };
+
+    if single_image_mode {
+        if left_slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &new_left))
+        {
+            return false;
+        }
+
+        *left_slot = Some(new_left);
+        return true;
+    }
+
+    let Some(new_right) = new_right else {
+        return false;
+    };
+
+    let left_changed = !left_slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, &new_left));
+    let right_changed = !right_slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, &new_right));
+
+    if !left_changed && !right_changed {
+        return false;
+    }
+
+    *left_slot = Some(new_left);
+    *right_slot = Some(new_right);
+    true
+}
+
 pub struct DiffImageInfo {
     pub process_time: Duration,
 }
@@ -489,33 +532,22 @@ impl Player {
         // Process other textures in the background
         self.process_loaded_textures();
 
-        let mut textures_updated = false;
+        let new_left = self.get_texture(current_left, true);
+        let new_right = if self.single_image_mode {
+            None
+        } else {
+            self.get_texture(current_right, false)
+        };
 
-        // Update left texture
-        if let Some(new_left) = self.get_texture(current_left, true) {
-            let mut left_texture = self.left_texture.lock();
-            if left_texture
-                .as_ref()
-                .is_none_or(|t| !Arc::ptr_eq(t, &new_left))
-            {
-                *left_texture = Some(new_left);
-                textures_updated = true;
-            }
-        }
-
-        // Update right texture
-        if let Some(new_right) = self.get_texture(current_right, false) {
-            let mut right_texture = self.right_texture.lock();
-            if right_texture
-                .as_ref()
-                .is_none_or(|t| !Arc::ptr_eq(t, &new_right))
-            {
-                *right_texture = Some(new_right);
-                textures_updated = true;
-            }
-        }
-
-        textures_updated
+        let mut left_texture = self.left_texture.lock();
+        let mut right_texture = self.right_texture.lock();
+        update_displayed_texture_pair(
+            &mut left_texture,
+            &mut right_texture,
+            new_left,
+            new_right,
+            self.single_image_mode,
+        )
     }
 
     pub fn ensure_texture_loaded(&self, index: usize, is_left: bool) {
@@ -1659,6 +1691,82 @@ fn test_rgb_to_rgba_preallocates_expected_capacity() {
     let rgba = rgb_to_rgba(&rgb);
     assert_eq!(rgba.capacity(), pixel_count * 4);
 }
+
+    #[test]
+    fn test_update_displayed_texture_pair_waits_for_both_sides() {
+        let old_left = Arc::new(1u8);
+        let old_right = Arc::new(2u8);
+        let new_left = Arc::new(3u8);
+
+        let mut left_slot = Some(old_left.clone());
+        let mut right_slot = Some(old_right.clone());
+
+        let updated = update_displayed_texture_pair(
+            &mut left_slot,
+            &mut right_slot,
+            Some(new_left),
+            None,
+            false,
+        );
+
+        assert!(!updated);
+        assert!(left_slot
+            .as_ref()
+            .is_some_and(|texture| Arc::ptr_eq(texture, &old_left)));
+        assert!(right_slot
+            .as_ref()
+            .is_some_and(|texture| Arc::ptr_eq(texture, &old_right)));
+    }
+
+    #[test]
+    fn test_update_displayed_texture_pair_switches_both_sides_together() {
+        let old_left = Arc::new(1u8);
+        let old_right = Arc::new(2u8);
+        let new_left = Arc::new(3u8);
+        let new_right = Arc::new(4u8);
+
+        let mut left_slot = Some(old_left);
+        let mut right_slot = Some(old_right);
+
+        let updated = update_displayed_texture_pair(
+            &mut left_slot,
+            &mut right_slot,
+            Some(new_left.clone()),
+            Some(new_right.clone()),
+            false,
+        );
+
+        assert!(updated);
+        assert!(left_slot
+            .as_ref()
+            .is_some_and(|texture| Arc::ptr_eq(texture, &new_left)));
+        assert!(right_slot
+            .as_ref()
+            .is_some_and(|texture| Arc::ptr_eq(texture, &new_right)));
+    }
+
+    #[test]
+    fn test_update_displayed_texture_pair_updates_single_image_mode_with_left_only() {
+        let old_left = Arc::new(1u8);
+        let new_left = Arc::new(2u8);
+
+        let mut left_slot = Some(old_left);
+        let mut right_slot = None;
+
+        let updated = update_displayed_texture_pair(
+            &mut left_slot,
+            &mut right_slot,
+            Some(new_left.clone()),
+            None,
+            true,
+        );
+
+        assert!(updated);
+        assert!(left_slot
+            .as_ref()
+            .is_some_and(|texture| Arc::ptr_eq(texture, &new_left)));
+        assert!(right_slot.is_none());
+    }
 
     // ── get_current_index ──────────────────────────────────────────────────
 
