@@ -238,6 +238,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .action(ArgAction::SetTrue)
                 .help("Reuse precomputed diff PNGs from --batch-diff-output instead of generating new diffs"),
         )
+        .arg(
+            Arg::new("wait_for_flip_diff")
+                .long("wait-for-flip-diff")
+                .action(ArgAction::SetTrue)
+                .help("When FLIP mode is active, wait for each FLIP diff image before advancing frames"),
+        )
         .get_matches();
 
     let test_mode = matches.get_flag("test_mode");
@@ -345,6 +351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .clone();
     let use_existing_diffs = matches.get_flag("use_existing_diffs");
+    let wait_for_flip_diff = matches.get_flag("wait_for_flip_diff");
 
     if batch_mode {
         let left_images = resolve_batch_images(dir1.as_deref(), images1.as_deref(), fps)?;
@@ -412,6 +419,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diff_preload_behind,
         fps,
         peek_zoom_factor,
+        wait_for_flip_diff,
     };
 
     let mut app_state = pollster::block_on(app::AppState::new(&window, app_config))?;

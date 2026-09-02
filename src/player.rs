@@ -103,6 +103,16 @@ fn latest_current_frames_from_switch_times(
     (current_left, current_right)
 }
 
+fn should_wait_for_flip_diff_readiness(
+    wait_for_flip_diff: bool,
+    show_flip_diff: bool,
+    single_image_mode: bool,
+    current_frames: (usize, usize),
+    target_frames: (usize, usize),
+) -> bool {
+    wait_for_flip_diff && show_flip_diff && !single_image_mode && current_frames != target_frames
+}
+
 fn select_flip_diff_eviction_candidate(
     keys: &[(usize, usize)],
     current_left: usize,
@@ -405,6 +415,7 @@ pub struct PlayerConfig {
     pub diff_preload_ahead: usize,
     pub diff_preload_behind: usize,
     pub single_image_mode: bool,
+    pub wait_for_flip_diff: bool,
 }
 
 type FlipDiffSender = Sender<(usize, usize, Vec<u8>, wgpu::Extent3d)>;
@@ -642,7 +653,7 @@ impl Player {
     }
 
     pub fn next_frame(&self, show_flip_diff: bool) -> bool {
-        let frame_changed = self.jump_to_next_time_point(1);
+        let frame_changed = self.jump_to_next_time_point(1, show_flip_diff);
         if frame_changed && show_flip_diff {
             let (current_left, current_right) = self.current_images();
             self.ensure_flip_diff_generated(current_left, current_right);
@@ -651,7 +662,7 @@ impl Player {
     }
 
     pub fn previous_frame(&self, show_flip_diff: bool) -> bool {
-        let frame_changed = self.jump_to_next_time_point(-1);
+        let frame_changed = self.jump_to_next_time_point(-1, show_flip_diff);
         if frame_changed && show_flip_diff {
             let (current_left, current_right) = self.current_images();
             self.ensure_flip_diff_generated(current_left, current_right);
@@ -659,17 +670,35 @@ impl Player {
         frame_changed
     }
 
-    fn jump_to_next_time_point(&self, direction: i64) -> bool {
+    fn jump_to_next_time_point(&self, direction: i64, show_flip_diff: bool) -> bool {
         let current_time = self.current_time.load(Ordering::Relaxed);
         let new_time = self.find_next_time_point(current_time, direction);
 
-        if new_time != current_time {
-            self.current_time.store(new_time, Ordering::Relaxed);
-            self.update_current_frames();
-            true
-        } else {
-            false
+        if new_time == current_time {
+            return false;
         }
+
+        if self.should_wait_for_flip_diff(show_flip_diff) {
+            let current_frames = self.current_images();
+            let target_frames = (
+                self.get_current_index(&self.config.image_data1, new_time),
+                self.get_current_index(&self.config.image_data2, new_time),
+            );
+            if should_wait_for_flip_diff_readiness(
+                self.config.wait_for_flip_diff,
+                show_flip_diff,
+                self.single_image_mode,
+                current_frames,
+                target_frames,
+            ) && !self.ensure_flip_diff_ready(target_frames.0, target_frames.1)
+            {
+                return false;
+            }
+        }
+
+        self.current_time.store(new_time, Ordering::Relaxed);
+        self.update_current_frames();
+        true
     }
 
     fn find_next_time_point(&self, current_time: u64, direction: i64) -> u64 {
@@ -1062,7 +1091,7 @@ impl Player {
             {
                 debug!("Frame displayed after {:?} delay", elapsed);
                 let scaled_delta = delta.mul_f32(self.playback_speed);
-                let frame_changed = self.advance_frame(scaled_delta.as_micros());
+                let frame_changed = self.advance_frame(scaled_delta.as_micros(), show_flip_diff);
                 *self.current_frame_set_time.lock() = now;
 
                 if frame_changed && show_flip_diff {
@@ -1099,12 +1128,32 @@ impl Player {
         self.playback_speed = (self.playback_speed + 0.25).min(4.0);
     }
 
-    fn advance_frame(&self, delta_micros: u128) -> bool {
+    fn advance_frame(&self, delta_micros: u128, show_flip_diff: bool) -> bool {
         let current_time = self.current_time.load(Ordering::Relaxed);
         let new_time = current_time.saturating_add(delta_micros as u64);
         let total_duration = self.total_duration();
+        let wrapped = new_time >= total_duration;
+        let target_time = if wrapped { 0 } else { new_time };
 
-        if new_time >= total_duration {
+        if self.should_wait_for_flip_diff(show_flip_diff) {
+            let current_frames = self.current_images();
+            let target_frames = (
+                self.get_current_index(&self.config.image_data1, target_time),
+                self.get_current_index(&self.config.image_data2, target_time),
+            );
+            if should_wait_for_flip_diff_readiness(
+                self.config.wait_for_flip_diff,
+                show_flip_diff,
+                self.single_image_mode,
+                current_frames,
+                target_frames,
+            ) && !self.ensure_flip_diff_ready(target_frames.0, target_frames.1)
+            {
+                return false;
+            }
+        }
+
+        if wrapped {
             self.current_time.store(0, Ordering::Relaxed);
             self.update_current_frames();
             true
@@ -1113,6 +1162,30 @@ impl Player {
             self.update_current_frames();
             self.frame_changed.swap(false, Ordering::Relaxed)
         }
+    }
+
+    fn should_wait_for_flip_diff(&self, show_flip_diff: bool) -> bool {
+        self.config.wait_for_flip_diff && show_flip_diff && !self.single_image_mode
+    }
+
+    fn flip_diff_ready(&self, left_index: usize, right_index: usize) -> bool {
+        self.flip_diff_cache
+            .read()
+            .get(&(left_index, right_index))
+            .and_then(|entry| entry.lock().as_ref().cloned())
+            .is_some()
+    }
+
+    fn ensure_flip_diff_ready(&self, left_index: usize, right_index: usize) -> bool {
+        if self.flip_diff_ready(left_index, right_index) {
+            return true;
+        }
+
+        self.ensure_texture_loaded(left_index, true);
+        self.ensure_texture_loaded(right_index, false);
+        self.ensure_flip_diff_generated(left_index, right_index);
+        self.process_flip_diff_queue();
+        false
     }
 
     pub fn total_duration(&self) -> u64 {
@@ -2030,6 +2103,39 @@ mod tests {
         let data2 = make_image_data(&[50, 50]);
         let times = Player::compute_sorted_time_points(&data1, &data2);
         assert_eq!(times, vec![0, 50, 100]);
+    }
+
+    #[test]
+    fn test_should_wait_for_flip_diff_readiness_when_target_changes() {
+        assert!(should_wait_for_flip_diff_readiness(
+            true,
+            true,
+            false,
+            (1, 1),
+            (2, 2)
+        ));
+    }
+
+    #[test]
+    fn test_should_not_wait_for_flip_diff_readiness_when_target_unchanged() {
+        assert!(!should_wait_for_flip_diff_readiness(
+            true,
+            true,
+            false,
+            (2, 2),
+            (2, 2)
+        ));
+    }
+
+    #[test]
+    fn test_should_not_wait_for_flip_diff_readiness_when_mode_disabled() {
+        assert!(!should_wait_for_flip_diff_readiness(
+            false,
+            true,
+            false,
+            (1, 1),
+            (2, 2)
+        ));
     }
 
     // ── rgba_to_rgb / rgb_to_rgba ───────────────────────────────────────────
