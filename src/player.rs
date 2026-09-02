@@ -1006,9 +1006,7 @@ impl Player {
                 && self.get_texture(right_index, false).is_some()
             {
                 let queue = self.flip_diff_request_queue.lock();
-                if !queue.contains(&(left_index, right_index)) {
-                    queue.push(left_index, right_index);
-                }
+                queue.push(left_index, right_index);
             }
         }
     }
